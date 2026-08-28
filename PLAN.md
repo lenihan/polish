@@ -18,6 +18,8 @@ limitations (not bugs to fix).
 - [x] `resources/app.rc` (`RT_MANIFEST` embed; icon deferred to Phase 3 tray work)
 - [x] `src/main.cpp` skeleton: `WinMain`, single-instance mutex, DPI-awareness verification, message loop
 - [x] `docs/LIMITATIONS.md` stub
+- [x] `CMakePresets.json` — short, memorable CLI (`cmake --preset default`,
+      `cmake --build --preset default` / `debug`, `ctest --preset default`)
 
 Verified end-to-end: `cmake -B build -S .` + `cmake --build build --config Release` succeeds;
 built exe launches, is confirmed `PROCESS_PER_MONITOR_DPI_AWARE` via `GetProcessDpiAwareness`,

@@ -32,12 +32,16 @@ installs or upgrades what's missing — safe to re-run any time.
 
 ## Build
 
+Uses [CMake presets](CMakePresets.json), so the CLI stays short:
+
 ```powershell
-cmake -B build -S .
-cmake --build build --config Release
+cmake --preset default
+cmake --build --preset default
 ```
 
-Use `--config Debug` for a debug build instead.
+`cmake --build --preset debug` builds a debug configuration instead
+(reconfigure isn't needed again — `default` is a multi-config Visual
+Studio preset covering both).
 
 ## Run
 
@@ -52,8 +56,11 @@ hotkey: **Win+Alt+T**.
 ## Test
 
 ```powershell
-ctest --test-dir build -C Release
+ctest --preset default
 ```
+
+(Reports "No tests were found" until Phase 1 adds the `tests/` target —
+that's expected, not a failure.)
 
 ## Project layout
 
