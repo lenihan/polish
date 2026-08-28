@@ -12,12 +12,18 @@ limitations (not bugs to fix).
 
 - [x] `README.md`
 - [x] `PLAN.md` (this file)
-- [ ] `setup.ps1` bootstrap script (detect/install VS2022 + C++ workload, CMake via winget)
-- [ ] `CMakeLists.txt` (C++23, `WIN32_EXECUTABLE`, `UNICODE`, `_WIN32_WINNT=0x0A00`)
-- [ ] `app.manifest` (Per-Monitor-V2 DPI awareness, `asInvoker`, Win10/11 `supportedOS` GUIDs)
-- [ ] `resources/app.rc` (icon, `RT_MANIFEST` embed)
-- [ ] `src/main.cpp` skeleton: `WinMain`, single-instance mutex, DPI-awareness verification, message loop
-- [ ] `docs/LIMITATIONS.md` stub
+- [x] `setup.ps1` bootstrap script (detect/install VS2022 + C++ workload, CMake via winget)
+- [x] `CMakeLists.txt` (C++23, `WIN32_EXECUTABLE`, `UNICODE`, `_WIN32_WINNT=0x0A00`)
+- [x] `app.manifest` (Per-Monitor-V2 DPI awareness, `asInvoker`, Win10/11 `supportedOS` GUIDs) — note: the `dpiAwareness` element must use the `http://schemas.microsoft.com/SMI/2016/WindowsSettings` namespace, not 2017 (that's for `longPathAware`); using 2017 fails activation silently-ish (app still launches, but falls back to DPI-unaware — verify with `GetProcessDpiAwareness`, not just "did it start")
+- [x] `resources/app.rc` (`RT_MANIFEST` embed; icon deferred to Phase 3 tray work)
+- [x] `src/main.cpp` skeleton: `WinMain`, single-instance mutex, DPI-awareness verification, message loop
+- [x] `docs/LIMITATIONS.md` stub
+
+Verified end-to-end: `cmake -B build -S .` + `cmake --build build --config Release` succeeds;
+built exe launches, is confirmed `PROCESS_PER_MONITOR_DPI_AWARE` via `GetProcessDpiAwareness`,
+enforces single-instance (second launch exits immediately), and shuts down cleanly.
+One MSVC-specific fix required: the linker's auto-generated manifest (resource id 1)
+collides with our `app.rc`-embedded one — needs `/MANIFEST:NO` (already in `CMakeLists.txt`).
 
 ## Phase 1 — Foreground-window proof of concept (no tray yet)
 
