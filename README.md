@@ -32,16 +32,22 @@ installs or upgrades what's missing — safe to re-run any time.
 
 ## Build
 
-Uses [CMake presets](CMakePresets.json), so the CLI stays short:
+Uses [CMake presets](CMakePresets.json), so the CLI stays short. Configure
+once — the `default` configure preset generates a multi-config Visual
+Studio build tree, so both Debug and Release build from it without
+reconfiguring in between:
 
 ```powershell
 cmake --preset default
-cmake --build --preset default
 ```
 
-`cmake --build --preset debug` builds a debug configuration instead
-(reconfigure isn't needed again — `default` is a multi-config Visual
-Studio preset covering both).
+| Configuration | Build | Run | Test |
+| --- | --- | --- | --- |
+| Release | `cmake --build --preset default` | `.\build\Release\polish.exe` | `ctest --preset default` |
+| Debug | `cmake --build --preset debug` | `.\build\Debug\polish.exe` | `ctest --preset debug` |
+
+Use Debug while developing (assertions, easier debugging in Visual
+Studio/WinDbg); use Release to check real-world behavior and performance.
 
 ## Run
 
@@ -60,7 +66,8 @@ ctest --preset default
 ```
 
 (Reports "No tests were found" until Phase 1 adds the `tests/` target —
-that's expected, not a failure.)
+that's expected, not a failure.) Swap in `ctest --preset debug` to run
+against the Debug build instead.
 
 ## Project layout
 
