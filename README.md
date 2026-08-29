@@ -1,12 +1,23 @@
 # Polish
 
-A high-performance native Windows 11 utility. Its first feature adds a
-"toggle size" button to the title bar of windows across the system —
-clicking it snaps a window back and forth between its current size/position
-and whatever it was immediately before (e.g. toggle between a half-screen
-snap and a quarter-screen snap). A global hotkey provides the same toggle
-for windows where a visible button can't be placed (see
-[Known limitations](docs/LIMITATIONS.md)).
+A high-performance native Windows 11 utility that fixes a long-standing
+gap in Windows' own window snapping.
+
+**Windows' native Snap (drag-to-edge, Win+Arrow, Snap Layouts) doesn't
+update a window's "restore" position.** Snap a window to quarter-size,
+click its native Maximize button, then click Restore, and Windows puts
+it back wherever it was floating *before* the snap — not at the quarter
+size you just set up. Polish fixes this in the background: whenever a
+window settles into a new position (including right after Polish starts,
+for a window that was already snapped before it launched), Polish syncs
+that position into the window's restore target, so the native Maximize
+and Restore buttons round-trip through your most recent snap correctly.
+No new gesture, click, or hotkey to learn — it just fixes what's already
+there.
+
+The app runs from the system tray — right-click the tray icon for an
+Exit option. (Windows 11 hides newly-added tray icons in the "^" overflow
+area by default; look there if you don't see it in the main tray strip.)
 
 See [`PLAN.md`](PLAN.md) for build progress.
 
@@ -56,8 +67,10 @@ Studio/WinDbg); use Release to check real-world behavior and performance.
 ```
 
 The app runs tray-resident (no visible window) once started. Look for its
-icon in the system tray; right-click for options. Default global toggle
-hotkey: **Win+Alt+T**.
+icon in the system tray (including the "^" overflow area); right-click
+for an Exit option. Restore-position sync then runs automatically in the
+background for every window you focus — check `%TEMP%\polish.log` if you
+want to see it working.
 
 ## Test
 
@@ -71,7 +84,6 @@ against the Debug build instead.
 
 ## Project layout
 
-See the `src/` tree for module boundaries (window tracking, overlay
-rendering, hotkey handling, tray/settings) — each directory groups one
-concern. `docs/LIMITATIONS.md` documents known, permanent gaps (e.g.
-custom-drawn title bars, elevated windows).
+See the `src/` tree for module boundaries (window tracking, tray) — each
+directory groups one concern. `docs/LIMITATIONS.md` documents known,
+permanent gaps (e.g. elevated windows).

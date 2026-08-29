@@ -10,12 +10,17 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_executable(polish WIN32
-    src/main.cpp
-    resources/app.rc
+# Everything except main.cpp lives in this static library, so the same
+# code can be linked into both the polish.exe app and the test binary
+# (main.cpp's WinMain doesn't belong in a test binary).
+add_library(polish_core STATIC
+    src/windowtracking/RectUtils.cpp
+    src/tray/TrayIcon.cpp
 )
 
-target_compile_definitions(polish PRIVATE
+target_include_directories(polish_core PUBLIC src)
+
+target_compile_definitions(polish_core PUBLIC
     UNICODE
     _UNICODE
     _WIN32_WINNT=0x0A00
@@ -23,14 +28,23 @@ target_compile_definitions(polish PRIVATE
     NOMINMAX
 )
 
-target_link_libraries(polish PRIVATE
+target_link_libraries(polish_core PUBLIC
     user32
-    gdi32
-    gdiplus
     dwmapi
     shell32
     comctl32
 )
+
+if(MSVC)
+    target_compile_options(polish_core PRIVATE /W4 /permissive-)
+endif()
+
+add_executable(polish WIN32
+    src/main.cpp
+    resources/app.rc
+)
+
+target_link_libraries(polish PRIVATE polish_core)
 
 if(MSVC)
     target_compile_options(polish PRIVATE /W4 /permissive-)

@@ -22,6 +22,23 @@
     </application>
   </compatibility>
 
+  <!-- Without this, comctl32 common controls (e.g. the tooltip control
+       used for the Shift-hover indicator) load against an older/classic
+       ABI whose TOOLINFO struct size doesn't match what our SDK headers
+       expect, and calls like TTM_ADDTOOL silently fail (return 0). -->
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+          type="win32"
+          name="Microsoft.Windows.Common-Controls"
+          version="6.0.0.0"
+          processorArchitecture="*"
+          publicKeyToken="6595b64144ccf1df"
+          language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+
   <asmv3:application xmlns:asmv3="urn:schemas-microsoft-com:asm.v3">
     <asmv3:windowsSettings xmlns:ms_windowsSettings="http://schemas.microsoft.com/SMI/2016/WindowsSettings">
       <ms_windowsSettings:dpiAwareness>PerMonitorV2</ms_windowsSettings:dpiAwareness>
