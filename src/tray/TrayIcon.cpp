@@ -2,6 +2,8 @@
 
 #include <shellapi.h>
 
+#include "resource.h"
+
 namespace polish {
 
 namespace {
@@ -30,8 +32,8 @@ void TrayIcon::AddIcon() {
     data.uID = kIconId;
     data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     data.uCallbackMessage = kCallbackMessage;
-    data.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wcscpy_s(data.szTip, L"Polish (running) - Shift+click a maximize button to toggle size");
+    data.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_POLISH_TRAY));
+    wcscpy_s(data.szTip, L"Polish (running) - keeps Snap and Maximize/Restore in sync");
 
     iconAdded_ = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
 }

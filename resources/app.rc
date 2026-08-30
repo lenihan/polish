@@ -1,7 +1,12 @@
 #include <windows.h>
 
+#include "resource.h"
+
 // Embeds app.manifest as the executable's manifest resource, declaring
 // Per-Monitor-V2 DPI awareness. See app.manifest for details — without
 // this, all screen-coordinate math for other processes' windows gets
 // silently scaled through DPI virtualization.
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "../app.manifest"
+
+// The tray icon (TrayIcon::AddIcon loads this by ID via LoadIconW).
+IDI_POLISH_TRAY ICON "polish.ico"

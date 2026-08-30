@@ -18,7 +18,7 @@ add_library(polish_core STATIC
     src/tray/TrayIcon.cpp
 )
 
-target_include_directories(polish_core PUBLIC src)
+target_include_directories(polish_core PUBLIC src resources)
 
 target_compile_definitions(polish_core PUBLIC
     UNICODE
