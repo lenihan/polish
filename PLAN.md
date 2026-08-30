@@ -25,8 +25,9 @@ learned along the way.
       window is first tracked, so a window that was already snapped
       before Polish started still gets corrected without needing to be
       moved again).
-- [x] Tray icon (`src/tray/TrayIcon.*`) with an Exit option; stock system
-      icon for now (see Next).
+- [x] Tray icon (`src/tray/TrayIcon.*`, `resources/polish.ico`): a
+      generated filled 4-point sparkle glyph, replacing the old stock
+      `IDI_APPLICATION` icon. User-confirmed it looks right (2026-08-30).
 - [x] Single-instance guard, Per-Monitor-V2 DPI awareness, CMake presets,
       unit tests for `RectUtils` (`RectsApproximatelyEqual`).
 - [x] **User-confirmed working in real day-to-day use (2026-08-29)** —
@@ -35,19 +36,82 @@ learned along the way.
 
 ## Next
 
-1. **Real tray icon** — currently a stock system icon; needs a custom one
-   (`resources/app.rc` already has the `RT_MANIFEST` embed pattern to
-   extend for an `RT_ICON`/`RT_GROUP_ICON`).
-2. Full multi-window tracking (sync every window, not just the
-   foreground one) — `WinEventHookManager`, a tracked-window set seeded
-   via `EnumWindows`, and a periodic reconciliation sweep.
-3. Autostart (`HKCU...\Run`, `StartupApproved` awareness).
-4. Settings (`%LOCALAPPDATA%` config: global enable/disable, an exclusion
-   list by process name).
-5. "Restart as Administrator" tray item, so elevated windows (currently
-   invisible to Polish — see limitations #1) can be covered too.
-6. Full `docs/LIMITATIONS.md` pass and manual test matrix once the above
-   land.
+### 1. Alt+Tab that skips minimized windows (in progress)
+
+**Not achievable by filtering Windows' own Alt+Tab** — the Win11
+immersive switcher has no documented API to control its contents. The
+one per-window lever, `WS_EX_TOOLWINDOW`, pulls a window out of Alt+Tab
+*and* the taskbar together, which isn't what's wanted for a window
+that's just minimized and should still be reachable from the taskbar.
+
+So this means **replacing** Alt+Tab, the same pattern real third-party
+switcher tools use, and architecturally the same *shape* as the shelved
+radial-menu work (a `WH_KEYBOARD_LL` hook plus a custom rendering
+surface) — though the rendering itself turns out to be a materially
+bigger lift once live thumbnails are in scope (see below).
+
+**Design decisions, resolved 2026-08-30:**
+
+- **Trigger**: `WH_KEYBOARD_LL`, watch for Tab while Alt is down, swallow
+  it so Windows' own switcher never appears. Repeated Tab presses while
+  Alt stays held cycle the highlight (mirroring native behavior);
+  Shift+Tab cycles backward; releasing Alt commits the highlighted window
+  via `SetForegroundWindow`; Escape cancels. If the filtered candidate
+  list ends up empty (nothing non-minimized to switch to), let the
+  keypress fall through to native Alt+Tab instead of swallowing it into a
+  dead keystroke.
+- **Candidate list**: the same filter `IsCandidateWindow` already uses in
+  `main.cpp`, plus excluding anything `IsIconic`.
+- **Ordering: true most-recently-used**, matching native Alt+Tab (first
+  Tab press jumps to your previous window). Built by extending the
+  existing `EVENT_SYSTEM_FOREGROUND` handling to maintain an ordered MRU
+  list (move-to-front on every focus change, pruned on
+  `EVENT_OBJECT_DESTROY`) — this is a natural extension of tracking
+  that's already in place, not new hook surface.
+- **Monitor placement**: the monitor containing the current foreground
+  window (`MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST)`),
+  not the mouse cursor or always-primary — predictable for a
+  keyboard-driven gesture regardless of where the mouse happens to be.
+- **Rendering: live thumbnails**, matching native Alt+Tab's visual style,
+  via `DwmRegisterThumbnail`/`DwmUpdateThumbnailProperties`/
+  `DwmUnregisterThumbnail`. This is **not** a reuse of the existing DIB +
+  `Gdiplus::Bitmap` + premultiply + `UpdateLayeredWindow` pipeline from
+  the radial menu — that pipeline still applies to the switcher's own
+  chrome (background, selection highlight, title/icon labels), but each
+  live window preview needs its own DWM thumbnail registration, sized
+  into a sub-rect of the switcher window, with all of them unregistered
+  when the switcher closes. This is genuinely the biggest single feature
+  built in this app so far — a new API surface (DWM thumbnails) on top of
+  a new hook and a new state machine, not just new wiring of existing
+  pieces. Worth a dedicated implementation plan before writing code,
+  given the scope.
+- **Restore-position sync interaction**: resolves itself —
+  `SetForegroundWindow` on the selected window fires
+  `EVENT_SYSTEM_FOREGROUND` exactly like any other focus change, already
+  handled by `OnForegroundChanged`/`SyncRestorePlacementNow`, no special
+  casing needed. The switcher popup itself should be `WS_EX_TOOLWINDOW`
+  (filtered out by `IsCandidateWindow`) so it's never mistaken for a
+  trackable window; even if it briefly steals foreground, that's now
+  harmless (no per-window history left to corrupt, unlike the original
+  overlay-button bug this project already hit once with a similar
+  non-activating popup).
+
+### 2. Other backlog items
+
+- Taskbar: Make hover show windows in actual position on screen so you can identify
+  a window spacially. Minimized windows would be a list without any thumbnail
+- Show fullscreen animation when you copy to clipboard
+- Desktop replacement that is more useful: calendar, weather...TBD  
+- Full multi-window tracking (sync every window, not just the
+  foreground one) — `WinEventHookManager`, a tracked-window set seeded
+  via `EnumWindows`, and a periodic reconciliation sweep.
+- Autostart (`HKCU...\Run`, `StartupApproved` awareness).
+- Settings (`%LOCALAPPDATA%` config: global enable/disable, an exclusion
+  list by process name).
+- "Restart as Administrator" tray item, so elevated windows (currently
+  invisible to Polish — see limitations #1) can be covered too.
+- Full `docs/LIMITATIONS.md` pass and manual test matrix once the above
+  land.
 
 ## History (condensed)
 
