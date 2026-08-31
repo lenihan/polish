@@ -280,11 +280,78 @@ dedicated plan drafted for this feature (real files, branch `alt_tab`):
 - [x] **UI tweak: make it obvious you're in Polish's Alt+Tab state, not
   just relying on relative brightness.** Dim alpha bumped from 140 to
   190/255 (noticeably darker). Added `AltTabHighlightBorder`
-  (`src/hook/AltTabHighlightBorder.h/.cpp`) — a thin accent-blue frame
-  (`SetWindowRgn`-punched so it never covers the target's own content,
-  DPI-scaled thickness) drawn just outside the highlighted window's rect,
-  as an active "this one" signal rather than only "the undimmed one."
-  Rebuilt clean, 9/9 tests pass; not yet re-verified live.
+  (`src/hook/AltTabHighlightBorder.h/.cpp`) — an accent-blue glow drawn
+  just outside the highlighted window's rect, as an active "this one"
+  signal rather than only "the undimmed one." Rebuilt clean, 9/9 tests
+  pass; not yet re-verified live.
+  - [x] **Follow-up, user-requested redesign**: rounded rect (not sharp
+    corners), ~1 inch thick, solid at the outer edge fading to fully
+    transparent toward the inner edge (not a flat single-alpha frame).
+    A gradient needs real per-pixel alpha, which
+    `SetLayeredWindowAttributes`'s single constant alpha can't do, so
+    this rewrites the class to reuse this project's own established
+    rendering pipeline from its history (see the "Real bugs found and
+    fixed" section further down): a top-down `CreateDIBSection`, a
+    `Gdiplus::Bitmap` wrapping that DIB's memory directly (`Graphics(HDC)`
+    does not reliably preserve alpha — confirmed the hard way once
+    already in this app), a `Gdiplus::PathGradientBrush` (rounded-rect
+    path, opaque surround color, transparent center color,
+    `SetFocusScales` tuned so the fade completes within roughly the
+    border's own thickness rather than fading all the way to the shape's
+    geometric center), manual premultiply, then `UpdateLayeredWindow`
+    with `ULW_ALPHA`. `SetWindowRgn`-based hard-edged clipping is gone
+    entirely — per-pixel alpha reaching zero handles "never cover the
+    target's content" more smoothly than a hard region cut ever could.
+    `gdi32`/`gdiplus` added back to `polish_core`'s link libraries.
+    One new build snag, not previously hit in this app: GDI+ headers
+    need `IStream` from `<objidl.h>`, which the project-wide
+    `WIN32_LEAN_AND_MEAN` define otherwise excludes from `<windows.h>` —
+    fixed with an explicit include. Rebuilt clean, 9/9 tests pass.
+  - [x] **Second follow-up**: positioned directly on the target's own
+    rect (not inflated outward into the desktop margin around it) — the
+    fade now goes inward into the window's own edge instead of projecting
+    outside it, per explicit request. Simplified `ShowAroundTarget`
+    accordingly (no more `InflateRect`). Rebuilt clean, 9/9 tests pass;
+    not yet re-verified live.
+  - [x] **Third follow-up**: thickness reduced to ~1/3 (32px @96 DPI,
+    down from 96px). Also fixed a real, human-reported glitch while
+    cycling: the glow visibly moved to the new target's origin *at the
+    old target's size*, then snapped to the correct size a moment later.
+    Root cause: position/size were set via a separate `SetWindowPos`
+    call before the content-repainting `UpdateLayeredWindow` call, and
+    `UpdateLayeredWindow` on a layered window stretches/clips whatever
+    bitmap it last painted into the *current* window bounds until it's
+    called again — so there was a real, visible gap where the window
+    frame had already moved/resized but the painted content hadn't
+    caught up yet. Fixed by moving position+size into the
+    `UpdateLayeredWindow` call itself (its `pptDst`/`psize` params) so
+    the move, resize, and repaint all happen as one atomic OS call;
+    `SetWindowPos` now only handles topmost+visible
+    (`SWP_NOMOVE | SWP_NOSIZE`). Rebuilt clean, 9/9 tests pass.
+  - [x] **Fourth follow-up**: corner radius matched to Windows 11's own
+    default window-corner rounding (8px @96 DPI, what VS Code and most
+    native apps use — down from an arbitrary, more obviously-rounded
+    32px). Fade band widened to 128px (4x), but reshaped from a linear
+    gradient to a fast-falloff multi-stop curve
+    (`PathGradientBrush::SetInterpolationColors`, 5 stops: solid at the
+    edge, already mostly gone by 10% of the way in, fully transparent by
+    45%, flat the rest of the way) — the extra width gives the falloff
+    room to look soft and organic rather than like a visible band with
+    edges of its own, without actually staying visible any wider than
+    before. Rebuilt clean, 9/9 tests pass; not yet re-verified live.
+- [x] **Escape hatch: Ctrl+Alt+Tab bypasses Polish entirely, native
+  Windows Alt+Tab handles it instead.** Requested explicitly as a backup
+  in case Polish's own switcher misbehaves. Tracked via a new
+  `ctrlHeld_` (same observed-from-hook-events pattern as `shiftHeld_`)
+  and `nativeHandoffActive_`, which stays true for the rest of the
+  current Alt-hold once triggered so every subsequent Tab is *also* left
+  untouched — otherwise releasing Ctrl mid-hold could make Polish start
+  intercepting midway through native's own switcher session. Alt-up
+  handling restructured to unconditionally reset `nativeHandoffActive_`
+  regardless of which path (a real Polish session, a native handoff, or
+  neither) the Alt-hold took. Rebuilt clean, 9/9 tests pass; not yet
+  re-verified live. Not yet documented in README.md — holding off until
+  the feature as a whole is done, not just this piece.
 
 **Superseded M3–M6 plan (DWM-thumbnail popup), kept for reference, not being built:**
 M3 — `AltTabSwitcherWindow` placeholder-chrome skeleton; M4 — real DWM

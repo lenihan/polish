@@ -16,6 +16,7 @@ bool IsDown(WPARAM wParam) { return wParam == WM_KEYDOWN || wParam == WM_SYSKEYD
 bool IsUp(WPARAM wParam) { return wParam == WM_KEYUP || wParam == WM_SYSKEYUP; }
 bool IsShiftKey(DWORD vk) { return vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT; }
 bool IsAltKey(DWORD vk) { return vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU; }
+bool IsCtrlKey(DWORD vk) { return vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL; }
 
 // Windows treats a *standalone* Alt press+release (nothing else in
 // between) as "focus the menu bar" -- that's what caused the menu-flash
@@ -81,6 +82,10 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         shiftHeld_ = IsDown(wParam);
         return false;
     }
+    if (IsCtrlKey(data.vkCode)) {
+        ctrlHeld_ = IsDown(wParam);
+        return false;
+    }
 
     // Alt-held combos arrive as WM_SYSKEYDOWN/WM_SYSKEYUP, not
     // WM_KEYDOWN/WM_KEYUP -- IsDown/IsUp above already account for that.
@@ -88,7 +93,16 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
     const bool altHeld = (data.flags & LLKHF_ALTDOWN) != 0;
 
     if (data.vkCode == VK_TAB && altHeld && IsDown(wParam)) {
+        if (nativeHandoffActive_) {
+            return false;  // already handed off this Alt-hold, hands off
+        }
         if (!sessionActive_) {
+            if (ctrlHeld_) {
+                // Escape hatch: Ctrl+Alt+Tab bypasses Polish entirely for
+                // this Alt-hold. See the class comment.
+                nativeHandoffActive_ = true;
+                return false;
+            }
             // Only known place this is called synchronously inside the
             // hook -- see the class comment for why that's fine here.
             // Returning false leaves this keystroke completely
@@ -109,12 +123,18 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         return true;  // swallow the matching up, down was swallowed above
     }
 
-    if (IsAltKey(data.vkCode) && IsUp(wParam) && sessionActive_) {
-        // Deliberately NOT swallowed (return false below, after posting)
-        // -- see InjectHarmlessKeystroke's comment for why swallowing
-        // Alt-up specifically must never happen.
-        sessionActive_ = false;
-        PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::Commit), 0);
+    if (IsAltKey(data.vkCode) && IsUp(wParam)) {
+        // Unconditional reset (not gated on sessionActive_) so the next
+        // fresh Alt-hold always starts clean, regardless of which path
+        // (a real session, a native handoff, or neither) this one took.
+        nativeHandoffActive_ = false;
+        if (sessionActive_) {
+            // Deliberately NOT swallowed (return false below) -- see
+            // InjectHarmlessKeystroke's comment for why swallowing
+            // Alt-up specifically must never happen.
+            sessionActive_ = false;
+            PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::Commit), 0);
+        }
         return false;
     }
 

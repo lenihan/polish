@@ -37,6 +37,8 @@ target_link_libraries(polish_core PUBLIC
     dwmapi
     shell32
     comctl32
+    gdi32
+    gdiplus
 )
 
 if(MSVC)

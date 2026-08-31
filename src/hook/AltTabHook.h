@@ -11,6 +11,11 @@ namespace polish {
 // PLAN.md's Alt+Tab design notes). There is no documented API to filter
 // native Alt+Tab's own contents, which is why this exists at all.
 //
+// Escape hatch: holding Ctrl along with Alt+Tab (Ctrl+Alt+Tab) bypasses
+// Polish entirely for that gesture -- native Windows Alt+Tab handles it
+// instead, untouched. A deliberate backup, not just an incidental side
+// effect of some other check.
+//
 // Two things confirmed empirically before/while writing this for real
 // (see PLAN.md): Alt-held combos arrive as WM_SYSKEYDOWN/WM_SYSKEYUP,
 // not WM_KEYDOWN/WM_KEYUP; and swallowing Tab-down while leaving Alt's
@@ -101,6 +106,15 @@ private:
     // first, whenever Alt is eventually released) -- see class comment.
     bool sessionActive_ = false;
     bool shiftHeld_ = false;
+    bool ctrlHeld_ = false;
+
+    // True for the rest of the current Alt-hold once Ctrl+Alt+Tab (the
+    // deliberate escape hatch to native Alt+Tab -- see HandleKeyEvent)
+    // has handed off. While true, every subsequent Tab is also left
+    // completely untouched, so native retains full control until Alt is
+    // released -- otherwise releasing Ctrl mid-hold could make Polish
+    // start intercepting midway through native's own switcher session.
+    bool nativeHandoffActive_ = false;
 };
 
 }  // namespace polish

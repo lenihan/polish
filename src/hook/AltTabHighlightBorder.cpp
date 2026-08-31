@@ -1,5 +1,13 @@
 #include "hook/AltTabHighlightBorder.h"
 
+// GDI+ headers need IStream from <objidl.h>, which WIN32_LEAN_AND_MEAN
+// (defined project-wide) otherwise excludes from <windows.h>.
+#include <objidl.h>
+
+#include <gdiplus.h>
+
+#include <algorithm>
+
 namespace polish {
 
 namespace {
@@ -7,18 +15,24 @@ namespace {
 constexpr wchar_t kClassName[] = L"PolishAltTabHighlightBorder";
 
 // Windows accent blue -- matches resources/polish.ico's sparkle color.
-constexpr COLORREF kBorderColor = RGB(0, 120, 212);
+// Gdiplus::Color's constructor isn't constexpr, so these are plain const.
+const Gdiplus::Color kBorderColorOpaque(255, 0, 120, 212);
+const Gdiplus::Color kBorderColorTransparent(0, 0, 120, 212);
 
-LRESULT CALLBACK BorderProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (msg == WM_ERASEBKGND) {
-        RECT client;
-        GetClientRect(hwnd, &client);
-        HBRUSH brush = CreateSolidBrush(kBorderColor);
-        FillRect(reinterpret_cast<HDC>(wParam), &client, brush);
-        DeleteObject(brush);
-        return 1;
-    }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
+// GDI+ requires one-time process startup; this app is tray-resident for
+// its whole lifetime and exits the process directly, so there's no
+// meaningful moment to call GdiplusShutdown -- a function-local static
+// (constructed once, on first use) is simpler and safer than trying to
+// time a clean shutdown relative to some other object's destruction.
+void EnsureGdiplusStarted() {
+    static const struct GdiplusInit {
+        ULONG_PTR token = 0;
+        GdiplusInit() {
+            Gdiplus::GdiplusStartupInput input;
+            Gdiplus::GdiplusStartup(&token, &input, nullptr);
+        }
+    } kInit;
+    (void)kInit;
 }
 
 void EnsureClassRegistered(HINSTANCE instance) {
@@ -28,27 +42,50 @@ void EnsureClassRegistered(HINSTANCE instance) {
     }
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc);
-    wc.lpfnWndProc = BorderProc;
+    // UpdateLayeredWindow (used exclusively for this window's content --
+    // see ShowAroundTarget) bypasses WM_PAINT entirely; DefWindowProcW
+    // is all that's needed here.
+    wc.lpfnWndProc = DefWindowProcW;
     wc.hInstance = instance;
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
     registered = true;
 }
 
+// Builds directly into `path` (out-param) rather than returning by
+// value -- Gdiplus::GraphicsPath's copy constructor is protected.
+void BuildRoundedRectPath(Gdiplus::GraphicsPath& path, int width, int height, int radius) {
+    radius = std::min(radius, std::min(width, height) / 2);
+    const int d = radius * 2;
+    path.AddArc(0.0f, 0.0f, static_cast<float>(d), static_cast<float>(d), 180.0f, 90.0f);
+    path.AddArc(static_cast<float>(width - d), 0.0f, static_cast<float>(d), static_cast<float>(d), 270.0f, 90.0f);
+    path.AddArc(static_cast<float>(width - d), static_cast<float>(height - d), static_cast<float>(d),
+                static_cast<float>(d), 0.0f, 90.0f);
+    path.AddArc(0.0f, static_cast<float>(height - d), static_cast<float>(d), static_cast<float>(d), 90.0f, 90.0f);
+    path.CloseFigure();
+}
+
+// Premultiplies B/G/R by A in place -- required before UpdateLayeredWindow
+// with ULW_ALPHA; GDI+ does not do this for us when drawing into an
+// external buffer directly (see the class comment for why that's the
+// only alpha-correct way to draw into it at all).
+void PremultiplyAlpha(BYTE* pixels, int pixelCount) {
+    for (int i = 0; i < pixelCount; ++i) {
+        BYTE* p = pixels + i * 4;
+        const BYTE a = p[3];
+        p[0] = static_cast<BYTE>(p[0] * a / 255);
+        p[1] = static_cast<BYTE>(p[1] * a / 255);
+        p[2] = static_cast<BYTE>(p[2] * a / 255);
+    }
+}
+
 }  // namespace
 
 AltTabHighlightBorder::AltTabHighlightBorder(HINSTANCE instance) {
+    EnsureGdiplusStarted();
     EnsureClassRegistered(instance);
-    // WS_EX_TOPMOST here (unlike AltTabDimOverlay's deliberate avoidance
-    // of it) is a reasonable simplification: this is a thin decorative
-    // frame sitting just outside the target's own rect, not a large
-    // rect that could plausibly cover another window's real content the
-    // way a full-window dim overlay could.
     window_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
                                kClassName, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
-    if (window_ != nullptr) {
-        SetLayeredWindowAttributes(window_, 0, 255, LWA_ALPHA);
-    }
 }
 
 AltTabHighlightBorder::~AltTabHighlightBorder() {
@@ -67,25 +104,111 @@ void AltTabHighlightBorder::ShowAroundTarget(HWND target) {
     }
 
     const UINT dpi = GetDpiForWindow(target);
-    const int thickness = MulDiv(6, static_cast<int>(dpi), 96);
+    // The band the fade has room to dissipate across -- not the visible
+    // "width" of anything solid; see the interpolation stops below for
+    // why most of this stays imperceptible.
+    const int thickness = MulDiv(128, static_cast<int>(dpi), 96);
+    // Matches Windows 11's own default window-corner rounding (~8px at
+    // 96 DPI -- what VS Code and most native apps use), not a bigger,
+    // more obviously-rounded shape of its own.
+    const int radius = MulDiv(8, static_cast<int>(dpi), 96);
 
-    RECT outer = targetRect;
-    InflateRect(&outer, thickness, thickness);
+    // On the window's own rect, not inflated outward -- the glow fades
+    // inward from the target's own edge, into its own content, rather
+    // than projecting out into the desktop margin around it. Everywhere
+    // the fade has reached alpha 0 (i.e. everywhere more than roughly
+    // `thickness` in from the edge), the target's real content shows
+    // through completely untouched.
+    const RECT outer = targetRect;
     const int width = outer.right - outer.left;
     const int height = outer.bottom - outer.top;
-
-    SetWindowPos(window_, HWND_TOPMOST, outer.left, outer.top, width, height,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
-
-    // Punch out the interior so only the frame itself ever paints --
-    // target's own content, directly beneath the hole, is never covered.
-    HRGN outerRgn = CreateRectRgn(0, 0, width, height);
-    HRGN innerRgn = CreateRectRgn(thickness, thickness, width - thickness, height - thickness);
-    CombineRgn(outerRgn, outerRgn, innerRgn, RGN_DIFF);
-    if (!SetWindowRgn(window_, outerRgn, TRUE)) {
-        DeleteObject(outerRgn);  // ownership only transfers on success
+    if (width <= 0 || height <= 0) {
+        return;
     }
-    DeleteObject(innerRgn);
+
+    // Ensure topmost + visible without touching position/size here --
+    // that happens atomically together with the content update, in the
+    // single UpdateLayeredWindow call below. Doing position/size via a
+    // separate SetWindowPos first (as an earlier version of this
+    // function did) left a visible gap between "window moved/resized to
+    // the new target" and "content repainted for the new size", showing
+    // up as the previous target's rendered content briefly stretched
+    // into the new window bounds before catching up.
+    SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;  // negative = top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (dib == nullptr || bits == nullptr) {
+        return;
+    }
+
+    {
+        // External-buffer Bitmap constructor, not Graphics(HDC) / a
+        // Graphics wrapping some other HDC -- the latter falls back to
+        // GDI-compatibility rendering and does not reliably write alpha
+        // into the backing DIB (the exact bug PLAN.md's history already
+        // documents from this app's earlier UI work).
+        Gdiplus::Bitmap bitmap(width, height, width * 4, PixelFormat32bppARGB, static_cast<BYTE*>(bits));
+        Gdiplus::Graphics graphics(&bitmap);
+        graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+
+        Gdiplus::GraphicsPath path;
+        BuildRoundedRectPath(path, width, height, radius);
+        Gdiplus::PathGradientBrush brush(&path);
+
+        // A fast falloff, not a linear one -- solid right at the edge,
+        // already mostly gone by 10% of the way in, fully transparent by
+        // 45%, and flat (still transparent) the rest of the way. Reads
+        // as a soft glow that dissipates quickly, not a visible band
+        // with edges of its own.
+        Gdiplus::Color stops[] = {
+            kBorderColorOpaque,                        // 0.00 -- the outer edge itself
+            Gdiplus::Color(160, 0, 120, 212),           // 0.10
+            Gdiplus::Color(60, 0, 120, 212),            // 0.25
+            kBorderColorTransparent,                    // 0.45 -- fully gone
+            kBorderColorTransparent,                    // 1.00 -- stays gone
+        };
+        Gdiplus::REAL positions[] = {0.0f, 0.10f, 0.25f, 0.45f, 1.0f};
+        brush.SetInterpolationColors(stops, positions, 5);
+
+        // Governs where position 1.0 above actually falls: `thickness`
+        // pixels in from the outer edge (not the shape's geometric
+        // center, which SetInterpolationColors' positions are otherwise
+        // measured relative to) -- keeps the fade's real pixel extent
+        // fixed regardless of how large the target window itself is.
+        const float xScale = std::max(0.0f, static_cast<float>(width - 2 * thickness) / static_cast<float>(width));
+        const float yScale =
+            std::max(0.0f, static_cast<float>(height - 2 * thickness) / static_cast<float>(height));
+        brush.SetFocusScales(xScale, yScale);
+
+        graphics.FillPath(&brush, &path);
+    }
+
+    PremultiplyAlpha(static_cast<BYTE*>(bits), width * height);
+
+    HDC screenDC = GetDC(nullptr);
+    HDC memDC = CreateCompatibleDC(screenDC);
+    HBITMAP oldBitmap = static_cast<HBITMAP>(SelectObject(memDC, dib));
+
+    POINT srcPoint{0, 0};
+    POINT dstPoint{outer.left, outer.top};
+    SIZE size{width, height};
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    UpdateLayeredWindow(window_, screenDC, &dstPoint, &size, memDC, &srcPoint, 0, &blend, ULW_ALPHA);
+
+    SelectObject(memDC, oldBitmap);
+    DeleteDC(memDC);
+    ReleaseDC(nullptr, screenDC);
+    DeleteObject(dib);
 }
 
 void AltTabHighlightBorder::Hide() {

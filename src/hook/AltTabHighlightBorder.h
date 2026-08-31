@@ -4,13 +4,21 @@
 
 namespace polish {
 
-// A thin, click-through, non-activating colored frame drawn just outside
-// the currently-highlighted Alt+Tab candidate's own rect -- an active
-// signal that this is the window you're about to switch to, rather than
-// relying solely on "the one that isn't dimmed" (AltTabDimOverlay) to
-// make that obvious. Uses SetWindowRgn to punch out its own interior, so
-// it never covers the target's actual content -- only a thickness-wide
-// frame around the outside is ever painted.
+// A rounded-rectangle glow drawn directly on the currently-highlighted
+// Alt+Tab candidate's own rect -- solid accent color at its outer edge,
+// fading inward to fully transparent by the time it reaches the target's
+// actual content (not projecting outward into the desktop margin around
+// it) -- an active signal that this is the window you're about to switch
+// to, rather than relying solely on "the one that isn't dimmed"
+// (AltTabDimOverlay) to make that obvious.
+//
+// The fade needs real per-pixel alpha (a flat SetLayeredWindowAttributes
+// alpha can't do a gradient), so this reuses this project's own
+// established DIB + GDI+ + manual-premultiply + UpdateLayeredWindow
+// rendering pipeline (see AltTabHighlightBorder.cpp) -- the same
+// technique, and the same alpha gotcha it exists to work around
+// (Gdiplus::Graphics(HDC) does not reliably preserve alpha), that
+// PLAN.md's history already documents from earlier UI work in this app.
 class AltTabHighlightBorder {
 public:
     explicit AltTabHighlightBorder(HINSTANCE instance);
@@ -19,11 +27,11 @@ public:
     AltTabHighlightBorder(const AltTabHighlightBorder&) = delete;
     AltTabHighlightBorder& operator=(const AltTabHighlightBorder&) = delete;
 
-    // Positions the frame just outside target's current screen rect and
-    // makes it visible.
+    // Positions the glow directly on target's current screen rect,
+    // renders it, and makes it visible.
     void ShowAroundTarget(HWND target);
 
-    // Hides the frame.
+    // Hides the glow.
     void Hide();
 
 private:
