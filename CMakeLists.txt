@@ -19,6 +19,7 @@ add_library(polish_core STATIC
     src/tray/TrayIcon.cpp
     src/hook/AltTabHook.cpp
     src/hook/AltTabDimOverlay.cpp
+    src/hook/AltTabHighlightBorder.cpp
 )
 
 target_include_directories(polish_core PUBLIC src resources)

@@ -7,8 +7,10 @@ namespace {
 constexpr wchar_t kClassName[] = L"PolishAltTabDimOverlay";
 
 // Out of 255; tuned by eye, not a considered/final value -- easy to
-// adjust once this is actually visible on screen.
-constexpr BYTE kDimAlpha = 140;
+// adjust further. Bumped from 140 to 190 -- the lighter dim wasn't
+// obviously distinguishing "Polish's Alt+Tab is active" from normal
+// operation.
+constexpr BYTE kDimAlpha = 190;
 
 LRESULT CALLBACK DimOverlayProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_ERASEBKGND) {

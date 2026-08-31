@@ -277,6 +277,14 @@ dedicated plan drafted for this feature (real files, branch `alt_tab`):
 - [ ] Live-updating the candidate list mid-session (currently a snapshot
   taken once at session start) — not started, noted as a known
   simplification, not urgent.
+- [x] **UI tweak: make it obvious you're in Polish's Alt+Tab state, not
+  just relying on relative brightness.** Dim alpha bumped from 140 to
+  190/255 (noticeably darker). Added `AltTabHighlightBorder`
+  (`src/hook/AltTabHighlightBorder.h/.cpp`) — a thin accent-blue frame
+  (`SetWindowRgn`-punched so it never covers the target's own content,
+  DPI-scaled thickness) drawn just outside the highlighted window's rect,
+  as an active "this one" signal rather than only "the undimmed one."
+  Rebuilt clean, 9/9 tests pass; not yet re-verified live.
 
 **Superseded M3–M6 plan (DWM-thumbnail popup), kept for reference, not being built:**
 M3 — `AltTabSwitcherWindow` placeholder-chrome skeleton; M4 — real DWM

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "hook/AltTabDimOverlay.h"
+#include "hook/AltTabHighlightBorder.h"
 #include "hook/AltTabHook.h"
 #include "tray/TrayIcon.h"
 #include "util/Logging.h"
@@ -48,6 +49,10 @@ bool g_altTabSessionOpen = false;
 std::vector<HWND> g_altTabCandidates;
 size_t g_altTabHighlightIndex = 0;
 std::vector<std::unique_ptr<polish::AltTabDimOverlay>> g_altTabOverlays;
+// Only one window is ever highlighted at a time, unlike the dim overlays
+// (one per non-highlighted candidate), so this is a single instance, not
+// a pool.
+std::unique_ptr<polish::AltTabHighlightBorder> g_altTabHighlightBorder;
 
 // Most-recently-used window activation order, for the in-progress
 // Alt+Tab replacement (see PLAN.md). Tracks *every* real window that
@@ -405,21 +410,26 @@ void EnsureAltTabOverlayPoolSize(size_t count) {
     }
 }
 
+void EnsureAltTabHighlightBorder() {
+    if (!g_altTabHighlightBorder) {
+        g_altTabHighlightBorder = std::make_unique<polish::AltTabHighlightBorder>(GetModuleHandleW(nullptr));
+    }
+}
+
 // Dims every candidate except the highlighted one, in its actual
 // on-screen position -- see AltTabDimOverlay.h for why this was chosen
-// over a thumbnail-grid popup.
+// over a thumbnail-grid popup. The highlighted one also gets a colored
+// border frame (AltTabHighlightBorder) so it reads as an active signal
+// -- "this one, specifically" -- rather than relying solely on relative
+// brightness to notice which window isn't dimmed.
 //
 // Dimming everything else isn't enough on its own: the highlighted
 // window still needs to actually be visible, which it might not be if
-// it's currently behind another (e.g. maximized) window -- and since
-// every dim overlay is WS_EX_TOPMOST, merely raising the highlighted
-// window within the normal z-order wouldn't be enough either, since a
-// topmost overlay covering some *other* window can still sit above it
-// if their rects overlap. So the highlighted window is made topmost
-// itself while highlighted (SWP_NOACTIVATE -- purely visual, no focus
-// change), and demoted back the instant highlight moves off it -- only
-// one window should ever be topmost at a time, or it'd stay stuck above
-// everything after the session ends.
+// it's currently behind another (e.g. maximized) window. Each dim
+// overlay is deliberately NOT topmost (see AltTabDimOverlay.h), so
+// they're not the obstacle -- but some other, unrelated window could
+// still legitimately be stacked in front of the target on the real
+// desktop.
 //
 // Getting the highlighted window to the front turned out to need a
 // specific, well-established technique: promote it to HWND_TOPMOST,
@@ -462,11 +472,17 @@ void ApplyAltTabDimming() {
             L"[Polish] AltTab: WARNING SetWindowPos(TOPMOST) failed for hwnd={} GetLastError={}",
             reinterpret_cast<void*>(highlighted), GetLastError()));
     }
+
+    EnsureAltTabHighlightBorder();
+    g_altTabHighlightBorder->ShowAroundTarget(highlighted);
 }
 
 void EndAltTabSession() {
     for (auto& overlay : g_altTabOverlays) {
         overlay->Hide();
+    }
+    if (g_altTabHighlightBorder) {
+        g_altTabHighlightBorder->Hide();
     }
     g_altTabSessionOpen = false;
 }
@@ -604,6 +620,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             g_trayIcon.reset();
             g_altTabHook.reset();
             g_altTabOverlays.clear();
+            g_altTabHighlightBorder.reset();
             PostQuitMessage(0);
             return 0;
 
