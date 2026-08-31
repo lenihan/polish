@@ -9,6 +9,7 @@ FetchContent_MakeAvailable(doctest)
 add_executable(polish_tests
     TestMain.cpp
     RectUtilsTests.cpp
+    ActivationHistoryTests.cpp
 )
 
 target_link_libraries(polish_tests PRIVATE polish_core doctest::doctest)

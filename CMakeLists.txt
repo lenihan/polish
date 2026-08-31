@@ -15,7 +15,9 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # (main.cpp's WinMain doesn't belong in a test binary).
 add_library(polish_core STATIC
     src/windowtracking/RectUtils.cpp
+    src/windowtracking/ActivationHistory.cpp
     src/tray/TrayIcon.cpp
+    src/hook/AltTabHook.cpp
 )
 
 target_include_directories(polish_core PUBLIC src resources)

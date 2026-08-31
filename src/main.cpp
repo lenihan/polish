@@ -5,8 +5,10 @@
 #include <optional>
 #include <string>
 
+#include "hook/AltTabHook.h"
 #include "tray/TrayIcon.h"
 #include "util/Logging.h"
+#include "windowtracking/ActivationHistory.h"
 #include "windowtracking/RectUtils.h"
 
 namespace {
@@ -29,6 +31,13 @@ HWINEVENTHOOK g_destroyHook = nullptr;
 UINT g_taskbarCreatedMessage = 0;
 
 std::unique_ptr<polish::TrayIcon> g_trayIcon;
+std::unique_ptr<polish::AltTabHook> g_altTabHook;
+
+// Most-recently-used window activation order, for the in-progress
+// Alt+Tab replacement (see PLAN.md). Tracks *every* real window that
+// becomes foreground, not just candidate windows -- filtering (candidate
+// + non-minimized) happens where this list is consumed, not here.
+polish::ActivationHistory g_activationHistory;
 
 // The window currently being live-tracked for settle events -- i.e. the
 // foreground window, whenever it's a candidate window (see
@@ -232,6 +241,20 @@ void OnForegroundChanged(HWND newForeground) {
     polish::LogDebug(std::format(L"[Polish] foreground changed: hwnd={} title=\"{}\" candidate={}",
                                   reinterpret_cast<void*>(newForeground), title, candidate));
 
+    // Tracks every real window that becomes foreground, not just
+    // candidate windows -- Alt+Tab candidate filtering (candidate +
+    // non-minimized) happens where this list is consumed, not here.
+    g_activationHistory.MoveToFront(newForeground);
+    std::wstring mruOrder;
+    for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+        if (!mruOrder.empty()) {
+            mruOrder += L", ";
+        }
+        mruOrder += std::format(L"{}", reinterpret_cast<void*>(hwnd));
+    }
+    polish::LogDebug(std::format(L"[Polish] MRU order ({}): {}", g_activationHistory.OrderedWindows().size(),
+                                  mruOrder));
+
     if (!candidate) {
         return;
     }
@@ -299,11 +322,14 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
             break;
 
         case EVENT_OBJECT_DESTROY:
-            if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF && hwnd == g_trackedWindow) {
-                g_trackedWindow = nullptr;
-                g_inMoveSizeLoop = false;
-                g_pendingSettleRect.reset();
-                KillTimer(g_messageWindow, kSettleTimerId);
+            if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF) {
+                g_activationHistory.Remove(hwnd);
+                if (hwnd == g_trackedWindow) {
+                    g_trackedWindow = nullptr;
+                    g_inMoveSizeLoop = false;
+                    g_pendingSettleRect.reset();
+                    KillTimer(g_messageWindow, kSettleTimerId);
+                }
             }
             break;
 
@@ -311,6 +337,17 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
             break;
     }
 }
+
+// M2 scope (see PLAN.md): logging only, no popup/candidate-list/commit
+// logic yet -- these just prove the hook's cycle/commit/cancel events
+// fire correctly with zero native Alt+Tab UI, before any rendering work.
+void OnAltTabCycle(bool backward) {
+    polish::LogDebug(std::format(L"[Polish] AltTab: cycle {}", backward ? L"backward" : L"forward"));
+}
+
+void OnAltTabCommit() { polish::LogDebug(L"[Polish] AltTab: commit (Alt released)"); }
+
+void OnAltTabCancel() { polish::LogDebug(L"[Polish] AltTab: cancel (Escape)"); }
 
 LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     if (g_taskbarCreatedMessage != 0 && message == g_taskbarCreatedMessage) {
@@ -331,6 +368,12 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         case polish::TrayIcon::kCallbackMessage:
             if (g_trayIcon) {
                 g_trayIcon->HandleCallbackMessage(lParam);
+            }
+            return 0;
+
+        case polish::AltTabHook::kHookMessage:
+            if (g_altTabHook) {
+                g_altTabHook->HandleHookMessage(wParam);
             }
             return 0;
 
@@ -357,6 +400,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 UnhookWinEvent(g_destroyHook);
             }
             g_trayIcon.reset();
+            g_altTabHook.reset();
             PostQuitMessage(0);
             return 0;
 
@@ -419,6 +463,16 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                                      WINEVENT_OUTOFCONTEXT);
 
     g_trayIcon = std::make_unique<polish::TrayIcon>(g_messageWindow, [] { DestroyWindow(g_messageWindow); });
+
+    g_altTabHook = std::make_unique<polish::AltTabHook>(g_messageWindow, OnAltTabCycle, OnAltTabCommit,
+                                                         OnAltTabCancel);
+    if (!g_altTabHook->IsInstalled()) {
+        polish::LogDebug(std::format(L"[Polish] WARNING: failed to install the Alt+Tab keyboard hook. "
+                                      L"GetLastError={}",
+                                      GetLastError()));
+    } else {
+        polish::LogDebug(L"[Polish] Alt+Tab keyboard hook installed successfully");
+    }
 
     OnForegroundChanged(GetForegroundWindow());
 

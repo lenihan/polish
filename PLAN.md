@@ -83,8 +83,7 @@ bigger lift once live thumbnails are in scope (see below).
   when the switcher closes. This is genuinely the biggest single feature
   built in this app so far — a new API surface (DWM thumbnails) on top of
   a new hook and a new state machine, not just new wiring of existing
-  pieces. Worth a dedicated implementation plan before writing code,
-  given the scope.
+  pieces.
 - **Restore-position sync interaction**: resolves itself —
   `SetForegroundWindow` on the selected window fires
   `EVENT_SYSTEM_FOREGROUND` exactly like any other focus change, already
@@ -95,6 +94,78 @@ bigger lift once live thumbnails are in scope (see below).
   harmless (no per-window history left to corrupt, unlike the original
   overlay-button bug this project already hit once with a similar
   non-activating popup).
+
+**Implementation progress**, working through the milestones in the
+dedicated plan drafted for this feature (real files, branch `alt_tab`):
+
+- [x] **M0 — spiked both open technical questions with throwaway code**
+  before committing to the design above.
+  - (a) `WH_KEYBOARD_LL` suppression: **confirmed working end-to-end**,
+    human-verified — a spike hook that beeped and updated its console
+    title on every swallowed Tab-while-Alt was tested live: native
+    Alt+Tab never appeared, no menu-bar flash on the target app. (First
+    attempt appeared to fail with total silence; root cause turned out to
+    be that the launch method used to start the spike process never
+    actually produced a running process at all — nothing to do with the
+    hook itself. Worth remembering: confirm a spawned GUI process is
+    actually alive, via `Get-Process`/a log file it writes, before
+    trusting a "nothing happened" result as a real negative.)
+  - (b) DWM thumbnail on a plain (non-layered) `WS_POPUP` window: both
+    `DwmRegisterThumbnail`/`DwmUpdateThumbnailProperties` calls returned
+    `S_OK`. Visual confirmation (does a live preview actually render)
+    still pending — the spike happened to capture the lock screen as its
+    source window rather than a useful app, and the user wasn't at their
+    computer to redo it with a better source. Not blocking further work;
+    revisit before M4.
+- [x] **M1 — `ActivationHistory`** (`src/windowtracking/ActivationHistory.h/.cpp`):
+  pure MRU-list class, 6 unit tests, wired passively into
+  `OnForegroundChanged`/`EVENT_OBJECT_DESTROY` in `main.cpp`. MRU order
+  logged on every foreground change and confirmed correct in
+  `%TEMP%\polish.log`.
+- [x] **M2 (code) — `AltTabHook`** (`src/hook/AltTabHook.h/.cpp`): the
+  real hook, dispatching via a private `WM_APP` message to
+  `onCycle(bool)`/`onCommit()`/`onCancel()` callbacks — logging-only for
+  now (`OnAltTabCycle`/`OnAltTabCommit`/`OnAltTabCancel` in `main.cpp`),
+  no popup or candidate-list wiring yet. Builds clean, 9/9 unit tests
+  pass, app starts and installs the hook without error.
+  - [x] **First real-app test: native Alt+Tab correctly suppressed**,
+    log confirmed clean `cycle forward` × N → `commit` sequences while
+    holding Alt+Tab against the actual build (not just the M0(a) spike).
+  - [x] **Real bug found and fixed: swallowing Alt-up (the original
+    menu-flash mitigation from M0/M2's first version) left Windows'
+    session-wide keyboard modifier state stuck believing Alt was still
+    held** — surfaced as "letters started selecting menus" while typing
+    in an unrelated app (VS Code), persisting even after `polish.exe`
+    exited (OS/session-level state, not this process's to clean up on
+    exit). Root cause: a low-level hook that swallows a *modifier*
+    key-up prevents that event from ever reaching the layer that
+    maintains synchronous keyboard state (`GetKeyState`/menu-mnemonic
+    tracking/etc.) — the hook's own `LLKHF_ALTDOWN` read still works
+    (it comes straight off the hardware event), but nothing else in the
+    system ever finds out Alt went up. **Never swallow a modifier
+    key-up.** Fixed by never swallowing Alt-up at all, and instead
+    injecting a harmless dummy keystroke (`SendInput`, a bare Ctrl
+    tap) right after the *first* swallowed Tab in a session — this
+    breaks the "standalone Alt press" condition that triggers
+    menu-mnemonic focus, without ever touching Alt itself, so Windows'
+    own modifier-state tracking stays correctly in sync. See
+    `AltTabHook.cpp`'s `InjectHarmlessKeystroke` for the implementation
+    and full reasoning. As part of this fix, Escape (cancel) now also
+    ends the session outright (previously left it open so a later
+    Alt-up would still be swallowed — no longer applicable, and was
+    causing a redundant `onCommit()` after `onCancel()` for the same
+    gesture); a later Tab press while Alt is still held now correctly
+    starts a fresh session instead.
+  - [x] Rebuilt clean, 9/9 tests still pass. **Not yet re-verified live**
+    against the real app since the fix (the previous test session ended
+    with the keyboard-stuck bug, so a fresh confirmation — including
+    re-testing the original menu-flash concern on Notepad/Explorer, plus
+    confirming no more stuck-Alt behavior after exit — is still needed
+    before M2 is considered fully done).
+- [ ] M3 — `AltTabSwitcherWindow` placeholder-chrome skeleton (not started).
+- [ ] M4 — real DWM thumbnails replace the placeholders (not started).
+- [ ] M5 — commit/cancel wired to `SetForegroundWindow` (not started).
+- [ ] M6 — labels, DPI/multi-monitor correctness, edge cases (not started).
 
 ### 2. Other backlog items
 
