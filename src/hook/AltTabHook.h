@@ -28,12 +28,30 @@ namespace polish {
 //
 // The hook proc itself only recognizes the relevant keystrokes and
 // posts to messageWindow -- it deliberately never does heavier work
-// (building a candidate list, touching DWM, etc.) synchronously inside
-// the callback. Windows silently unhooks a low-level hook that doesn't
-// return promptly (LowLevelHooksTimeout, ~1000ms default on Win10
-// 1709+), so the callback must stay trivial no matter what.
+// (building the actual candidate list with its overlays, touching DWM,
+// etc.) synchronously inside the callback. Windows silently unhooks a
+// low-level hook that doesn't return promptly (LowLevelHooksTimeout,
+// ~1000ms default on Win10 1709+), so the callback must stay trivial no
+// matter what.
+//
+// One deliberate exception: hasEligibleCandidates (see constructor) IS
+// called synchronously from inside the callback, on the first Tab of a
+// session only. Without it, the hook always swallows Tab-while-Alt
+// regardless of whether there's anywhere to switch to, and with 0 or 1
+// non-minimized windows open that ate the keystroke into total
+// silence -- confirmed, human-reported, as feeling broken rather than
+// looking like "nothing to do here." EnumWindows plus cheap per-window
+// style checks (what hasEligibleCandidates does) is a bounded,
+// synchronous, no-UI operation, nowhere near the timeout risk that
+// candidate popups/DWM calls would be -- it's the *rendering* work that
+// stays deferred via the posted message below, not this.
 class AltTabHook {
 public:
+    // hasEligibleCandidates(): called synchronously, only when a session
+    //   isn't already active, to decide whether to swallow Tab-while-Alt
+    //   at all. Returning false lets the keystroke fall through to
+    //   native Alt+Tab untouched -- no onCycle/onCommit/onCancel fires
+    //   for that keypress at all.
     // onCycle(backward): Tab (backward=false) or Shift+Tab (backward=true)
     //   pressed while Alt is held -- advance/reverse the highlight.
     // onCommit(): Alt released after at least one Tab was swallowed --
@@ -44,8 +62,9 @@ public:
     //   fire afterward for the same Alt-hold, and if Alt is still
     //   physically held and Tab is pressed again, that correctly starts
     //   a fresh session.
-    AltTabHook(HWND messageWindow, std::function<void(bool backward)> onCycle,
-               std::function<void()> onCommit, std::function<void()> onCancel);
+    AltTabHook(HWND messageWindow, std::function<bool()> hasEligibleCandidates,
+               std::function<void(bool backward)> onCycle, std::function<void()> onCommit,
+               std::function<void()> onCancel);
     ~AltTabHook();
 
     AltTabHook(const AltTabHook&) = delete;
@@ -71,6 +90,7 @@ private:
     bool HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data);
 
     HWND messageWindow_;
+    std::function<bool()> hasEligibleCandidates_;
     std::function<void(bool backward)> onCycle_;
     std::function<void()> onCommit_;
     std::function<void()> onCancel_;

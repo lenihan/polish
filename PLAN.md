@@ -253,13 +253,30 @@ dedicated plan drafted for this feature (real files, branch `alt_tab`):
     briefly still shows through). Deferred until it can be described
     more precisely or reproduced with a screenshot — not fixing on a
     guess.
+- [x] **Native Alt+Tab fallthrough when there are fewer than 2
+  candidates.** Turned out not to be the "low priority, rare in
+  practice" gap it was first noted as — human-reported as feeling
+  *broken*, not just unhelpful: with 0 or 1 non-minimized windows open,
+  the hook was still always swallowing Tab-while-Alt, eating the
+  keystroke into total silence (no native switcher, no dim overlay,
+  nothing). Fixed by giving `AltTabHook` a new
+  `hasEligibleCandidates` callback (`AltTabHasEligibleCandidates` in
+  `main.cpp`, which rebuilds `g_altTabCandidates` as a side effect),
+  called **synchronously inside the hook callback** — the one deliberate
+  exception to "the hook stays trivial," justified because `EnumWindows`
+  plus cheap per-window checks is a bounded, no-UI operation nowhere
+  near the timeout risk that popup/DWM work would be; the *rendering*
+  work still stays deferred via the posted message. Returning false lets
+  the keystroke fall through to native Alt+Tab completely untouched (also
+  fixed a latent asymmetry: the Tab-up swallow wasn't gated on
+  `sessionActive_`, so it would have swallowed the matching up even when
+  the down had been allowed through). `OnAltTabCycle` no longer rebuilds
+  the candidate list or bails out on its own — the hook guarantees it's
+  already fresh with ≥2 entries by the time a new session reaches it.
+  Rebuilt clean, 9/9 tests pass; not yet re-verified live.
 - [ ] Live-updating the candidate list mid-session (currently a snapshot
   taken once at session start) — not started, noted as a known
   simplification, not urgent.
-- [ ] Native-Alt+Tab fallthrough when there are fewer than 2 candidates
-  — currently the hook always swallows regardless of candidate count
-  (the "let it fall through" design decision was never actually built);
-  low priority, rare in practice.
 
 **Superseded M3–M6 plan (DWM-thumbnail popup), kept for reference, not being built:**
 M3 — `AltTabSwitcherWindow` placeholder-chrome skeleton; M4 — real DWM

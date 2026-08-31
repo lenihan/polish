@@ -41,9 +41,11 @@ void InjectHarmlessKeystroke() {
 
 }  // namespace
 
-AltTabHook::AltTabHook(HWND messageWindow, std::function<void(bool)> onCycle,
-                        std::function<void()> onCommit, std::function<void()> onCancel)
+AltTabHook::AltTabHook(HWND messageWindow, std::function<bool()> hasEligibleCandidates,
+                        std::function<void(bool)> onCycle, std::function<void()> onCommit,
+                        std::function<void()> onCancel)
     : messageWindow_(messageWindow),
+      hasEligibleCandidates_(std::move(hasEligibleCandidates)),
       onCycle_(std::move(onCycle)),
       onCommit_(std::move(onCommit)),
       onCancel_(std::move(onCancel)) {
@@ -87,6 +89,15 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
 
     if (data.vkCode == VK_TAB && altHeld && IsDown(wParam)) {
         if (!sessionActive_) {
+            // Only known place this is called synchronously inside the
+            // hook -- see the class comment for why that's fine here.
+            // Returning false leaves this keystroke completely
+            // untouched, letting native Alt+Tab handle it normally
+            // instead of swallowing into silence with nothing to show
+            // for it.
+            if (!hasEligibleCandidates_ || !hasEligibleCandidates_()) {
+                return false;
+            }
             InjectHarmlessKeystroke();  // once per session -- see comment above
         }
         sessionActive_ = true;
@@ -94,7 +105,7 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
                      static_cast<WPARAM>(shiftHeld_ ? HookAction::CycleBackward : HookAction::CycleForward), 0);
         return true;
     }
-    if (data.vkCode == VK_TAB && altHeld && IsUp(wParam)) {
+    if (data.vkCode == VK_TAB && altHeld && IsUp(wParam) && sessionActive_) {
         return true;  // swallow the matching up, down was swallowed above
     }
 

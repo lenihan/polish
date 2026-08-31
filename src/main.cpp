@@ -389,6 +389,16 @@ void RebuildAltTabCandidates() {
     }
 }
 
+// Called synchronously from inside AltTabHook's low-level hook callback
+// (see its class comment for why that's safe here) to decide whether
+// Alt+Tab should be intercepted at all. Rebuilds the candidate list as a
+// side effect -- by the time a real session starts, g_altTabCandidates
+// is already correct and OnAltTabCycle doesn't need to rebuild it again.
+bool AltTabHasEligibleCandidates() {
+    RebuildAltTabCandidates();
+    return g_altTabCandidates.size() >= 2;
+}
+
 void EnsureAltTabOverlayPoolSize(size_t count) {
     while (g_altTabOverlays.size() < count) {
         g_altTabOverlays.push_back(std::make_unique<polish::AltTabDimOverlay>(GetModuleHandleW(nullptr)));
@@ -462,8 +472,16 @@ void EndAltTabSession() {
 }
 
 void OnAltTabCycle(bool backward) {
+    if (g_altTabCandidates.empty()) {
+        // Defensive only -- shouldn't happen. AltTabHook's
+        // hasEligibleCandidates callback (AltTabHasEligibleCandidates,
+        // which rebuilds g_altTabCandidates as a side effect) already
+        // guarantees at least 2 entries before this ever fires for a new
+        // session, and both run on the same thread with nothing else
+        // able to run in between.
+        return;
+    }
     if (!g_altTabSessionOpen) {
-        RebuildAltTabCandidates();
         std::wstring candidateDump;
         for (HWND hwnd : g_altTabCandidates) {
             wchar_t title[128] = L"";
@@ -475,16 +493,6 @@ void OnAltTabCycle(bool backward) {
         }
         polish::LogDebug(std::format(L"[Polish] AltTab: session starting, {} candidate(s): {}",
                                       g_altTabCandidates.size(), candidateDump));
-        if (g_altTabCandidates.size() <= 1) {
-            // Nothing else to switch to. The hook has already swallowed
-            // this keypress regardless (it can't know the candidate
-            // count without doing real work inside the low-level hook
-            // callback, which M0 established is unsafe) -- native
-            // Alt+Tab fallthrough for this case is a known gap, not yet
-            // built (see PLAN.md).
-            polish::LogDebug(L"[Polish] AltTab: fewer than 2 candidates, nothing to switch to");
-            return;
-        }
         EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
         // Index 0 is the current window itself (freshest in the MRU
         // order); the first Tab press should land on the previous
@@ -659,8 +667,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     g_trayIcon = std::make_unique<polish::TrayIcon>(g_messageWindow, [] { DestroyWindow(g_messageWindow); });
 
-    g_altTabHook = std::make_unique<polish::AltTabHook>(g_messageWindow, OnAltTabCycle, OnAltTabCommit,
-                                                         OnAltTabCancel);
+    g_altTabHook = std::make_unique<polish::AltTabHook>(g_messageWindow, AltTabHasEligibleCandidates,
+                                                         OnAltTabCycle, OnAltTabCommit, OnAltTabCancel);
     if (!g_altTabHook->IsInstalled()) {
         polish::LogDebug(std::format(L"[Polish] WARNING: failed to install the Alt+Tab keyboard hook. "
                                       L"GetLastError={}",
