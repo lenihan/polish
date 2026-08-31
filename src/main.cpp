@@ -1,10 +1,13 @@
 #include <windows.h>
 
+#include <algorithm>
 #include <format>
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
+#include "hook/AltTabDimOverlay.h"
 #include "hook/AltTabHook.h"
 #include "tray/TrayIcon.h"
 #include "util/Logging.h"
@@ -32,6 +35,19 @@ UINT g_taskbarCreatedMessage = 0;
 
 std::unique_ptr<polish::TrayIcon> g_trayIcon;
 std::unique_ptr<polish::AltTabHook> g_altTabHook;
+
+// Alt+Tab switcher session state. A snapshot of candidates is taken once
+// when a session starts (first Tab press) and used for the whole
+// session -- if a candidate closes mid-session its overlay just sits
+// over whatever's left there until the session ends; not handled more
+// gracefully than that yet. The overlay pool only ever grows (indices
+// beyond the current session's candidate count just stay hidden), so
+// repeated sessions don't pay window-creation cost more than once per
+// "most windows ever open at once this run."
+bool g_altTabSessionOpen = false;
+std::vector<HWND> g_altTabCandidates;
+size_t g_altTabHighlightIndex = 0;
+std::vector<std::unique_ptr<polish::AltTabDimOverlay>> g_altTabOverlays;
 
 // Most-recently-used window activation order, for the in-progress
 // Alt+Tab replacement (see PLAN.md). Tracks *every* real window that
@@ -338,16 +354,194 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
     }
 }
 
-// M2 scope (see PLAN.md): logging only, no popup/candidate-list/commit
-// logic yet -- these just prove the hook's cycle/commit/cancel events
-// fire correctly with zero native Alt+Tab UI, before any rendering work.
-void OnAltTabCycle(bool backward) {
-    polish::LogDebug(std::format(L"[Polish] AltTab: cycle {}", backward ? L"backward" : L"forward"));
+BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
+    if (IsCandidateWindow(hwnd) && !IsIconic(hwnd)) {
+        reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
+    }
+    return TRUE;
 }
 
-void OnAltTabCommit() { polish::LogDebug(L"[Polish] AltTab: commit (Alt released)"); }
+// Builds the candidate list from *every* currently open, real,
+// non-minimized window (via EnumWindows), not just ones already present
+// in g_activationHistory -- a window Polish has never seen become
+// foreground (e.g. it's been sitting untouched since before this run
+// started) would otherwise silently never appear as an Alt+Tab candidate
+// at all. Confirmed as a real bug via log evidence: with 3 non-minimized
+// windows open, only 2 that had actually been focused during this run
+// showed up. Windows Polish *does* have recency data for are still
+// ordered by true MRU first; anything else falls back to EnumWindows'
+// own Z-order (topmost first), appended after.
+void RebuildAltTabCandidates() {
+    std::vector<HWND> allCandidates;
+    EnumWindows(EnumCandidateWindowsProc, reinterpret_cast<LPARAM>(&allCandidates));
 
-void OnAltTabCancel() { polish::LogDebug(L"[Polish] AltTab: cancel (Escape)"); }
+    g_altTabCandidates.clear();
+    for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+        if (std::find(allCandidates.begin(), allCandidates.end(), hwnd) != allCandidates.end()) {
+            g_altTabCandidates.push_back(hwnd);
+        }
+    }
+    for (HWND hwnd : allCandidates) {
+        if (std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd) ==
+            g_altTabCandidates.end()) {
+            g_altTabCandidates.push_back(hwnd);
+        }
+    }
+}
+
+void EnsureAltTabOverlayPoolSize(size_t count) {
+    while (g_altTabOverlays.size() < count) {
+        g_altTabOverlays.push_back(std::make_unique<polish::AltTabDimOverlay>(GetModuleHandleW(nullptr)));
+    }
+}
+
+// Dims every candidate except the highlighted one, in its actual
+// on-screen position -- see AltTabDimOverlay.h for why this was chosen
+// over a thumbnail-grid popup.
+//
+// Dimming everything else isn't enough on its own: the highlighted
+// window still needs to actually be visible, which it might not be if
+// it's currently behind another (e.g. maximized) window -- and since
+// every dim overlay is WS_EX_TOPMOST, merely raising the highlighted
+// window within the normal z-order wouldn't be enough either, since a
+// topmost overlay covering some *other* window can still sit above it
+// if their rects overlap. So the highlighted window is made topmost
+// itself while highlighted (SWP_NOACTIVATE -- purely visual, no focus
+// change), and demoted back the instant highlight moves off it -- only
+// one window should ever be topmost at a time, or it'd stay stuck above
+// everything after the session ends.
+//
+// Getting the highlighted window to the front turned out to need a
+// specific, well-established technique: promote it to HWND_TOPMOST,
+// then *immediately* demote it back to HWND_NOTOPMOST. The brief
+// topmost moment forces it above literally everything (every other
+// candidate's real window, every dim overlay, any other window on
+// screen); the immediate demotion settles it at the very front of the
+// normal (non-topmost) band instead of leaving it stuck topmost. This
+// also means there's nothing left to clean up in EndAltTabSession --
+// the highlighted window is never left topmost even transiently between
+// cycles. (An earlier version left it topmost for the duration of being
+// highlighted, demoting only when highlight moved away or the session
+// ended -- that was still sometimes visually covered by another
+// candidate, most likely because SWP_NOACTIVATE alone doesn't reliably
+// force DWM to fully recompute z-order for a window that's never
+// actually activated. The promote-then-demote pulse sidesteps that
+// entirely instead of chasing it further.)
+void ApplyAltTabDimming() {
+    for (size_t i = 0; i < g_altTabCandidates.size(); ++i) {
+        if (i == g_altTabHighlightIndex) {
+            continue;  // handled last, below
+        }
+        HWND hwnd = g_altTabCandidates[i];
+        SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        g_altTabOverlays[i]->ShowOverTarget(hwnd);
+    }
+
+    const HWND highlighted = g_altTabCandidates[g_altTabHighlightIndex];
+    g_altTabOverlays[g_altTabHighlightIndex]->Hide();
+    const BOOL promoted =
+        SetWindowPos(highlighted, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    SetWindowPos(highlighted, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (!promoted) {
+        // Most likely cause: highlighted belongs to a more-privileged
+        // (elevated) process than this one -- UIPI blocks cross-privilege
+        // window manipulation. See docs/LIMITATIONS.md #1; this is a
+        // known, permanent gap, not something to chase further if that's
+        // what the logged error confirms.
+        polish::LogDebug(std::format(
+            L"[Polish] AltTab: WARNING SetWindowPos(TOPMOST) failed for hwnd={} GetLastError={}",
+            reinterpret_cast<void*>(highlighted), GetLastError()));
+    }
+}
+
+void EndAltTabSession() {
+    for (auto& overlay : g_altTabOverlays) {
+        overlay->Hide();
+    }
+    g_altTabSessionOpen = false;
+}
+
+void OnAltTabCycle(bool backward) {
+    if (!g_altTabSessionOpen) {
+        RebuildAltTabCandidates();
+        std::wstring candidateDump;
+        for (HWND hwnd : g_altTabCandidates) {
+            wchar_t title[128] = L"";
+            GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+            if (!candidateDump.empty()) {
+                candidateDump += L" | ";
+            }
+            candidateDump += std::format(L"{}:\"{}\"", reinterpret_cast<void*>(hwnd), title);
+        }
+        polish::LogDebug(std::format(L"[Polish] AltTab: session starting, {} candidate(s): {}",
+                                      g_altTabCandidates.size(), candidateDump));
+        if (g_altTabCandidates.size() <= 1) {
+            // Nothing else to switch to. The hook has already swallowed
+            // this keypress regardless (it can't know the candidate
+            // count without doing real work inside the low-level hook
+            // callback, which M0 established is unsafe) -- native
+            // Alt+Tab fallthrough for this case is a known gap, not yet
+            // built (see PLAN.md).
+            polish::LogDebug(L"[Polish] AltTab: fewer than 2 candidates, nothing to switch to");
+            return;
+        }
+        EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
+        // Index 0 is the current window itself (freshest in the MRU
+        // order); the first Tab press should land on the previous
+        // window, matching native Alt+Tab's single-tap-swap behavior.
+        g_altTabHighlightIndex = 1 % g_altTabCandidates.size();
+        g_altTabSessionOpen = true;
+    } else {
+        const size_t count = g_altTabCandidates.size();
+        g_altTabHighlightIndex =
+            backward ? (g_altTabHighlightIndex + count - 1) % count : (g_altTabHighlightIndex + 1) % count;
+    }
+    ApplyAltTabDimming();
+    polish::LogDebug(std::format(L"[Polish] AltTab: cycle {} -> highlighting hwnd={}",
+                                  backward ? L"backward" : L"forward",
+                                  reinterpret_cast<void*>(g_altTabCandidates[g_altTabHighlightIndex])));
+}
+
+void OnAltTabCommit() {
+    if (!g_altTabSessionOpen) {
+        return;
+    }
+    const HWND target = g_altTabCandidates[g_altTabHighlightIndex];
+    EndAltTabSession();
+    if (IsWindow(target)) {
+        // Windows restricts SetForegroundWindow from background
+        // processes (a security heuristic against focus-stealing) --
+        // injecting a harmless keystroke immediately before the call is
+        // a long-established, widely-used workaround that resets
+        // whatever internal "did this process just handle real input"
+        // state that heuristic checks. Same technique, same reasoning,
+        // as AltTabHook's InjectHarmlessKeystroke; duplicated locally
+        // since it's small and the two aren't otherwise related.
+        INPUT inputs[2]{};
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].ki.wVk = VK_CONTROL;
+        inputs[1].type = INPUT_KEYBOARD;
+        inputs[1].ki.wVk = VK_CONTROL;
+        inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(2, inputs, sizeof(INPUT));
+
+        const BOOL result = SetForegroundWindow(target);
+        polish::LogDebug(std::format(
+            L"[Polish] AltTab: commit -> hwnd={} SetForegroundWindow result={} actualForeground={}",
+            reinterpret_cast<void*>(target), result != FALSE, reinterpret_cast<void*>(GetForegroundWindow())));
+        return;
+    }
+    polish::LogDebug(std::format(L"[Polish] AltTab: commit -> hwnd={} no longer a valid window",
+                                  reinterpret_cast<void*>(target)));
+}
+
+void OnAltTabCancel() {
+    if (!g_altTabSessionOpen) {
+        return;
+    }
+    EndAltTabSession();
+    polish::LogDebug(L"[Polish] AltTab: cancel");
+}
 
 LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     if (g_taskbarCreatedMessage != 0 && message == g_taskbarCreatedMessage) {
@@ -401,6 +595,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             }
             g_trayIcon.reset();
             g_altTabHook.reset();
+            g_altTabOverlays.clear();
             PostQuitMessage(0);
             return 0;
 

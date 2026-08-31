@@ -156,16 +156,116 @@ dedicated plan drafted for this feature (real files, branch `alt_tab`):
     causing a redundant `onCommit()` after `onCancel()` for the same
     gesture); a later Tab press while Alt is still held now correctly
     starts a fresh session instead.
-  - [x] Rebuilt clean, 9/9 tests still pass. **Not yet re-verified live**
-    against the real app since the fix (the previous test session ended
-    with the keyboard-stuck bug, so a fresh confirmation — including
-    re-testing the original menu-flash concern on Notepad/Explorer, plus
-    confirming no more stuck-Alt behavior after exit — is still needed
-    before M2 is considered fully done).
-- [ ] M3 — `AltTabSwitcherWindow` placeholder-chrome skeleton (not started).
-- [ ] M4 — real DWM thumbnails replace the placeholders (not started).
-- [ ] M5 — commit/cancel wired to `SetForegroundWindow` (not started).
-- [ ] M6 — labels, DPI/multi-monitor correctness, edge cases (not started).
+  - [x] Rebuilt clean, 9/9 tests still pass. **Re-verified live and
+    confirmed fixed**: native Alt+Tab stays suppressed, no menu-bar
+    flash, and keyboard modifier state no longer gets stuck after
+    exiting.
+- [x] **M3+ pivot (2026-08-30): dimming overlay replaces the DWM-thumbnail
+  popup plan entirely.** The user's call, made after seeing M2 work:
+  instead of a thumbnail-grid popup (the original, more complex M3–M6
+  plan below this note, now abandoned), highlight the actual candidate
+  window in its real on-screen position and dim every other candidate,
+  so "is this the window I want" is answered by literally looking at the
+  real window, not by matching a small thumbnail to what you remember it
+  looking like. This eliminates the DWM thumbnail API, the switcher
+  popup's layout/DPI/monitor-placement questions, and most of what made
+  this the biggest feature in the app — replaced by a much smaller
+  design: `AltTabDimOverlay` (`src/hook/AltTabDimOverlay.h/.cpp`), a
+  simple `WS_EX_LAYERED`/`WS_EX_TRANSPARENT`/`WS_EX_NOACTIVATE`/
+  `WS_EX_TOPMOST` popup per candidate window, solid black at partial
+  alpha (`SetLayeredWindowAttributes`, no DIB/premultiply pipeline
+  needed — a uniform tint doesn't need per-pixel alpha), sized/positioned
+  to exactly match its target's `GetWindowRect()`. Session state
+  (candidate snapshot, highlight index, overlay pool) lives as plain
+  globals in `main.cpp`, same pattern as `g_trackedWindow`.
+  - [x] Basic dimming working — human-confirmed.
+  - [x] **Real bug: highlighted window could still end up hidden behind
+    another (e.g. maximized) window.** Dimming alone isn't enough if the
+    highlighted window itself isn't actually visible. Fixed by making
+    the highlighted window itself `HWND_TOPMOST` while highlighted
+    (`SWP_NOACTIVATE` — purely visual, no focus change) and demoting it
+    back (`HWND_NOTOPMOST`) the instant highlight moves off it or the
+    session ends, so exactly one window is ever topmost at a time.
+  - [x] **Real bug: promotion order.** Among windows marked
+    `HWND_TOPMOST`, whichever gets that status *most recently* ends up
+    frontmost. Since every dim overlay is also topmost, promoting the
+    highlighted window before placing the other overlays in the same
+    `ApplyAltTabDimming()` pass let a later overlay end up in front of
+    it. Fixed by restructuring so the highlighted window's own promotion
+    always happens last, strictly after every other overlay is placed.
+  - [x] **Real bug: the committed window wasn't actually becoming
+    active.** `SetForegroundWindow` from a background process is subject
+    to Windows' foreground-lock heuristic and can be silently ignored.
+    Fixed with the standard, widely-used workaround: inject a harmless
+    dummy keystroke (`SendInput`, a bare Ctrl tap) immediately before the
+    `SetForegroundWindow` call — resets whatever internal "did this
+    process just handle real input" state that heuristic checks.
+    Human-confirmed fixed.
+  - [x] Diagnostic logging added for `SetWindowPos(HWND_TOPMOST)`
+    failures, most likely cause being UIPI blocking cross-privilege
+    manipulation of an elevated window (see `docs/LIMITATIONS.md` #1) —
+    not yet actually triggered/confirmed in testing.
+  - [x] **Real bug: dimming incorrectly affected windows in front of the
+    dimmed one.** Each overlay was `WS_EX_TOPMOST`, sized to its target's
+    rect — but that blindly covers the *rect*, not the target
+    specifically, so any other window (candidate or not) stacked in
+    front of the target on the real desktop got incorrectly dimmed too.
+    Fixed by dropping `WS_EX_TOPMOST` entirely and instead inserting each
+    overlay directly *above its own target only*, in the normal z-order
+    (`GetWindow(target, GW_HWNDPREV)` for the insert-after handle, or
+    `HWND_TOP` if nothing is above target) — anything that was already
+    in front of the target now stays in front of its dim overlay too.
+    Rebuilt clean, 9/9 tests pass. Human-confirmed no longer an issue in
+    the 2-window case (no further complaint after this fix); superseded
+    by the promote/demote fix below for the "behind another window" case.
+  - [x] **Real bug: the highlighted window could still end up behind
+    another (dimmed) candidate window,** even with the z-order fix above
+    — `SWP_NOACTIVATE` alone doesn't reliably force DWM to fully
+    recompute z-order for a window that's never actually activated.
+    Fixed with a more robust, well-established technique: promote the
+    highlighted window to `HWND_TOPMOST`, then *immediately* demote it
+    back to `HWND_NOTOPMOST` — the brief topmost pulse forces it above
+    everything, and the immediate demotion settles it at the front of the
+    normal band instead of leaving it stuck topmost. Also simplified
+    `EndAltTabSession` (nothing to demote anymore, since the highlighted
+    window is never left topmost even transiently between cycles). Rebuilt
+    clean, 9/9 tests pass, human-confirmed fixed.
+  - [x] **Real bug, confirmed with log evidence: "Alt+Tab only shows 2
+    apps" after minimizing down to 3 non-minimized windows.** The
+    candidate-list diagnostic logging (added to investigate this)
+    confirmed it directly: the MRU order had only 3 tracked windows total
+    (2 real candidates + 1 correctly-filtered system window), meaning the
+    3rd real app had simply never been foreground since Polish started
+    tracking — the same known limitation the rest of the app already has
+    (`docs/LIMITATIONS.md` #3), but here it silently made the *entire
+    feature* miss windows rather than just delaying a sync. Fixed by
+    rebuilding the candidate list from `EnumWindows` (every currently
+    open, real, non-minimized window) rather than purely from
+    `g_activationHistory` — windows Polish does have recency data for are
+    still ordered by true MRU first; anything else falls back to
+    `EnumWindows`'s own Z-order, appended after. Rebuilt clean, 9/9 tests
+    pass; not yet re-verified live.
+  - [ ] **Open, not yet diagnosed: user reports visual "shadows" left
+    behind on a window after tabbing away from it.** Unclear yet whether
+    this is a static artifact (e.g. DWM's drop-shadow/glow rendering
+    slightly outside `GetWindowRect()`'s bounds, so the overlay doesn't
+    cover it) or a transient one (a redraw/timing lag where old content
+    briefly still shows through). Deferred until it can be described
+    more precisely or reproduced with a screenshot — not fixing on a
+    guess.
+- [ ] Live-updating the candidate list mid-session (currently a snapshot
+  taken once at session start) — not started, noted as a known
+  simplification, not urgent.
+- [ ] Native-Alt+Tab fallthrough when there are fewer than 2 candidates
+  — currently the hook always swallows regardless of candidate count
+  (the "let it fall through" design decision was never actually built);
+  low priority, rare in practice.
+
+**Superseded M3–M6 plan (DWM-thumbnail popup), kept for reference, not being built:**
+M3 — `AltTabSwitcherWindow` placeholder-chrome skeleton; M4 — real DWM
+thumbnails replace the placeholders; M5 — commit/cancel wired to
+`SetForegroundWindow`; M6 — labels, DPI/multi-monitor correctness, edge
+cases.
 
 ### 2. Other backlog items
 

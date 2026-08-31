@@ -18,6 +18,7 @@ add_library(polish_core STATIC
     src/windowtracking/ActivationHistory.cpp
     src/tray/TrayIcon.cpp
     src/hook/AltTabHook.cpp
+    src/hook/AltTabDimOverlay.cpp
 )
 
 target_include_directories(polish_core PUBLIC src resources)
