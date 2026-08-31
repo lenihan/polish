@@ -163,6 +163,28 @@ void AltTabHighlightBorder::ShowAroundTarget(HWND target) {
 
         Gdiplus::GraphicsPath path;
         BuildRoundedRectPath(path, width, height, radius);
+
+        // Clip to just the border band before filling -- confirmed via
+        // logged timing that filling the *entire* window-sized path
+        // (most of which the fast-falloff gradient below leaves fully
+        // transparent anyway) was the actual bottleneck behind a
+        // human-reported "flash" glitch, up to 125ms for a large/
+        // maximized target, dwarfing every other stage of the dimming
+        // pipeline (each under 16ms). GDI+ only rasterizes pixels inside
+        // the clip, so excluding the deep interior (using the full
+        // `thickness` inset as a safety margin beyond where the gradient
+        // actually finishes fading, not the tighter 45%-of-thickness
+        // point it reaches zero at) keeps render cost roughly constant
+        // regardless of how large the target window is.
+        Gdiplus::Region clipRegion(&path);
+        if (width > 2 * thickness && height > 2 * thickness) {
+            Gdiplus::RectF innerRect(static_cast<float>(thickness), static_cast<float>(thickness),
+                                      static_cast<float>(width - 2 * thickness),
+                                      static_cast<float>(height - 2 * thickness));
+            clipRegion.Exclude(innerRect);
+        }
+        graphics.SetClip(&clipRegion);
+
         Gdiplus::PathGradientBrush brush(&path);
 
         // A fast falloff, not a linear one -- solid right at the edge,

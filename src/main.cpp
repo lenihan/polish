@@ -1,5 +1,7 @@
 #include <windows.h>
 
+#include <shellapi.h>
+
 #include <algorithm>
 #include <format>
 #include <memory>
@@ -10,6 +12,7 @@
 #include "hook/AltTabDimOverlay.h"
 #include "hook/AltTabHighlightBorder.h"
 #include "hook/AltTabHook.h"
+#include "settings/Settings.h"
 #include "tray/TrayIcon.h"
 #include "util/Logging.h"
 #include "windowtracking/ActivationHistory.h"
@@ -35,6 +38,11 @@ HWINEVENTHOOK g_destroyHook = nullptr;
 UINT g_taskbarCreatedMessage = 0;
 
 std::unique_ptr<polish::TrayIcon> g_trayIcon;
+
+// User-toggleable feature flags, loaded once at startup and updated (+
+// persisted) whenever the tray menu checkboxes are toggled -- see
+// PopulateTrayMenu/HandleTrayCommand.
+polish::Settings g_settings;
 std::unique_ptr<polish::AltTabHook> g_altTabHook;
 
 // Alt+Tab switcher session state. A snapshot of candidates is taken once
@@ -180,6 +188,9 @@ std::optional<RECT> QueryCurrentWindowRect(HWND hwnd) {
 // `rect`, so this only updates where a *future* restore should go, not
 // anything currently on screen.
 void SyncRestorePlacement(HWND hwnd, const RECT& rect) {
+    if (!g_settings.restoreSyncEnabled) {
+        return;
+    }
     WINDOWPLACEMENT placement{};
     placement.length = sizeof(placement);
     if (!GetWindowPlacement(hwnd, &placement)) {
@@ -400,6 +411,9 @@ void RebuildAltTabCandidates() {
 // side effect -- by the time a real session starts, g_altTabCandidates
 // is already correct and OnAltTabCycle doesn't need to rebuild it again.
 bool AltTabHasEligibleCandidates() {
+    if (!g_settings.altTabEnabled) {
+        return false;  // native Alt+Tab runs untouched -- see AltTabHook
+    }
     RebuildAltTabCandidates();
     return g_altTabCandidates.size() >= 2;
 }
@@ -448,6 +462,7 @@ void EnsureAltTabHighlightBorder() {
 // actually activated. The promote-then-demote pulse sidesteps that
 // entirely instead of chasing it further.)
 void ApplyAltTabDimming() {
+    const ULONGLONG t0 = GetTickCount64();
     for (size_t i = 0; i < g_altTabCandidates.size(); ++i) {
         if (i == g_altTabHighlightIndex) {
             continue;  // handled last, below
@@ -456,6 +471,7 @@ void ApplyAltTabDimming() {
         SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         g_altTabOverlays[i]->ShowOverTarget(hwnd);
     }
+    const ULONGLONG t1 = GetTickCount64();
 
     const HWND highlighted = g_altTabCandidates[g_altTabHighlightIndex];
     g_altTabOverlays[g_altTabHighlightIndex]->Hide();
@@ -472,9 +488,19 @@ void ApplyAltTabDimming() {
             L"[Polish] AltTab: WARNING SetWindowPos(TOPMOST) failed for hwnd={} GetLastError={}",
             reinterpret_cast<void*>(highlighted), GetLastError()));
     }
+    const ULONGLONG t2 = GetTickCount64();
 
     EnsureAltTabHighlightBorder();
     g_altTabHighlightBorder->ShowAroundTarget(highlighted);
+    const ULONGLONG t3 = GetTickCount64();
+
+    // Timing breadcrumbs to chase a human-reported "flash of the
+    // previous window" glitch with real evidence -- a pre-warming fix
+    // (creating the overlay/border windows at startup instead of lazily)
+    // didn't resolve it, so the cause is still unconfirmed.
+    polish::LogDebug(std::format(
+        L"[Polish] AltTab: dimming timing -- otherOverlays={}ms highlightPromote={}ms highlightBorder={}ms",
+        t1 - t0, t2 - t1, t3 - t2));
 }
 
 void EndAltTabSession() {
@@ -488,6 +514,11 @@ void EndAltTabSession() {
 }
 
 void OnAltTabCycle(bool backward) {
+    if (g_altTabHook) {
+        const ULONGLONG queueDelayMs = GetTickCount64() - g_altTabHook->LastTabDetectedTick();
+        polish::LogDebug(
+            std::format(L"[Polish] AltTab: message-queue delay since Tab detected: {}ms", queueDelayMs));
+    }
     if (g_altTabCandidates.empty()) {
         // Defensive only -- shouldn't happen. AltTabHook's
         // hasEligibleCandidates callback (AltTabHasEligibleCandidates,
@@ -502,10 +533,19 @@ void OnAltTabCycle(bool backward) {
         for (HWND hwnd : g_altTabCandidates) {
             wchar_t title[128] = L"";
             GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+            wchar_t className[128] = L"";
+            GetClassNameW(hwnd, className, static_cast<int>(sizeof(className) / sizeof(className[0])));
             if (!candidateDump.empty()) {
                 candidateDump += L" | ";
             }
-            candidateDump += std::format(L"{}:\"{}\"", reinterpret_cast<void*>(hwnd), title);
+            // Class name included specifically to catch a hidden/
+            // suspended UWP host window (e.g. ApplicationFrameHost,
+            // Windows.UI.Core.CoreWindow) sneaking into the list --
+            // human-reported the Settings app sometimes appearing to
+            // "launch" mid Alt+Tab when it wasn't running before, most
+            // likely explained by committing to one of these instead of
+            // a genuinely new process.
+            candidateDump += std::format(L"{}:\"{}\"[{}]", reinterpret_cast<void*>(hwnd), title, className);
         }
         polish::LogDebug(std::format(L"[Polish] AltTab: session starting, {} candidate(s): {}",
                                       g_altTabCandidates.size(), candidateDump));
@@ -565,6 +605,63 @@ void OnAltTabCancel() {
     }
     EndAltTabSession();
     polish::LogDebug(L"[Polish] AltTab: cancel");
+}
+
+constexpr UINT kMenuIdRestoreSync = 1;
+constexpr UINT kMenuIdAltTab = 2;
+constexpr UINT kMenuIdStartAtLogin = 3;
+constexpr UINT kMenuIdAbout = 4;
+constexpr UINT kMenuIdExit = 5;
+
+constexpr wchar_t kAboutUrl[] = L"https://www.linkedin.com/in/davidlenihan/";
+
+// Rebuilt fresh every time the tray icon's context menu is about to
+// open (see TrayIcon's populateMenu callback), so checkbox state is
+// always current -- in particular Start with Windows, whose real source
+// of truth is the Run key itself, not a cached value here.
+void PopulateTrayMenu(HMENU menu) {
+    AppendMenuW(menu, MF_STRING | (g_settings.restoreSyncEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdRestoreSync,
+                L"Restore remembers Snap position");
+    AppendMenuW(menu, MF_STRING | (g_settings.altTabEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdAltTab,
+                L"Alt+Tab (skip minimized)");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (polish::IsStartAtLoginEnabled() ? MF_CHECKED : MF_UNCHECKED),
+                kMenuIdStartAtLogin, L"Start with Windows");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kMenuIdAbout, L"By David Lenihan. Hire me!");
+    AppendMenuW(menu, MF_STRING, kMenuIdExit, L"Exit");
+}
+
+void HandleTrayCommand(UINT commandId) {
+    switch (commandId) {
+        case kMenuIdRestoreSync:
+            g_settings.restoreSyncEnabled = !g_settings.restoreSyncEnabled;
+            polish::SaveSettings(g_settings);
+            polish::LogDebug(std::format(L"[Polish] restore-position sync {}",
+                                          g_settings.restoreSyncEnabled ? L"enabled" : L"disabled"));
+            break;
+        case kMenuIdAltTab:
+            g_settings.altTabEnabled = !g_settings.altTabEnabled;
+            polish::SaveSettings(g_settings);
+            polish::LogDebug(
+                std::format(L"[Polish] Alt+Tab {}", g_settings.altTabEnabled ? L"enabled" : L"disabled"));
+            break;
+        case kMenuIdStartAtLogin: {
+            const bool newValue = !polish::IsStartAtLoginEnabled();
+            polish::SetStartAtLoginEnabled(newValue);
+            polish::LogDebug(
+                std::format(L"[Polish] start with Windows {}", newValue ? L"enabled" : L"disabled"));
+            break;
+        }
+        case kMenuIdAbout:
+            ShellExecuteW(nullptr, L"open", kAboutUrl, nullptr, nullptr, SW_SHOWNORMAL);
+            break;
+        case kMenuIdExit:
+            DestroyWindow(g_messageWindow);
+            break;
+        default:
+            break;
+    }
 }
 
 LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -662,6 +759,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     polish::LogStartupBanner();
     LogDpiAwareness();
 
+    g_settings = polish::LoadSettings();
+    polish::LogDebug(std::format(L"[Polish] settings loaded: restoreSyncEnabled={} altTabEnabled={}",
+                                  g_settings.restoreSyncEnabled, g_settings.altTabEnabled));
+
     g_messageWindow = CreateMessageWindow(instance);
     if (g_messageWindow == nullptr) {
         CloseHandle(singleInstanceMutex);
@@ -682,7 +783,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_destroyHook = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY, nullptr, OnWinEvent, 0, 0,
                                      WINEVENT_OUTOFCONTEXT);
 
-    g_trayIcon = std::make_unique<polish::TrayIcon>(g_messageWindow, [] { DestroyWindow(g_messageWindow); });
+    g_trayIcon = std::make_unique<polish::TrayIcon>(g_messageWindow, PopulateTrayMenu, HandleTrayCommand);
 
     g_altTabHook = std::make_unique<polish::AltTabHook>(g_messageWindow, AltTabHasEligibleCandidates,
                                                          OnAltTabCycle, OnAltTabCommit, OnAltTabCancel);
@@ -693,6 +794,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     } else {
         polish::LogDebug(L"[Polish] Alt+Tab keyboard hook installed successfully");
     }
+
+    // Pre-create the dim overlays and highlight border now, at startup,
+    // rather than paying CreateWindowExW + first-paint latency in
+    // response to the user's actual first Tab press -- confirmed as a
+    // real, visible glitch (the previously-active window briefly still
+    // looked highlighted/undimmed before the real highlight caught up).
+    // EnsureAltTabOverlayPoolSize only ever grows the pool, so this is
+    // purely a head start for the common case, not a hard requirement --
+    // it still grows safely later if more windows open than were open
+    // right now.
+    RebuildAltTabCandidates();
+    EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
+    EnsureAltTabHighlightBorder();
 
     OnForegroundChanged(GetForegroundWindow());
 

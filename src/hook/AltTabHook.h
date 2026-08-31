@@ -16,6 +16,25 @@ namespace polish {
 // instead, untouched. A deliberate backup, not just an incidental side
 // effect of some other check.
 //
+// While a session is active, a second, dynamically installed/uninstalled
+// WH_MOUSE_LL hook watches for any mouse button press and immediately
+// commits (not cancels -- see onCommit) the moment one happens, ending
+// the session on whatever's currently highlighted. The click itself is
+// deliberately left untouched (not swallowed) -- it reaches whatever's
+// actually under the cursor completely normally, same as always (the dim
+// overlays are WS_EX_TRANSPARENT on purpose, so nothing about them
+// blocks it either way), so a single click can e.g. both minimize some
+// window and land Alt+Tab on whatever was highlighted, which don't have
+// to be the same window. Exists because leaving a session open through a
+// click was confirmed as a real bug: closing, minimizing, or maximizing
+// a window changes its shape or makes it stop existing while Polish's
+// own session state still pointed at it, leaving the highlight/dim
+// visuals stale. Installed only while a session is open (not for the
+// whole app lifetime, unlike the keyboard hook) specifically to avoid
+// paying for a global mouse hook's overhead (mouse-move volume is much
+// higher than keyboard) outside the brief
+// window where it's actually needed.
+//
 // Two things confirmed empirically before/while writing this for real
 // (see PLAN.md): Alt-held combos arrive as WM_SYSKEYDOWN/WM_SYSKEYUP,
 // not WM_KEYDOWN/WM_KEYUP; and swallowing Tab-down while leaving Alt's
@@ -59,8 +78,9 @@ public:
     //   for that keypress at all.
     // onCycle(backward): Tab (backward=false) or Shift+Tab (backward=true)
     //   pressed while Alt is held -- advance/reverse the highlight.
-    // onCommit(): Alt released after at least one Tab was swallowed --
-    //   caller should focus the currently-highlighted window.
+    // onCommit(): Alt released after at least one Tab was swallowed, OR
+    //   a mouse button was pressed during an active session -- caller
+    //   should focus the currently-highlighted window either way.
     // onCancel(): Escape pressed while a session is active -- caller
     //   should dismiss without acting. Ends the session outright (unlike
     //   onCommit, which only fires on Alt-up): onCommit will NOT also
@@ -84,6 +104,17 @@ public:
     // here from their WindowProc.
     void HandleHookMessage(WPARAM wParam);
 
+    // GetTickCount64() at the moment the first Tab-while-Alt of the
+    // current/most recent session was detected in the hook -- a cheap,
+    // no-I/O call (unlike LogDebug, which isn't done from inside the
+    // hook itself). Callers can diff this against GetTickCount64() when
+    // they actually start processing the resulting onCycle to see how
+    // much of any visible delay is message-queue latency versus their
+    // own rendering work -- added to chase a human-reported "flash of
+    // the previous window" glitch with real evidence instead of guessing
+    // again.
+    ULONGLONG LastTabDetectedTick() const { return lastTabDetectedTick_; }
+
     // Whether SetWindowsHookExW actually succeeded -- callers should log
     // a warning if not (mirrors HotkeyManager::IsRegistered()'s pattern).
     bool IsInstalled() const { return hook_ != nullptr; }
@@ -92,7 +123,11 @@ public:
 
 private:
     static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK LowLevelMouseProc(int code, WPARAM wParam, LPARAM lParam);
     bool HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data);
+    bool HandleMouseEvent(WPARAM wParam);
+    void InstallMouseHook();
+    void UninstallMouseHook();
 
     HWND messageWindow_;
     std::function<bool()> hasEligibleCandidates_;
@@ -100,6 +135,7 @@ private:
     std::function<void()> onCommit_;
     std::function<void()> onCancel_;
     HHOOK hook_ = nullptr;
+    HHOOK mouseHook_ = nullptr;
 
     // True from the first swallowed Tab-while-Alt-held until the
     // matching Alt-up is swallowed (via commit or, if Escape cancelled
@@ -108,6 +144,15 @@ private:
     bool shiftHeld_ = false;
     bool ctrlHeld_ = false;
 
+    // Tracked the same observed-from-hook-events way as shiftHeld_/
+    // ctrlHeld_ -- true from a genuine Tab-down until its matching
+    // Tab-up, so OS key-repeat (which resends Tab-down repeatedly while
+    // it's held, with no repeat-count exposed to a low-level hook) can
+    // be told apart from an actual fresh press. Holding Tab down
+    // shouldn't rapidly cycle through windows any more than native
+    // Alt+Tab does.
+    bool tabPhysicallyDown_ = false;
+
     // True for the rest of the current Alt-hold once Ctrl+Alt+Tab (the
     // deliberate escape hatch to native Alt+Tab -- see HandleKeyEvent)
     // has handed off. While true, every subsequent Tab is also left
@@ -115,6 +160,8 @@ private:
     // released -- otherwise releasing Ctrl mid-hold could make Polish
     // start intercepting midway through native's own switcher session.
     bool nativeHandoffActive_ = false;
+
+    ULONGLONG lastTabDetectedTick_ = 0;
 };
 
 }  // namespace polish

@@ -352,6 +352,107 @@ dedicated plan drafted for this feature (real files, branch `alt_tab`):
   neither) the Alt-hold took. Rebuilt clean, 9/9 tests pass; not yet
   re-verified live. Not yet documented in README.md — holding off until
   the feature as a whole is done, not just this piece.
+- [x] **Real bug: mouse clicks during a session reached whatever real
+  window was underneath completely normally, leaving Polish's session
+  state stale.** The dim overlays are `WS_EX_TRANSPARENT` on purpose, so
+  nothing about them blocks a click — meaning the user could click
+  close/minimize/maximize on a visible (dimmed or highlighted) window
+  mid-session, changing its shape or making it stop existing while the
+  highlight/dim visuals still pointed at it. Fixed by adding a second,
+  dynamically installed/uninstalled `WH_MOUSE_LL` hook to `AltTabHook`
+  (installed only while a session is open, not for the app's whole
+  lifetime like the keyboard hook — mouse-move volume is far higher than
+  keyboard, no reason to pay for that outside the brief window it's
+  needed) that watches for any mouse button press and immediately
+  **commits** (not cancels) with whatever's currently highlighted.
+  Rebuilt clean, 9/9 tests pass.
+  - [x] **Follow-up correction**: the click is now deliberately left
+    untouched (not swallowed) rather than consumed by the commit — it
+    reaches whatever's actually under the cursor completely normally,
+    at the same time as ending the session. Requested explicitly: a
+    single click should be able to both e.g. minimize some window and
+    land Alt+Tab on whatever was highlighted, which don't have to be the
+    same window. Rebuilt clean, 9/9 tests pass.
+- [x] **Real bug: the previously-active window briefly still looked
+  highlighted/undimmed right when a session started, before the real
+  highlight (index 1, the previous window) visibly caught up.** Internal
+  state was already correct from the first `ApplyAltTabDimming()` call
+  (`g_altTabHighlightIndex` is set to 1 before it's ever called) — this
+  was a rendering-latency issue, not a logic bug: the dim overlays and
+  highlight border are created lazily (`CreateWindowExW` + first paint)
+  on whichever session happens to need them first, and that creation
+  cost was being paid synchronously in response to the user's actual
+  first Tab press. Fixed by pre-creating the overlay pool and highlight
+  border at app startup instead (`EnsureAltTabOverlayPoolSize`/
+  `EnsureAltTabHighlightBorder` called once in `wWinMain`, sized from an
+  initial `RebuildAltTabCandidates()`) — purely a head start for the
+  common case, since the pool still grows safely later if more windows
+  open than were open at startup. Rebuilt clean, 9/9 tests pass.
+  - [ ] **Did not fix it — user re-confirmed the flash is still there.**
+    Root cause still unconfirmed; not guessing again. Added real
+    diagnostics instead: `AltTabHook::LastTabDetectedTick()` (a cheap
+    `GetTickCount64()` captured the instant Tab-while-Alt is detected in
+    the hook, no logging inside the hook itself) diffed against
+    `GetTickCount64()` when `OnAltTabCycle` actually starts processing
+    (message-queue latency), plus three more checkpoints through
+    `ApplyAltTabDimming` (other-candidates' overlays, the highlighted
+    window's promote/demote pulse, the highlight border's render) so the
+    delay can be attributed to a specific stage instead of guessed at.
+    Rebuilt clean, 9/9 tests pass.
+  - [x] **The diagnostics found it**: message-queue delay was 0–15ms
+    (negligible) and the other two stages were 0–16ms, but the highlight
+    border's own render consistently dominated at 47–125ms — an order of
+    magnitude slower than everything else combined. Root cause: the
+    `PathGradientBrush` fill covered the *entire* window-sized rounded
+    rect, even though the fast-falloff curve leaves almost all of that
+    interior fully transparent — for a large/maximized target, GDI+ was
+    shading up to millions of pixels it didn't need to. Fixed by clipping
+    the fill to just the border band (`Gdiplus::Region` built from the
+    outer path, `Exclude`d by an inner rect inset `thickness` pixels —
+    the full thickness as a safety margin, not the tighter 45%-of-
+    thickness point the gradient actually reaches zero at, so there's no
+    risk of clipping through a still-fading pixel) before calling
+    `FillPath` — GDI+ only rasterizes pixels inside the clip, so cost
+    stays roughly constant regardless of target window size. Rebuilt
+    clean, 9/9 tests pass.
+  - [x] **User-confirmed: no longer seeing the flash.** Worth being
+    honest about the actual evidence, though: re-measured timing after
+    this fix still showed `highlightBorder` at 31–109ms, barely different
+    from before the clip — so the clip optimization (still a legitimate,
+    kept perf win) likely wasn't the deciding factor after all. Best
+    explanation: the key-repeat fix (tracked separately, landed just
+    before this) was probably the real fix here — before it, a single
+    physical Tab press could trigger multiple rapid cycle events via OS
+    auto-repeat, which would look exactly like "active window highlighted,
+    then immediately jumps to the next one." Once repeat-cycling stopped,
+    that illusion likely went away. Not chasing the render-time number
+    further since there's no user-visible problem left to fix.
+- [ ] **Open, not yet diagnosed: user reports the Windows Settings app
+  sometimes appears to launch mid Alt+Tab, when it wasn't running
+  before.** No repro steps yet, happened "several times." Leading
+  hypothesis: a hidden/suspended UWP host window (Settings and other
+  first-party UWP apps often stay resident even when the user believes
+  they're closed) is passing `IsCandidateWindow`'s filter and getting
+  committed to like any other candidate — `SetForegroundWindow` on it
+  would make it visibly pop up, looking exactly like "it just launched."
+  Added class names (not just titles) to the candidate-list dump
+  specifically to catch this (watch for `ApplicationFrameHost`,
+  `Windows.UI.Core.CoreWindow`, or similar in the log) — not yet
+  confirmed either way.
+- [x] **UX fix: holding Tab down was rapidly cycling through candidates
+  via OS key-repeat, instead of staying on the current highlight until a
+  genuine fresh press** (native Alt+Tab doesn't auto-cycle on repeat
+  either). A low-level hook gets no repeat-count for a key the way a
+  normal `WM_KEYDOWN`'s lParam would carry one, so this is tracked the
+  same observed-from-hook-events way as `shiftHeld_`/`ctrlHeld_`: a new
+  `tabPhysicallyDown_`, true from a genuine Tab-down until its matching
+  Tab-up, with repeated Tab-down events while it's already true
+  recognized as OS repeat and ignored (still swallowed if a session is
+  active, so the repeat doesn't leak through to whatever's behind it).
+  Tab-up handling restructured to unconditionally reset
+  `tabPhysicallyDown_` (not gated on `altHeld`/`sessionActive_`) so it
+  can never get stuck true. Rebuilt clean, 9/9 tests pass; not yet
+  re-verified live.
 
 **Superseded M3–M6 plan (DWM-thumbnail popup), kept for reference, not being built:**
 M3 — `AltTabSwitcherWindow` placeholder-chrome skeleton; M4 — real DWM
@@ -359,7 +460,58 @@ thumbnails replace the placeholders; M5 — commit/cancel wired to
 `SetForegroundWindow`; M6 — labels, DPI/multi-monitor correctness, edge
 cases.
 
-### 2. Other backlog items
+### 2. Settings menu: per-feature toggles, autostart, About
+
+User-requested: a way to individually disable each feature, a "load at
+startup" option, and an About item advertising the author as available
+for hire.
+
+- [x] `src/settings/Settings.h/.cpp` — `restoreSyncEnabled`/
+  `altTabEnabled`, persisted to `HKCU\Software\Polish` (registry, not a
+  config file — no other reason this app would need the filesystem, and
+  the registry gives atomic per-value read/write for free). Autostart is
+  deliberately *not* one of these persisted flags — `IsStartAtLoginEnabled`
+  queries the `HKCU\...\Run` key's own presence live instead, so a user
+  who removes it via Windows' own Startup Apps settings doesn't leave
+  Polish's cached idea of the setting stale.
+- [x] `TrayIcon` reworked from a hardcoded Exit-only menu to a
+  `populateMenu(HMENU)` callback the caller fills in fresh each time the
+  menu opens (so checkbox state, especially Start with Windows, is always
+  current) plus a generic `onCommand(UINT)` callback — `TrayIcon` now
+  owns none of the menu content or command IDs, purely the tray
+  icon/menu mechanics. `kExitCommandId` removed; `main.cpp` owns Exit
+  like every other item now.
+- [x] Menu: **Restore remembers Snap position** (relabeled from "Restore-
+  position sync" — the internal mechanism name didn't mean anything out
+  of context) and **Alt+Tab (skip minimized)** checkboxes, **Start with
+  Windows** checkbox, the About/hire-me item, **Exit**. Toggling a
+  feature checkbox gates the
+  actual behavior at its existing single choke point — `SyncRestorePlacement`
+  returns immediately if `restoreSyncEnabled` is false;
+  `AltTabHasEligibleCandidates` returns false immediately if
+  `altTabEnabled` is false, which (already-built machinery) means native
+  Alt+Tab just runs untouched rather than needing to
+  install/uninstall the hook itself.
+- [x] Menu item itself carries the pitch, not just its destination —
+  the actual name, so it's visible even to someone who never clicks:
+  **"By David Lenihan. Hire me!"**, opens his LinkedIn
+  profile (`https://www.linkedin.com/in/davidlenihan/`) via
+  `ShellExecuteW`.
+- [x] Tray icon hover tooltip reworded to a tagline: **"Polish - Add fit
+  and finish to Windows"** (was "Polish (running) - keeps Snap and
+  Maximize/Restore in sync", which described only one feature and read
+  as an internal status string, not a pitch).
+- [x] Rebuilt clean, 9/9 tests pass, clean startup confirmed (settings
+  load with correct first-run defaults when the registry key doesn't
+  exist yet); not yet re-verified live for the actual toggle behavior.
+- [ ] **Known gap: `IsStartAtLoginEnabled` only checks whether the Run
+  key value exists, not Windows' separate `StartupApproved` state.**
+  Task Manager's own Startup Apps tab can disable an entry without
+  removing it from the Run key — if the user does that, our checkbox
+  would still show checked even though Windows won't actually run it at
+  login. Not handled; noted as a known limitation, not urgent.
+
+### 3. Other backlog items
 
 - Taskbar: Make hover show windows in actual position on screen so you can identify
   a window spacially. Minimized windows would be a list without any thumbnail
@@ -368,9 +520,8 @@ cases.
 - Full multi-window tracking (sync every window, not just the
   foreground one) — `WinEventHookManager`, a tracked-window set seeded
   via `EnumWindows`, and a periodic reconciliation sweep.
-- Autostart (`HKCU...\Run`, `StartupApproved` awareness).
-- Settings (`%LOCALAPPDATA%` config: global enable/disable, an exclusion
-  list by process name).
+- Exclusion list by process name (global enable/disable + autostart
+  landed above; per-process exclusion did not).
 - "Restart as Administrator" tray item, so elevated windows (currently
   invisible to Polish — see limitations #1) can be covered too.
 - Full `docs/LIMITATIONS.md` pass and manual test matrix once the above

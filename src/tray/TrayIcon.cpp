@@ -10,8 +10,9 @@ namespace {
 constexpr UINT kIconId = 1;
 }  // namespace
 
-TrayIcon::TrayIcon(HWND messageWindow, std::function<void()> onExitRequested)
-    : messageWindow_(messageWindow), onExitRequested_(std::move(onExitRequested)) {
+TrayIcon::TrayIcon(HWND messageWindow, std::function<void(HMENU)> populateMenu,
+                    std::function<void(UINT)> onCommand)
+    : messageWindow_(messageWindow), populateMenu_(std::move(populateMenu)), onCommand_(std::move(onCommand)) {
     AddIcon();
 }
 
@@ -33,7 +34,7 @@ void TrayIcon::AddIcon() {
     data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     data.uCallbackMessage = kCallbackMessage;
     data.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_POLISH_TRAY));
-    wcscpy_s(data.szTip, L"Polish (running) - keeps Snap and Maximize/Restore in sync");
+    wcscpy_s(data.szTip, L"Polish - Add fit and finish to Windows");
 
     iconAdded_ = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
 }
@@ -51,8 +52,8 @@ void TrayIcon::HandleCallbackMessage(LPARAM lParam) {
 }
 
 void TrayIcon::HandleCommand(WPARAM wParam) {
-    if (LOWORD(wParam) == kExitCommandId && onExitRequested_) {
-        onExitRequested_();
+    if (onCommand_) {
+        onCommand_(LOWORD(wParam));
     }
 }
 
@@ -61,7 +62,9 @@ void TrayIcon::ShowContextMenu() {
     GetCursorPos(&cursorPos);
 
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, kExitCommandId, L"Exit");
+    if (populateMenu_) {
+        populateMenu_(menu);
+    }
 
     // Standard dance so the menu dismisses correctly on an outside click:
     // the window must be foreground before TrackPopupMenuEx, and a

@@ -55,11 +55,25 @@ AltTabHook::AltTabHook(HWND messageWindow, std::function<bool()> hasEligibleCand
 }
 
 AltTabHook::~AltTabHook() {
+    UninstallMouseHook();
     if (hook_ != nullptr) {
         UnhookWindowsHookEx(hook_);
     }
     if (g_instance == this) {
         g_instance = nullptr;
+    }
+}
+
+void AltTabHook::InstallMouseHook() {
+    if (mouseHook_ == nullptr) {
+        mouseHook_ = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, GetModuleHandleW(nullptr), 0);
+    }
+}
+
+void AltTabHook::UninstallMouseHook() {
+    if (mouseHook_ != nullptr) {
+        UnhookWindowsHookEx(mouseHook_);
+        mouseHook_ = nullptr;
     }
 }
 
@@ -71,6 +85,34 @@ LRESULT CALLBACK AltTabHook::LowLevelKeyboardProc(int code, WPARAM wParam, LPARA
         }
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+LRESULT CALLBACK AltTabHook::LowLevelMouseProc(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HC_ACTION && g_instance != nullptr && g_instance->HandleMouseEvent(wParam)) {
+        return 1;  // swallow: this click is the commit trigger, not a real interaction
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+bool AltTabHook::HandleMouseEvent(WPARAM wParam) {
+    if (!sessionActive_) {
+        return false;
+    }
+    if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_MBUTTONDOWN ||
+        wParam == WM_XBUTTONDOWN) {
+        // Commits (not cancels), and deliberately NOT swallowed (return
+        // false) -- the click should reach whatever's actually under the
+        // cursor completely normally (the dim overlays are already
+        // WS_EX_TRANSPARENT, so it will), at the same time as ending the
+        // session on whatever's currently highlighted. Lets a single
+        // click both e.g. minimize some window and land Alt+Tab on
+        // whatever was highlighted, which don't have to be the same
+        // window.
+        sessionActive_ = false;
+        UninstallMouseHook();
+        PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::Commit), 0);
+    }
+    return false;
 }
 
 bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
@@ -93,9 +135,20 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
     const bool altHeld = (data.flags & LLKHF_ALTDOWN) != 0;
 
     if (data.vkCode == VK_TAB && altHeld && IsDown(wParam)) {
+        lastTabDetectedTick_ = GetTickCount64();
         if (nativeHandoffActive_) {
             return false;  // already handed off this Alt-hold, hands off
         }
+        if (tabPhysicallyDown_) {
+            // OS key-repeat while Tab is physically held, not a genuine
+            // new press -- holding Tab down shouldn't rapidly cycle
+            // through windows any more than native Alt+Tab does; only a
+            // fresh press should advance the highlight. Still swallowed
+            // whenever a session is active, so the repeat doesn't leak
+            // through to whatever's behind it either.
+            return sessionActive_;
+        }
+        tabPhysicallyDown_ = true;
         if (!sessionActive_) {
             if (ctrlHeld_) {
                 // Escape hatch: Ctrl+Alt+Tab bypasses Polish entirely for
@@ -113,14 +166,19 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
                 return false;
             }
             InjectHarmlessKeystroke();  // once per session -- see comment above
+            InstallMouseHook();
         }
         sessionActive_ = true;
         PostMessageW(messageWindow_, kHookMessage,
                      static_cast<WPARAM>(shiftHeld_ ? HookAction::CycleBackward : HookAction::CycleForward), 0);
         return true;
     }
-    if (data.vkCode == VK_TAB && altHeld && IsUp(wParam) && sessionActive_) {
-        return true;  // swallow the matching up, down was swallowed above
+    if (data.vkCode == VK_TAB && IsUp(wParam)) {
+        // Unconditional (not gated on altHeld/sessionActive_) so
+        // tabPhysicallyDown_ can never get stuck true -- e.g. Alt could
+        // be released fractionally before Tab in some ordering.
+        tabPhysicallyDown_ = false;
+        return altHeld && sessionActive_;  // swallow the matching up, down was swallowed above
     }
 
     if (IsAltKey(data.vkCode) && IsUp(wParam)) {
@@ -133,6 +191,7 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
             // InjectHarmlessKeystroke's comment for why swallowing
             // Alt-up specifically must never happen.
             sessionActive_ = false;
+            UninstallMouseHook();
             PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::Commit), 0);
         }
         return false;
@@ -145,6 +204,7 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         // and the user presses Tab again, that correctly starts a fresh
         // session rather than silently doing nothing.
         sessionActive_ = false;
+        UninstallMouseHook();
         PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::Cancel), 0);
         return true;
     }
