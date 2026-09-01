@@ -10,6 +10,8 @@ add_executable(polish_tests
     TestMain.cpp
     RectUtilsTests.cpp
     ActivationHistoryTests.cpp
+    GroupStateTests.cpp
+    GroupManagerTests.cpp
 )
 
 target_link_libraries(polish_tests PRIVATE polish_core doctest::doctest)

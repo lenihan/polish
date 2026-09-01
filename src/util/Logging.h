@@ -27,15 +27,30 @@ inline void LogDebug(const std::wstring& message) {
 
     OutputDebugStringW((line + L"\n").c_str());
 
+    // Converted to UTF-8 and written via a narrow ofstream, rather than
+    // just wofstream'ing the wide string directly -- a plain wofstream
+    // with no explicit codecvt facet uses the "C" locale's narrow
+    // conversion, which can't represent non-ASCII characters (an em
+    // dash, or any real-world window title with accented/non-Latin
+    // text) and silently truncates the rest of that line -- including
+    // its trailing newline -- the moment it hits one. Confirmed the hard
+    // way via a garbled, run-together log line.
+    const int utf8Length = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string utf8Line;
+    if (utf8Length > 0) {
+        utf8Line.resize(static_cast<size_t>(utf8Length) - 1);  // exclude the null terminator
+        WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, utf8Line.data(), utf8Length, nullptr, nullptr);
+    }
+
     static std::mutex logMutex;
     std::lock_guard<std::mutex> lock(logMutex);
     wchar_t tempPath[MAX_PATH];
     if (GetTempPathW(MAX_PATH, tempPath) == 0) {
         return;
     }
-    std::wofstream file(std::wstring(tempPath) + L"polish.log", std::ios::app);
+    std::ofstream file(std::wstring(tempPath) + L"polish.log", std::ios::app | std::ios::binary);
     if (file) {
-        file << line << L"\n";
+        file << utf8Line << "\n";
     }
 }
 

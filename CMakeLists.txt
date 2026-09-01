@@ -16,10 +16,16 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(polish_core STATIC
     src/windowtracking/RectUtils.cpp
     src/windowtracking/ActivationHistory.cpp
+    src/windowtracking/GroupState.cpp
+    src/windowtracking/GroupManager.cpp
+    src/windowtracking/WindowFilters.cpp
+    src/windowtracking/WindowZOrder.cpp
     src/tray/TrayIcon.cpp
     src/hook/AltTabHook.cpp
     src/hook/AltTabDimOverlay.cpp
     src/hook/AltTabHighlightBorder.cpp
+    src/hook/GroupChromeWindow.cpp
+    src/hook/GroupPickerWindow.cpp
     src/settings/Settings.cpp
 )
 
@@ -43,7 +49,13 @@ target_link_libraries(polish_core PUBLIC
 )
 
 if(MSVC)
-    target_compile_options(polish_core PRIVATE /W4 /permissive-)
+    # /utf-8 matters beyond just warnings: without it, MSVC assumes a
+    # source file with no BOM is in the current system codepage, so a
+    # non-ASCII character inside a wide string literal (e.g. an em dash)
+    # gets silently mis-decoded into garbage at compile time rather than
+    # a build error -- confirmed the hard way via a garbled log line
+    # (GroupPickerWindow's title) before this flag was added.
+    target_compile_options(polish_core PRIVATE /W4 /permissive- /utf-8)
 endif()
 
 add_executable(polish WIN32
@@ -54,7 +66,7 @@ add_executable(polish WIN32
 target_link_libraries(polish PRIVATE polish_core)
 
 if(MSVC)
-    target_compile_options(polish PRIVATE /W4 /permissive-)
+    target_compile_options(polish PRIVATE /W4 /permissive- /utf-8)
     # The linker's own auto-generated manifest (resource id 1) collides with
     # the one we embed via resources/app.rc (which carries our Per-Monitor-V2
     # DPI declaration) - disable it so ours is the only one.

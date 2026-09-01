@@ -527,6 +527,330 @@ for hire.
 - Full `docs/LIMITATIONS.md` pass and manual test matrix once the above
   land.
 
+### 4. Window groups (tab and tile) — in progress, branch `containers`
+
+Replaces Windows' old "Cascade windows" taskbar option: a group brings
+multiple real windows together, switchable via tabs (like browser tabs)
+or shown simultaneously as tiles. Full design plan (research findings,
+resolved UX decisions, milestones) at
+`C:\Users\david\.claude\plans\i-want-to-make-compressed-dusk.md` as of
+2026-08-31 — summary here, that file has the detail. (Originally called
+"containers" throughout planning; renamed to "groups" per user request
+on 2026-08-31 — the branch name `containers` was kept as-is, only the
+feature's own terminology changed.)
+
+**Resolved design decisions:**
+
+- **Never `SetParent` across process boundaries — reposition-only.**
+  Researched, not assumed: cross-process `SetParent` attaches the two
+  threads' input queues (a hang in the member's process hangs Polish's
+  UI thread too — Raymond Chen), is silently blocked by UIPI for
+  elevated members (same wall already hit for `SetWindowPos`/
+  `SetForegroundWindow`, `docs/LIMITATIONS.md` #1), and on Windows 11
+  with GPU compositing specifically DWM has been reported to keep
+  rendering a reparented window as its own independent composited
+  surface regardless of its new logical parent — the visual containment
+  the feature depends on may just not happen. Actively maintained tools
+  today (GlazeWM, komorebi) don't reparent either; TidyTabs (closest
+  prior art) does and users report exactly the resulting instability. So
+  a group is pure coordinate/z-order choreography over untouched,
+  independent top-level windows — the same technique already proven by
+  `AltTabDimOverlay`/`AltTabHighlightBorder`.
+- **The group is a regular, taskbar-visible, Alt+Tab-visible application
+  window — not a special Polish-owned overlay.** Revised mid-planning
+  from an earlier "group excluded from Alt+Tab" idea; the user corrected
+  this explicitly ("it is a regular .exe"). Both the group and each
+  member window show up in Alt+Tab independently, which turned out to
+  need **zero changes** to `IsCandidateWindow`/`RebuildAltTabCandidates`
+  — backgrounded members just stay fully live and `WS_VISIBLE`, pushed
+  behind the active one in z-order, never minimized or restyled. The one
+  real new requirement this creates: a group must notice via
+  `OnForegroundChanged` when one of its own members gets activated some
+  other way (e.g. Alt+Tab, not its own tab strip) and sync its
+  active-tab state/chrome to match.
+- **Creation**: explicit "New Group" action (tray menu item and a
+  **Win+Alt+G** global hotkey) → picker of currently open windows to
+  populate it. **Add/remove**: picker-based for v1; drag-in/drag-out is
+  the desired end state but a stretch goal, not guaranteed.
+  **Persistence**: groups persist across restarts with best-effort
+  reattachment by process name + title (HWNDs never survive a restart) —
+  user chose this over simpler in-memory-only, knowing matches will
+  sometimes be wrong. **Group dragging**: dragging the chrome moves every
+  member together. **Mode**: one group can switch between tab/tile at
+  runtime (not two separate types). **Lock/unlock** and **nesting** (a
+  group can contain other groups) were also requested.
+- **v1 scope is deliberately smaller than all of the above**: a
+  single-level, single-mode-per-instance group, no persistence.
+  Mode-switching, lock/unlock, nesting, and persistence are explicit
+  post-v1 milestones (M7+), each needing their own design pass —
+  building everything at once would repeat a mistake this project
+  already made once (the original Alt+Tab plan fully designed a
+  DWM-thumbnail popup that was abandoned before half of it was built).
+
+**Milestones** (M0–M6, each independently verified before the next —
+see the plan file for full detail): M0 spikes that pure `SetWindowPos`
+repositioning (no reparenting) looks correct for 2-3 real apps including
+one packaged/UWP app; M1 `GroupState` + unit tests; M2 the creation/
+picker flow; M3 static chrome rendering, verified it *does* appear in
+Alt+Tab; M4 real tab switching (click and via-Alt+Tab), group-drag; M5
+the tile variant; M6 edge cases (member closed, elevated member
+excluded, multi-monitor/DPI, cleanup on group destroy).
+
+- [x] **M0 done** (mixed-DPI monitor case deferred to before M6, not
+  blocking). Spiked pure `SetWindowPos` repositioning against three real
+  running apps (Notepad, Settings — a real UWP/packaged app via
+  `ApplicationFrameWindow` — and VS Code), all landed correctly in target
+  slots with no `SetParent` anywhere. Found and fixed a real bug: two
+  were maximized, and `SetWindowPos` silently no-ops on size/position
+  while a window is still maximized — `ShowWindow(SW_RESTORE)` first is
+  now a confirmed requirement for `GroupManager`, not just a spike
+  detail. Human-confirmed group-dragging doesn't need `SetParent` either
+  — mechanism (hook the chrome's own `WM_MOVING`, re-drive each member's
+  `SetWindowPos` in lockstep) added to the plan file.
+- [x] **M1 done.** `src/windowtracking/GroupState.h/.cpp` — pure
+  state class (ordered membership, active index, tab/tile mode; member
+  storage already shaped for later nesting via a tagged
+  `GroupMemberKind`, without implementing recursion yet) +
+  `tests/GroupStateTests.cpp` (14 tests, all 24 project tests pass).
+- [x] **M2 done.** "New Group" creation flow, both triggers wired to the
+  same `TriggerNewGroup(HWND owner)` in `main.cpp`: a new tray menu item
+  and a `RegisterHotKey`/`WM_HOTKEY` Win+Alt+G hotkey (no existing
+  hotkey infrastructure to reuse — `HotkeyManager` was fully deleted
+  earlier in the project's history — a single `RegisterHotKey` call is
+  simple enough not to need one of its own). New files:
+  `src/windowtracking/WindowFilters.h/.cpp` (candidate-window filter
+  extracted out of `main.cpp`'s former local `IsCandidateWindow` so both
+  Alt+Tab and the picker share it, plus a new `IsElevatedWindow` —
+  compares the target process's token elevation against this one via
+  `GetTokenInformation(TokenElevation)`, used to exclude elevated
+  windows from the picker per the plan's "Bug categories to expect"
+  section, rather than offering something `SetWindowPos` would later
+  silently fail on); `src/hook/GroupPickerWindow.h/.cpp` (the picker
+  itself — not a real Win32 dialog/.rc template, a plain `WS_POPUP`
+  window with a checkbox-enabled `SysListView32` (Common Controls v6,
+  already declared in `app.manifest`) and its own nested message loop
+  while shown, same from-scratch-window spirit as `AltTabDimOverlay`/
+  `AltTabHighlightBorder`); `src/windowtracking/GroupManager.h/.cpp`
+  (owns the set of created `GroupState`s, `CreateGroup`/`FindGroup`) +
+  `tests/GroupManagerTests.cpp` (5 tests, all 29 project tests pass).
+  Live-verified end to end (not just build-verified) via a scripted
+  smoke test — `PostMessage`d the exact `WM_COMMAND` a real tray click
+  sends, confirmed the picker appeared populated with real candidate
+  windows, `BM_CLICK`'d Create Group, and read `%TEMP%\polish.log` to
+  confirm `GroupManager::CreateGroup` ran; separately verified the
+  cancel path (`WM_CLOSE`) logs a cancellation and creates no group.
+  Two real bugs found and fixed along the way, neither specific to
+  groups:
+  - **The Win+Alt+G hotkey fails to register on this dev machine**
+    (`RegisterHotKey` returns `GetLastError()=1409`,
+    `ERROR_HOTKEY_ALREADY_REGISTERED`) — this machine already has
+    something claiming a broad range of `Win+Alt+<letter>` combos, the
+    exact same quirk noted below in the Win32-gotchas history from the
+    abandoned `Win+Alt+T` toggle hotkey. Not a code bug and not
+    blocking: the tray menu item calls the identical `TriggerNewGroup`
+    path regardless of whether the hotkey claimed successfully, so the
+    feature works either way — but the hotkey itself should be
+    re-verified on a clean machine (or after finding/disabling
+    whatever's claiming it here) before considering it done.
+  - **Real, general logging bug, not just a group-picker cosmetic
+    issue**: `LogDebug` (`src/util/Logging.h`) wrote to
+    `%TEMP%\polish.log` via a plain `std::wofstream` with no explicit
+    codecvt facet — the "C" locale's default narrow conversion can't
+    represent any non-ASCII character, and silently truncates the rest
+    of that line (including its trailing newline) the instant it hits
+    one, corrupting the log stream for every subsequent line too (they
+    all run together). First surfaced by the picker window's own title
+    (an em dash), but this would have hit *any* real window title
+    containing non-ASCII text (accented names, non-Latin scripts,
+    emoji) — a real gap, not something specific to this feature. Fixed
+    by converting to UTF-8 (`WideCharToMultiByte`) and writing via a
+    narrow `std::ofstream` instead. Separately, MSVC itself needed
+    `/utf-8` added to `CMakeLists.txt`'s compile options (both
+    `polish_core` and `polish`) — without it, a non-ASCII character
+    inside a wide string literal in a BOM-less source file is
+    mis-decoded using the system codepage at *compile* time, no warning
+    or error, silently baking corrupted text into the binary.
+  - (Also: `FindWindow`/`FindWindowEx` from PowerShell/.NET P/Invoke
+    treats a `$null` window-title argument as an empty string, not a
+    true null pointer, so it only matches windows with an empty title —
+    a testing-tooling gotcha, not a Polish bug, but worth remembering
+    for future scripted verification: pass the real title, or filter by
+    class name via `EnumWindows` instead.)
+- [x] **M3 done.** `src/hook/GroupChromeWindow.h/.cpp`: a real, normal
+  top-level `WS_OVERLAPPEDWINDOW` (no `WS_EX_TOOLWINDOW`) that renders a
+  static tab strip -- one rectangular tab per member, titled from
+  `GetWindowTextW`, plain GDI (`FillRect`/`Rectangle`/`DrawTextW`), DPI-
+  scaled via `GetDpiForWindow`. Deliberately **not** using the DIB +
+  GDI+ + premultiply + `UpdateLayeredWindow` pipeline the plan
+  originally called out for this -- that pipeline exists to solve a
+  translucent-gradient alpha problem (see `AltTabHighlightBorder`) that
+  a flat, fully opaque tab strip doesn't have; reusing it here would've
+  been unnecessary complexity, not the "reuse a proven technique" win it
+  was for the highlight border. `TriggerNewGroup` (`main.cpp`) now
+  creates one `GroupChromeWindow` per created group (titled member
+  titles captured at creation time -- static, no live updates yet) and
+  keeps it in a new `g_groupChromeWindows` map keyed by `GroupId`,
+  cleaned up on app exit.
+  Live-verified, not just build-verified: the same scripted flow as M2
+  (tray-menu `WM_COMMAND` → picker → `BM_CLICK` Create Group), then
+  checked the resulting chrome window directly against
+  `IsCandidateWindow`'s exact filter (`IsWindowVisible`, `!IsIconic`, no
+  `GW_OWNER`, no `WS_EX_TOOLWINDOW`, has `WS_CAPTION`) -- all pass, and
+  `%TEMP%\polish.log` independently confirms it: creating the chrome
+  window fired a real `EVENT_SYSTEM_FOREGROUND`, and `OnForegroundChanged`
+  logged `candidate=true` and added it to the MRU order exactly like any
+  other real application window, with zero special-casing anywhere in
+  that path -- concretely proving the "no special-casing needed"
+  Alt+Tab-integration claim from the plan, not just asserting it.
+- [x] **M4 done.** Real tab switching, member positioning, group-drag,
+  and foreign-activation sync, all wired in `main.cpp`:
+  - `src/windowtracking/WindowZOrder.h/.cpp` — `PromoteWindowToFront`,
+    the promote-then-immediately-demote `HWND_TOPMOST` pulse extracted
+    out of `ApplyAltTabDimming` (which now calls it too, behavior
+    unchanged) so groups and Alt+Tab share one implementation.
+  - `GroupManager::ApplyLayout(group, contentRect)` — the one path
+    every reflow goes through (initial layout, a tab click, a
+    group-drag, or an externally-activated member): restores any
+    still-maximized member first (`ShowWindow(SW_RESTORE)`, confirmed
+    required by M0), `SetWindowPos`s every member into `contentRect`
+    (in tab mode every member shares the identical rect, so a
+    group-drag is just re-applying this with a shifted rect -- no
+    per-member offset math needed for v1), then promotes the active
+    member via `PromoteWindowToFront`.
+  - `GroupChromeWindow` gained active-tab highlighting (accent-blue
+    fill vs. the earlier flat gray for every tab), `WM_LBUTTONDOWN`
+    hit-testing against the tab rects (`onTabClicked_` callback), and
+    `WM_WINDOWPOSCHANGING` handling (`onMoved_` callback) for
+    group-drag. The move handling needed real care: at
+    `WM_WINDOWPOSCHANGING` time the window hasn't actually moved yet,
+    so the callback computes the *proposed* content rect directly from
+    the `WINDOWPOS` struct's `x`/`y`/`cx`/`cy`, correctly accounting for
+    the offset between the window's outer (non-client) rect and its
+    client area (title bar + borders) -- an earlier version of this
+    naively assumed the client area started right at the outer rect's
+    edge, which ignored the title bar entirely and would have
+    misplaced every member during a live drag. That offset is measured
+    once from the window's current (still pre-move at that point)
+    state and re-applied to the proposed position.
+  - `main.cpp`: `ReflowGroupTo(id, contentRect)` (the single call site
+    all three triggers funnel through), `ActivateGroupTab(id, index)`
+    (tab click -- switches `GroupState`'s active index, the chrome's
+    highlight, reflows, *and* actually calls `SetForegroundWindow` on
+    the newly active member -- unlike Alt+Tab's highlight-preview
+    promote, a tab click is a deliberate "switch to this" action, not
+    a preview), and `SyncGroupFromForeground(hwnd)` (called
+    unconditionally from `OnForegroundChanged` for every foreground
+    change; no-op unless `hwnd` is a group member, in which case it
+    updates that group's active index/chrome highlight and reflows,
+    but deliberately does *not* call `SetForegroundWindow` -- hwnd is
+    already foreground, that's what triggered it). The
+    `SetForegroundWindow`-from-a-background-process workaround (a
+    harmless injected Ctrl keystroke) was already duplicated once
+    between `AltTabHook` and `OnAltTabCommit`; adding a third copy for
+    `ActivateGroupTab` was one too many, so it's now a shared local
+    `InjectHarmlessCtrlKeystroke()` used by both `OnAltTabCommit` and
+    `ActivateGroupTab`.
+  Verified with a compiled harness linked directly against
+  `polish_core.lib` (same spike methodology as M0, not just build-
+  verified) rather than fighting cross-process `SysListView32` checkbox
+  automation from PowerShell (confirmed impractical -- `LVM_SETITEMSTATE`
+  needs a pointer valid in the *target* process, which a plain
+  cross-process `SendMessage` can't marshal). Against two real, running
+  Notepad windows and a real `GroupChromeWindow`: (1) initial
+  `ApplyLayout` positions both members into the content rect and
+  promotes the active one to the front of the real desktop z-order
+  (verified by walking `GW_HWNDNEXT`, not just trusting a return value);
+  (2) switching the active index and re-applying promotes the other
+  member instead; (3) a shifted content rect (simulating a drag) moves
+  both members to follow; (4) a synthetic `WM_LBUTTONDOWN` at a computed
+  tab coordinate correctly fires `onTabClicked_` with the right index;
+  (5) moving the chrome window via `SetWindowPos` fires `onMoved_` with
+  a proposed content rect that exactly matches
+  `ContentRectInScreenCoords()` once the move actually completes --
+  confirming the outer/client-offset fix above is actually correct, not
+  just plausible-looking. All 5 checks pass.
+- [x] **M5 done.** The tile variant, built as a mode flag through the
+  existing pieces rather than a parallel implementation, exactly as
+  planned:
+  - `GroupPickerWindow` gained a Tab/Tile radio-button choice (v1 has no
+    runtime mode switching -- M7+ -- so the mode is picked once, at
+    creation time; Tab is the default, matching `GroupMode`'s own
+    default). `ShowModal` now returns a `GroupPickerResult{windows,
+    mode}` instead of a bare window list.
+  - `GroupChromeWindow::Show` takes a `GroupMode`. In Tile mode the
+    header renders as a plain label ("Group (N window(s), tiled)") with
+    no clickable tabs -- `ComputeTabRects` returns empty, so
+    `WM_LBUTTONDOWN` hit-testing naturally no-ops, no special-casing
+    needed there.
+  - `GroupManager::ApplyLayout` now branches on `group.Mode()`:
+    `ApplyTabLayout` is the unchanged M4 behavior; `ApplyTileLayout`
+    divides `contentRect` into a roughly square grid (`cols =
+    ceil(sqrt(n))`, `rows = ceil(n/cols)`) and positions each member
+    into its own slot, computed from `left + col * width / cols` (next
+    boundary, not `left + col*slotWidth`) so integer-division remainder
+    pixels don't accumulate into a gap/overlap at the grid's far edge.
+    No z-order promotion in tile mode -- members don't overlap, so
+    there's nothing to bring to front.
+  Verified by extending the same compiled M0/M4-style harness: a
+  3-member Tile group's members land in the exact computed grid-slot
+  rects (positions matched exactly on the first attempt). Sizes
+  initially did *not* match at a smaller content rect (1000x800, 500x400
+  slots) -- not a bug in the layout math (every slot's `left`/`top` was
+  still exactly correct), but a **real, confirmed constraint worth
+  keeping in mind for M6's edge-case pass**: Notepad silently refused to
+  shrink below its own declared minimum tracking size
+  (`WM_GETMINMAXINFO`), clamping the actual window size wider/taller
+  than the requested slot. Re-verified with a larger content rect
+  (1600x1200, 800x600 slots, comfortably above that minimum) and all
+  three slots matched exactly.
+- [x] **Real user-reported bug, fixed: a member with a large minimum
+  window size (Outlook) overflowed visibly outside a small group.**
+  Direct confirmation of the M5 finding above, hit through actual usage
+  rather than just the spike: `SetWindowPos` silently clamps to a
+  window's own declared minimum tracking size instead of failing, and
+  the group had no way to notice or react, so the member just visually
+  spilled past the chrome's edge. Fixed properly rather than just
+  documented as a limitation:
+  - `GroupManager::ApplyLayout` (and both mode-specific helpers) now
+    return a `SIZE` -- the smallest content area that would fit every
+    member without any of them being clamped, computed from each
+    member's *actual* post-`SetWindowPos` `GetWindowRect()`, not the
+    requested rect. Tab mode: the max actual width/height across all
+    members (they all share one rect). Tile mode: a proper per-column/
+    per-row max, like HTML table auto-layout -- one oversized member
+    only grows its own column/row, not the whole grid uniformly.
+  - `GroupChromeWindow::GrowContentAreaTo(minContentSize)` resizes the
+    chrome (top-left held fixed) to be at least that big, measuring the
+    outer-rect-to-content-area offset the same way the
+    `WM_WINDOWPOSCHANGING` handler already does, for the same reason
+    (the client area doesn't start at the window's outer edge).
+  - `main.cpp`'s `ReflowGroupTo` -- the single funnel every trigger
+    (initial layout, tab click, group-drag, external activation) already
+    went through -- now checks `ApplyLayout`'s returned size against
+    what it asked for, and if larger, grows the chrome and re-applies
+    layout once. No loop: growth is a one-shot correction, not a retry
+    cycle.
+  Verified by extending the M0/M4/M5 compiled harness (Test 7): forced a
+  chrome down to a content size smaller than Notepad's own minimum
+  (already established at ~664x404 by the M5 test), ran the exact
+  detect-and-grow logic `ReflowGroupTo` uses, and confirmed the member
+  ends up **exactly** contained in the grown content rect -- zero
+  overflow in any direction, not just "smaller than before." All 7
+  spike checks pass (the 6 from M4/M5 plus this one).
+  Still an accepted gap, not chased further for v1: **a tile group
+  where *multiple* members in the same row/column each have large,
+  different minimums** can still grow larger than the screen/monitor,
+  since growth doesn't currently clamp to monitor work-area bounds --
+  carried into M6's multi-monitor edge-case pass below rather than
+  guessed at now.
+- [ ] Next: M6 — edge cases: a member closed while backgrounded (tab)
+  and while tiled (reflow both); an elevated window excluded from the
+  picker as designed (already true since M2, re-verify here);
+  multi-monitor/mixed-DPI member (including the mixed-DPI case deferred
+  since M0) and the grow-to-fit-vs-monitor-bounds gap noted just above;
+  chrome window destroyed (Polish exiting, or explicit ungroup) leaves
+  every member back in normal independent state.
+
 ## History (condensed)
 
 Polish went through three abandoned UI directions before landing on the
@@ -587,5 +911,19 @@ this codebase:**
   `SetThreadDpiAwarenessContext(-4)` at the top of every script that
   touches window rects, or coordinates get silently virtualized.
 - This dev machine has something claiming a broad range of
-  `Win+Alt+<letter>` hotkeys — moot now that the hotkey is gone, but
-  relevant again if a hotkey is ever reintroduced.
+  `Win+Alt+<letter>` hotkeys — confirmed again, directly, when the new
+  group feature's own `Win+Alt+G` hotkey failed to register
+  (`RegisterHotKey` → `ERROR_HOTKEY_ALREADY_REGISTERED`). Whatever it is
+  hasn't been identified; needs tracking down (or testing on a clean
+  machine) before relying on any `Win+Alt+<letter>` hotkey here again.
+- A plain `std::wofstream` with no explicit codecvt facet cannot
+  represent non-ASCII characters and silently truncates the rest of the
+  line (including the trailing newline) the moment it hits one,
+  corrupting the log stream for everything written after — convert to
+  UTF-8 (`WideCharToMultiByte`) and write via a narrow `std::ofstream`
+  instead.
+- A non-ASCII character inside a wide string literal, in a source file
+  saved without a BOM, is silently mis-decoded by MSVC at compile time
+  (using the system codepage) unless `/utf-8` is passed as a compile
+  option — no warning, no error, just corrupted text baked into the
+  binary.

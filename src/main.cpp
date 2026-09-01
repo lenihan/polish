@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <format>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -12,11 +13,16 @@
 #include "hook/AltTabDimOverlay.h"
 #include "hook/AltTabHighlightBorder.h"
 #include "hook/AltTabHook.h"
+#include "hook/GroupChromeWindow.h"
+#include "hook/GroupPickerWindow.h"
 #include "settings/Settings.h"
 #include "tray/TrayIcon.h"
 #include "util/Logging.h"
 #include "windowtracking/ActivationHistory.h"
+#include "windowtracking/GroupManager.h"
 #include "windowtracking/RectUtils.h"
+#include "windowtracking/WindowFilters.h"
+#include "windowtracking/WindowZOrder.h"
 
 namespace {
 
@@ -35,6 +41,7 @@ HWINEVENTHOOK g_locationChangeHook = nullptr;
 HWINEVENTHOOK g_moveSizeStartHook = nullptr;
 HWINEVENTHOOK g_moveSizeEndHook = nullptr;
 HWINEVENTHOOK g_destroyHook = nullptr;
+HWINEVENTHOOK g_nameChangeHook = nullptr;
 UINT g_taskbarCreatedMessage = 0;
 
 std::unique_ptr<polish::TrayIcon> g_trayIcon;
@@ -67,6 +74,29 @@ std::unique_ptr<polish::AltTabHighlightBorder> g_altTabHighlightBorder;
 // becomes foreground, not just candidate windows -- filtering (candidate
 // + non-minimized) happens where this list is consumed, not here.
 polish::ActivationHistory g_activationHistory;
+
+// Window groups (tab/tile) -- see PLAN.md "Window groups" and the
+// group plan file. v1, M3: GroupManager owns the pure state; each
+// group also gets a GroupChromeWindow (static tab-strip rendering only
+// so far -- no click handling, no real member positioning yet). Keyed
+// by GroupId, in parallel with GroupManager's own storage, rather than
+// folded into GroupState itself -- chrome is a Win32 window resource,
+// not part of the pure/testable state.
+polish::GroupManager g_groupManager;
+std::map<polish::GroupId, std::unique_ptr<polish::GroupChromeWindow>> g_groupChromeWindows;
+
+// Forward-declared: defined near the rest of the group-management code
+// (TriggerNewGroup etc.), further down; called from OnForegroundChanged
+// above that point.
+void SyncGroupFromForeground(HWND hwnd);
+
+// Forward-declared for the same reason as SyncGroupFromForeground
+// above; called from OnWinEvent's EVENT_OBJECT_NAMECHANGE case. No-op
+// unless hwnd is a group member -- a member's title changing is common
+// (browser tabs, unsaved-changes markers, etc.) and previously just sat
+// stale in its group's tab label until something else (a tab click, a
+// drag) happened to trigger a repaint.
+void OnMemberTitleChanged(HWND hwnd);
 
 // The window currently being live-tracked for settle events -- i.e. the
 // foreground window, whenever it's a candidate window (see
@@ -122,30 +152,6 @@ void LogDpiAwareness() {
             L"[Polish] WARNING: expected Per-Monitor-V2 DPI awareness from app.manifest; "
             L"window positioning math will be wrong on non-96-DPI monitors.\n");
     }
-}
-
-// Whether hwnd looks like a normal top-level application window worth
-// tracking at all -- mirrors the heuristic the taskbar/Alt-Tab use.
-// Filters out tooltips, popups, IME windows, etc.
-bool IsCandidateWindow(HWND hwnd) {
-    if (hwnd == nullptr || !IsWindow(hwnd)) {
-        return false;
-    }
-    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
-        return false;
-    }
-    if (GetWindow(hwnd, GW_OWNER) != nullptr) {
-        return false;
-    }
-    const LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    if ((exStyle & WS_EX_TOOLWINDOW) != 0 && (exStyle & WS_EX_APPWINDOW) == 0) {
-        return false;
-    }
-    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-    if ((style & WS_CAPTION) == 0) {
-        return false;
-    }
-    return true;
 }
 
 // Whether hwnd is in a state where its GetWindowRect() reflects a
@@ -267,7 +273,7 @@ void OnForegroundChanged(HWND newForeground) {
     g_pendingSettleRect.reset();
     g_trackedWindow = nullptr;
 
-    const bool candidate = IsCandidateWindow(newForeground);
+    const bool candidate = polish::IsCandidateWindow(newForeground);
     wchar_t title[256] = L"";
     GetWindowTextW(newForeground, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
     polish::LogDebug(std::format(L"[Polish] foreground changed: hwnd={} title=\"{}\" candidate={}",
@@ -286,6 +292,13 @@ void OnForegroundChanged(HWND newForeground) {
     }
     polish::LogDebug(std::format(L"[Polish] MRU order ({}): {}", g_activationHistory.OrderedWindows().size(),
                                   mruOrder));
+
+    // Unconditional on `candidate` (though a group member always is
+    // one) -- a member activated some other way than its own group's
+    // tab strip (e.g. directly via Alt+Tab) still needs its group's
+    // active-tab state/chrome synced to match. No-op if newForeground
+    // isn't a member of any group.
+    SyncGroupFromForeground(newForeground);
 
     if (!candidate) {
         return;
@@ -365,13 +378,24 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
             }
             break;
 
+        case EVENT_OBJECT_NAMECHANGE:
+            // idObject/idChild filtered to the window's own title bar
+            // text specifically (not some arbitrary child control's
+            // accessible name, which fires far more often) -- see
+            // OnMemberTitleChanged's forward declaration for why this
+            // is only meaningful to a group member.
+            if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF) {
+                OnMemberTitleChanged(hwnd);
+            }
+            break;
+
         default:
             break;
     }
 }
 
 BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
-    if (IsCandidateWindow(hwnd) && !IsIconic(hwnd)) {
+    if (polish::IsCandidateWindow(hwnd) && !IsIconic(hwnd)) {
         reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
     }
     return TRUE;
@@ -475,9 +499,7 @@ void ApplyAltTabDimming() {
 
     const HWND highlighted = g_altTabCandidates[g_altTabHighlightIndex];
     g_altTabOverlays[g_altTabHighlightIndex]->Hide();
-    const BOOL promoted =
-        SetWindowPos(highlighted, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    SetWindowPos(highlighted, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    const bool promoted = polish::PromoteWindowToFront(highlighted);
     if (!promoted) {
         // Most likely cause: highlighted belongs to a more-privileged
         // (elevated) process than this one -- UIPI blocks cross-privilege
@@ -566,6 +588,26 @@ void OnAltTabCycle(bool backward) {
                                   reinterpret_cast<void*>(g_altTabCandidates[g_altTabHighlightIndex])));
 }
 
+// Windows restricts SetForegroundWindow from background processes (a
+// security heuristic against focus-stealing) -- injecting a harmless
+// keystroke immediately before the call is a long-established, widely-
+// used workaround that resets whatever internal "did this process just
+// handle real input" state that heuristic checks. Same technique, same
+// reasoning, as AltTabHook's own InjectHarmlessKeystroke (that one
+// suppresses a stuck-modifier side effect too, which doesn't apply
+// here, so this stays a separate, smaller local helper rather than
+// reusing that one). Shared by OnAltTabCommit and ActivateGroupTab,
+// below -- both call SetForegroundWindow from this background process.
+void InjectHarmlessCtrlKeystroke() {
+    INPUT inputs[2]{};
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = VK_CONTROL;
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = VK_CONTROL;
+    inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(2, inputs, sizeof(INPUT));
+}
+
 void OnAltTabCommit() {
     if (!g_altTabSessionOpen) {
         return;
@@ -573,22 +615,7 @@ void OnAltTabCommit() {
     const HWND target = g_altTabCandidates[g_altTabHighlightIndex];
     EndAltTabSession();
     if (IsWindow(target)) {
-        // Windows restricts SetForegroundWindow from background
-        // processes (a security heuristic against focus-stealing) --
-        // injecting a harmless keystroke immediately before the call is
-        // a long-established, widely-used workaround that resets
-        // whatever internal "did this process just handle real input"
-        // state that heuristic checks. Same technique, same reasoning,
-        // as AltTabHook's InjectHarmlessKeystroke; duplicated locally
-        // since it's small and the two aren't otherwise related.
-        INPUT inputs[2]{};
-        inputs[0].type = INPUT_KEYBOARD;
-        inputs[0].ki.wVk = VK_CONTROL;
-        inputs[1].type = INPUT_KEYBOARD;
-        inputs[1].ki.wVk = VK_CONTROL;
-        inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-        SendInput(2, inputs, sizeof(INPUT));
-
+        InjectHarmlessCtrlKeystroke();
         const BOOL result = SetForegroundWindow(target);
         polish::LogDebug(std::format(
             L"[Polish] AltTab: commit -> hwnd={} SetForegroundWindow result={} actualForeground={}",
@@ -609,11 +636,280 @@ void OnAltTabCancel() {
 
 constexpr UINT kMenuIdRestoreSync = 1;
 constexpr UINT kMenuIdAltTab = 2;
-constexpr UINT kMenuIdStartAtLogin = 3;
-constexpr UINT kMenuIdAbout = 4;
-constexpr UINT kMenuIdExit = 5;
+constexpr UINT kMenuIdNewGroup = 3;
+constexpr UINT kMenuIdStartAtLogin = 4;
+constexpr UINT kMenuIdAbout = 5;
+constexpr UINT kMenuIdExit = 6;
 
 constexpr wchar_t kAboutUrl[] = L"https://www.linkedin.com/in/davidlenihan/";
+
+// Global hotkey id for RegisterHotKey/WM_HOTKEY -- Win+Alt+G ("Group"),
+// user-chosen. No existing hotkey infrastructure to reuse (the old
+// HotkeyManager was deleted earlier in this project's history); a
+// single RegisterHotKey call is simple enough not to need one of its
+// own, unlike Alt+Tab's WH_KEYBOARD_LL hook (there's no native OS
+// behavior to suppress here, just one combination to claim).
+constexpr int kNewGroupHotkeyId = 1;
+
+// Repositions/promotes group id's members into `contentRect` -- the
+// single path both the initial layout (TriggerNewGroup) and every
+// later reflow (a tab click, a group-drag, a member activated
+// externally via Alt+Tab) go through, so they can never drift out of
+// sync with each other.
+//
+// If ApplyLayout reports that some member wouldn't fit -- a real,
+// confirmed case: a window's own declared minimum size (Outlook is a
+// real example a user hit) can be larger than contentRect, and
+// SetWindowPos silently clamps to it rather than failing -- the chrome
+// is grown to fit and layout is re-applied once, so that member ends up
+// correctly filling its (now larger) share of the group instead of
+// visibly spilling outside it.
+void ReflowGroupTo(polish::GroupId id, const RECT& contentRect) {
+    polish::GroupState* group = g_groupManager.FindGroup(id);
+    if (group == nullptr) {
+        return;
+    }
+    const SIZE needed = g_groupManager.ApplyLayout(*group, contentRect);
+    const int requestedWidth = contentRect.right - contentRect.left;
+    const int requestedHeight = contentRect.bottom - contentRect.top;
+    if (needed.cx <= requestedWidth && needed.cy <= requestedHeight) {
+        return;
+    }
+
+    auto chromeIt = g_groupChromeWindows.find(id);
+    if (chromeIt == g_groupChromeWindows.end()) {
+        return;
+    }
+    polish::LogDebug(std::format(
+        L"[Polish] Group: member(s) wouldn't fit group id={} (requested {}x{}, needed {}x{}) -- growing chrome",
+        id, requestedWidth, requestedHeight, needed.cx, needed.cy));
+    chromeIt->second->GrowContentAreaTo(needed);
+    g_groupManager.ApplyLayout(*group, chromeIt->second->ContentRectInScreenCoords());
+}
+
+// Current window titles for group's members, in membership order --
+// shared by the initial chrome creation, a live title-change sync, a
+// tab reorder, and an edit-membership confirm, so the chrome's tab
+// labels are always rebuilt the same way regardless of what triggered
+// the refresh.
+std::vector<std::wstring> CollectMemberTitles(const polish::GroupState& group) {
+    std::vector<std::wstring> titles;
+    for (const polish::GroupMember& member : group.Members()) {
+        if (member.kind != polish::GroupMemberKind::Window || member.window == nullptr) {
+            continue;  // nested-group case -- v1 never populates this
+        }
+        wchar_t title[256] = L"";
+        GetWindowTextW(member.window, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+        titles.emplace_back(title);
+    }
+    return titles;
+}
+
+// Called from OnWinEvent's EVENT_OBJECT_NAMECHANGE case (see the
+// forward declaration near the group globals for why): if hwnd is a
+// group member, refreshes its group's chrome tab labels from every
+// member's *current* title -- previously a tab's label was only ever
+// the title captured at creation/edit time, so e.g. a browser tab
+// changing page or an editor gaining an unsaved-changes marker never
+// showed up until something unrelated happened to repaint the chrome.
+void OnMemberTitleChanged(HWND hwnd) {
+    polish::GroupState* group = g_groupManager.FindGroupContaining(hwnd);
+    if (group == nullptr) {
+        return;
+    }
+    auto chromeIt = g_groupChromeWindows.find(group->Id());
+    if (chromeIt == g_groupChromeWindows.end()) {
+        return;
+    }
+    chromeIt->second->SetMemberTitles(CollectMemberTitles(*group));
+}
+
+// Called from OnForegroundChanged for every foreground change (see the
+// forward declaration near the group globals for why): if hwnd is a
+// member of some group, syncs that group's active index and its
+// chrome's visual highlight to match, and reflows so the now-active
+// member is promoted to front within the shared content rect -- the
+// case this exists for is hwnd becoming foreground via something other
+// than its own group's tab strip (e.g. Alt+Tab), which ActivateGroupTab
+// above never sees. Deliberately does *not* call SetForegroundWindow --
+// hwnd is already foreground, that's what triggered this.
+void SyncGroupFromForeground(HWND hwnd) {
+    polish::GroupState* group = g_groupManager.FindGroupContaining(hwnd);
+    if (group == nullptr) {
+        return;
+    }
+    group->SetActiveWindow(hwnd);
+
+    auto chromeIt = g_groupChromeWindows.find(group->Id());
+    if (chromeIt == g_groupChromeWindows.end()) {
+        return;
+    }
+    if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
+        chromeIt->second->SetActiveIndex(*activeIndex);
+    }
+    ReflowGroupTo(group->Id(), chromeIt->second->ContentRectInScreenCoords());
+    polish::LogDebug(std::format(L"[Polish] Group: member hwnd={} activated externally, synced group id={}",
+                                  reinterpret_cast<void*>(hwnd), group->Id()));
+}
+
+// Called when a group's tab strip is clicked (GroupChromeWindow's
+// onTabClicked callback): switches which member is active, both in the
+// pure GroupState and the chrome's own visual highlight, reflows (so
+// the newly active member is promoted to front), and actually focuses
+// it -- unlike Alt+Tab's highlight-preview promote (SWP_NOACTIVATE,
+// deliberately not stealing focus while cycling), a tab click is a
+// deliberate "switch to this" action that should behave like clicking
+// any other window.
+void ActivateGroupTab(polish::GroupId id, size_t index) {
+    polish::GroupState* group = g_groupManager.FindGroup(id);
+    auto chromeIt = g_groupChromeWindows.find(id);
+    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
+        return;
+    }
+    group->SetActiveIndex(index);
+    chromeIt->second->SetActiveIndex(index);
+    ReflowGroupTo(id, chromeIt->second->ContentRectInScreenCoords());
+
+    if (const auto active = group->ActiveWindow(); active.has_value() && IsWindow(*active)) {
+        InjectHarmlessCtrlKeystroke();
+        SetForegroundWindow(*active);
+    }
+    polish::LogDebug(std::format(L"[Polish] Group: tab {} activated for group id={}", index, id));
+}
+
+// Called from GroupChromeWindow's onTabReordered callback, live during
+// a drag (once per tab crossed, not just once on drop -- see that
+// callback's own comment) -- reorders GroupState's membership to match
+// and rebuilds the chrome's tab labels from the new order, so the
+// chrome's own array of labels never has to be reordered independently
+// and risk drifting out of sync with GroupState.
+void ReorderGroupTab(polish::GroupId id, size_t fromIndex, size_t toIndex) {
+    polish::GroupState* group = g_groupManager.FindGroup(id);
+    auto chromeIt = g_groupChromeWindows.find(id);
+    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
+        return;
+    }
+    group->Reorder(fromIndex, toIndex);
+    chromeIt->second->SetMemberTitles(CollectMemberTitles(*group));
+    if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
+        chromeIt->second->SetActiveIndex(*activeIndex);
+    }
+    polish::LogDebug(
+        std::format(L"[Polish] Group: tab reordered {} -> {} for group id={}", fromIndex, toIndex, id));
+}
+
+// Called from GroupChromeWindow's "Switch to Tab"/"Switch to Tile"
+// context-menu item: flips the group's mode, updates the chrome's own
+// rendering to match, and reflows -- ApplyLayout already branches on
+// GroupState::Mode(), so switching modes needs no special-casing beyond
+// that single flag flip plus a reflow. v1 has no per-mode saved
+// geometry (a tiled member just gets repositioned into the shared tab
+// rect if switching to Tab, and vice versa) -- acceptable for v1, not
+// worth the complexity of remembering "where it would have been."
+void ToggleGroupMode(polish::GroupId id) {
+    polish::GroupState* group = g_groupManager.FindGroup(id);
+    auto chromeIt = g_groupChromeWindows.find(id);
+    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
+        return;
+    }
+    const polish::GroupMode newMode =
+        (group->Mode() == polish::GroupMode::Tab) ? polish::GroupMode::Tile : polish::GroupMode::Tab;
+    group->SetMode(newMode);
+    chromeIt->second->SetMode(newMode);
+    ReflowGroupTo(id, chromeIt->second->ContentRectInScreenCoords());
+    polish::LogDebug(std::format(L"[Polish] Group: mode switched to {} for group id={}",
+                                  newMode == polish::GroupMode::Tile ? L"Tile" : L"Tab", id));
+}
+
+// Called from GroupChromeWindow's "Edit windows..." context-menu item:
+// reopens the picker pre-checked with the group's current membership
+// and mode, then diffs the confirmed selection against current
+// membership -- newly unchecked windows are removed, newly checked ones
+// added (GroupState::Remove/AddWindow already handle active-index
+// bookkeeping and duplicate/no-op safety, so this is purely a diff, no
+// new membership logic needed here).
+void EditGroupWindows(polish::GroupId id) {
+    polish::GroupState* group = g_groupManager.FindGroup(id);
+    auto chromeIt = g_groupChromeWindows.find(id);
+    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
+        return;
+    }
+
+    std::vector<HWND> currentMembers;
+    for (const polish::GroupMember& member : group->Members()) {
+        if (member.kind == polish::GroupMemberKind::Window && member.window != nullptr) {
+            currentMembers.push_back(member.window);
+        }
+    }
+
+    polish::GroupPickerWindow picker(GetModuleHandleW(nullptr));
+    const auto result = picker.ShowModal(chromeIt->second->Handle(), currentMembers, group->Mode(), true);
+    if (!result.has_value()) {
+        polish::LogDebug(L"[Polish] Group: edit-windows picker cancelled");
+        return;
+    }
+
+    for (HWND hwnd : currentMembers) {
+        if (std::find(result->windows.begin(), result->windows.end(), hwnd) == result->windows.end()) {
+            group->Remove(hwnd);
+        }
+    }
+    for (HWND hwnd : result->windows) {
+        group->AddWindow(hwnd);
+    }
+    if (group->Mode() != result->mode) {
+        group->SetMode(result->mode);
+        chromeIt->second->SetMode(result->mode);
+    }
+
+    chromeIt->second->SetMemberTitles(CollectMemberTitles(*group));
+    if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
+        chromeIt->second->SetActiveIndex(*activeIndex);
+    }
+    ReflowGroupTo(id, chromeIt->second->ContentRectInScreenCoords());
+    polish::LogDebug(std::format(L"[Polish] Group: edited group id={}, now {} window(s), mode={}", id,
+                                  group->MemberCount(), group->Mode() == polish::GroupMode::Tile ? L"Tile" : L"Tab"));
+}
+
+// Triggered by both the tray menu's "New Group" item and the Win+Alt+G
+// hotkey: shows the window picker, and on confirm hands the selection
+// straight to GroupManager. `owner` centers the picker and is passed
+// through as its Win32 owner window -- may be nullptr (e.g. triggered
+// via the hotkey with no natural owner), which GroupPickerWindow
+// already falls back on (primary monitor).
+void TriggerNewGroup(HWND owner) {
+    polish::GroupPickerWindow picker(GetModuleHandleW(nullptr));
+    const auto selection = picker.ShowModal(owner);
+    if (!selection.has_value()) {
+        polish::LogDebug(L"[Polish] New Group: picker cancelled");
+        return;
+    }
+    const polish::GroupId id = g_groupManager.CreateGroup(selection->windows, selection->mode);
+    polish::LogDebug(std::format(L"[Polish] New Group: created group id={} with {} window(s), mode={}", id,
+                                  selection->windows.size(),
+                                  selection->mode == polish::GroupMode::Tile ? L"Tile" : L"Tab"));
+    std::vector<std::wstring> memberTitles;
+    for (HWND hwnd : selection->windows) {
+        wchar_t title[256] = L"";
+        GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+        polish::LogDebug(
+            std::format(L"[Polish] New Group: member hwnd={} title=\"{}\"", reinterpret_cast<void*>(hwnd), title));
+        memberTitles.emplace_back(title);
+    }
+
+    auto chrome = std::make_unique<polish::GroupChromeWindow>(GetModuleHandleW(nullptr));
+    chrome->Show(memberTitles, selection->mode);
+    chrome->SetOnTabClicked([id](size_t index) { ActivateGroupTab(id, index); });
+    chrome->SetOnTabReordered([id](size_t from, size_t to) { ReorderGroupTab(id, from, to); });
+    chrome->SetOnModeToggleRequested([id]() { ToggleGroupMode(id); });
+    chrome->SetOnEditWindowsRequested([id]() { EditGroupWindows(id); });
+    chrome->SetOnMoved([id](const RECT& newContentRect) { ReflowGroupTo(id, newContentRect); });
+    polish::LogDebug(std::format(L"[Polish] New Group: chrome window created hwnd={} for group id={}",
+                                  reinterpret_cast<void*>(chrome->Handle()), id));
+
+    ReflowGroupTo(id, chrome->ContentRectInScreenCoords());
+    g_groupChromeWindows[id] = std::move(chrome);
+}
 
 // Rebuilt fresh every time the tray icon's context menu is about to
 // open (see TrayIcon's populateMenu callback), so checkbox state is
@@ -624,6 +920,8 @@ void PopulateTrayMenu(HMENU menu) {
                 L"Restore remembers Snap position");
     AppendMenuW(menu, MF_STRING | (g_settings.altTabEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdAltTab,
                 L"Alt+Tab (skip minimized)");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kMenuIdNewGroup, L"New Group\tWin+Alt+G");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (polish::IsStartAtLoginEnabled() ? MF_CHECKED : MF_UNCHECKED),
                 kMenuIdStartAtLogin, L"Start with Windows");
@@ -653,6 +951,9 @@ void HandleTrayCommand(UINT commandId) {
                 std::format(L"[Polish] start with Windows {}", newValue ? L"enabled" : L"disabled"));
             break;
         }
+        case kMenuIdNewGroup:
+            TriggerNewGroup(nullptr);
+            break;
         case kMenuIdAbout:
             ShellExecuteW(nullptr, L"open", kAboutUrl, nullptr, nullptr, SW_SHOWNORMAL);
             break;
@@ -698,7 +999,14 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             }
             return 0;
 
+        case WM_HOTKEY:
+            if (wParam == kNewGroupHotkeyId) {
+                TriggerNewGroup(nullptr);
+            }
+            return 0;
+
         case WM_DESTROY:
+            UnregisterHotKey(hwnd, kNewGroupHotkeyId);
             if (g_foregroundHook != nullptr) {
                 UnhookWinEvent(g_foregroundHook);
             }
@@ -714,10 +1022,14 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             if (g_destroyHook != nullptr) {
                 UnhookWinEvent(g_destroyHook);
             }
+            if (g_nameChangeHook != nullptr) {
+                UnhookWinEvent(g_nameChangeHook);
+            }
             g_trayIcon.reset();
             g_altTabHook.reset();
             g_altTabOverlays.clear();
             g_altTabHighlightBorder.reset();
+            g_groupChromeWindows.clear();
             PostQuitMessage(0);
             return 0;
 
@@ -782,8 +1094,18 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                                          OnWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
     g_destroyHook = SetWinEventHook(EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY, nullptr, OnWinEvent, 0, 0,
                                      WINEVENT_OUTOFCONTEXT);
+    g_nameChangeHook = SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, nullptr, OnWinEvent, 0, 0,
+                                        WINEVENT_OUTOFCONTEXT);
 
     g_trayIcon = std::make_unique<polish::TrayIcon>(g_messageWindow, PopulateTrayMenu, HandleTrayCommand);
+
+    if (!RegisterHotKey(g_messageWindow, kNewGroupHotkeyId, MOD_WIN | MOD_ALT | MOD_NOREPEAT, 'G')) {
+        polish::LogDebug(
+            std::format(L"[Polish] WARNING: failed to register the Win+Alt+G hotkey. GetLastError={}",
+                        GetLastError()));
+    } else {
+        polish::LogDebug(L"[Polish] Win+Alt+G (New Group) hotkey registered successfully");
+    }
 
     g_altTabHook = std::make_unique<polish::AltTabHook>(g_messageWindow, AltTabHasEligibleCandidates,
                                                          OnAltTabCycle, OnAltTabCommit, OnAltTabCancel);
