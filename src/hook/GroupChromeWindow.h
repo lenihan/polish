@@ -56,6 +56,13 @@ public:
     // changing live, or membership changing after an edit.
     void SetMemberTitles(const std::vector<std::wstring>& titles);
 
+    // Updates the tab strip's icons in place and repaints. `icons` is
+    // parallel to the titles/members list; a null entry means "no icon
+    // for this tab" (falls back to text-only, unchanged layout). Icon
+    // handles are borrowed from their owning window/class (via
+    // WM_GETICON/GCLP_HICONSM) -- this class never destroys them.
+    void SetMemberIcons(const std::vector<HICON>& icons);
+
     // Updates which tab is drawn as active (highlighted) and repaints.
     // Purely visual -- does not itself move/promote any member window.
     void SetActiveIndex(size_t index);
@@ -153,6 +160,7 @@ private:
     HINSTANCE instance_;
     HWND window_ = nullptr;
     std::vector<std::wstring> memberTitles_;
+    std::vector<HICON> memberIcons_;  // borrowed handles, never destroyed here
     GroupMode mode_ = GroupMode::Tab;
     size_t activeIndex_ = 0;
     std::optional<size_t> draggingIndex_;

@@ -339,6 +339,9 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(0xC0, 0xC0, 0xC0));
     HGDIOBJ oldPen = SelectObject(hdc, borderPen);
 
+    const int iconSize = Scale(16, dpi);
+    const int iconTextGap = Scale(4, dpi);
+
     for (size_t i = 0; i < tabRects.size(); ++i) {
         const RECT& tabRect = tabRects[i];
         const bool active = (i == activeIndex_);
@@ -349,9 +352,17 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
         SelectObject(hdc, oldBrush);
         DeleteObject(tabBrush);
 
-        SetTextColor(hdc, active ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x00, 0x00, 0x00));
         RECT textRect = tabRect;
         InflateRect(&textRect, -Scale(8, dpi), 0);
+
+        const HICON icon = (i < memberIcons_.size()) ? memberIcons_[i] : nullptr;
+        if (icon != nullptr) {
+            const int iconY = tabRect.top + ((tabRect.bottom - tabRect.top) - iconSize) / 2;
+            DrawIconEx(hdc, textRect.left, iconY, icon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
+            textRect.left += iconSize + iconTextGap;
+        }
+
+        SetTextColor(hdc, active ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x00, 0x00, 0x00));
         DrawTextW(hdc, memberTitles_[i].c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     }
 
@@ -429,6 +440,13 @@ void GroupChromeWindow::SetActiveIndex(size_t index) {
 
 void GroupChromeWindow::SetMemberTitles(const std::vector<std::wstring>& titles) {
     memberTitles_ = titles;
+    if (window_ != nullptr) {
+        InvalidateRect(window_, nullptr, TRUE);
+    }
+}
+
+void GroupChromeWindow::SetMemberIcons(const std::vector<HICON>& icons) {
+    memberIcons_ = icons;
     if (window_ != nullptr) {
         InvalidateRect(window_, nullptr, TRUE);
     }

@@ -818,6 +818,42 @@ std::vector<std::wstring> CollectMemberTitles(const polish::GroupState& group) {
     return titles;
 }
 
+// The small icon a window itself advertises via WM_GETICON (falling
+// back to the window class's icon, then to the large icon if no small
+// one exists) -- the same lookup order Explorer/the taskbar use.
+// Returned handles are borrowed from their owning window/class; never
+// destroy them.
+HICON GetWindowIconHandle(HWND hwnd) {
+    HICON icon = reinterpret_cast<HICON>(SendMessageW(hwnd, WM_GETICON, ICON_SMALL, 0));
+    if (icon == nullptr) {
+        icon = reinterpret_cast<HICON>(SendMessageW(hwnd, WM_GETICON, ICON_SMALL2, 0));
+    }
+    if (icon == nullptr) {
+        icon = reinterpret_cast<HICON>(GetClassLongPtrW(hwnd, GCLP_HICONSM));
+    }
+    if (icon == nullptr) {
+        icon = reinterpret_cast<HICON>(SendMessageW(hwnd, WM_GETICON, ICON_BIG, 0));
+    }
+    if (icon == nullptr) {
+        icon = reinterpret_cast<HICON>(GetClassLongPtrW(hwnd, GCLP_HICON));
+    }
+    return icon;
+}
+
+// Current member icons, in the same membership order as
+// CollectMemberTitles -- shared by every call site that refreshes tab
+// labels, so titles and icons never drift out of sync with each other.
+std::vector<HICON> CollectMemberIcons(const polish::GroupState& group) {
+    std::vector<HICON> icons;
+    for (const polish::GroupMember& member : group.Members()) {
+        if (member.kind != polish::GroupMemberKind::Window || member.window == nullptr) {
+            continue;  // nested-group case -- v1 never populates this
+        }
+        icons.push_back(GetWindowIconHandle(member.window));
+    }
+    return icons;
+}
+
 // Called from OnWinEvent's EVENT_OBJECT_NAMECHANGE case (see the
 // forward declaration near the group globals for why): if hwnd is a
 // group member, refreshes its group's chrome tab labels from every
@@ -835,6 +871,7 @@ void OnMemberTitleChanged(HWND hwnd) {
         return;
     }
     chromeIt->second->SetMemberTitles(CollectMemberTitles(*group));
+    chromeIt->second->SetMemberIcons(CollectMemberIcons(*group));
 }
 
 // Called from GroupChromeWindow's onTabHovered callback: shows (or
@@ -902,6 +939,7 @@ void ReorderGroupTab(polish::GroupId id, size_t fromIndex, size_t toIndex) {
     }
     group->Reorder(fromIndex, toIndex);
     chromeIt->second->SetMemberTitles(CollectMemberTitles(*group));
+    chromeIt->second->SetMemberIcons(CollectMemberIcons(*group));
     if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
         chromeIt->second->SetActiveIndex(*activeIndex);
     }
@@ -978,6 +1016,7 @@ void EditGroupWindows(polish::GroupId id) {
     }
 
     chromeIt->second->SetMemberTitles(CollectMemberTitles(*group));
+    chromeIt->second->SetMemberIcons(CollectMemberIcons(*group));
     if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
         chromeIt->second->SetActiveIndex(*activeIndex);
     }
@@ -1038,8 +1077,14 @@ void TriggerNewGroup(HWND owner) {
         memberTitles.emplace_back(title);
     }
 
+    std::vector<HICON> memberIcons;
+    for (HWND hwnd : selection->windows) {
+        memberIcons.push_back(GetWindowIconHandle(hwnd));
+    }
+
     auto chrome = std::make_unique<polish::GroupChromeWindow>(GetModuleHandleW(nullptr));
     chrome->Show(memberTitles, selection->mode);
+    chrome->SetMemberIcons(memberIcons);
     chrome->SetOnTabClicked([id](size_t index) { ActivateGroupTab(id, index); });
     chrome->SetOnTabReordered([id](size_t from, size_t to) { ReorderGroupTab(id, from, to); });
     chrome->SetOnModeToggleRequested([id]() { ToggleGroupMode(id); });
