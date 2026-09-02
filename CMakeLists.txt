@@ -20,12 +20,15 @@ add_library(polish_core STATIC
     src/windowtracking/GroupManager.cpp
     src/windowtracking/WindowFilters.cpp
     src/windowtracking/WindowZOrder.cpp
+    src/windowtracking/WindowReparenting.cpp
     src/tray/TrayIcon.cpp
     src/hook/AltTabHook.cpp
     src/hook/AltTabDimOverlay.cpp
     src/hook/AltTabHighlightBorder.cpp
     src/hook/GroupChromeWindow.cpp
     src/hook/GroupPickerWindow.cpp
+    src/hook/GroupHotkeyDialog.cpp
+    src/hook/GroupTabThumbnail.cpp
     src/settings/Settings.cpp
 )
 

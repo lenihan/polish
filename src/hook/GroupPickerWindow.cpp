@@ -20,8 +20,8 @@ constexpr int kTileModeRadioId = 1004;
 
 // Logical (96 DPI) layout constants -- scaled by the window's actual DPI
 // in LayoutControls/before CreateWindowExW.
-constexpr int kWindowWidth = 420;
-constexpr int kWindowHeight = 480;
+constexpr int kWindowWidth = 640;
+constexpr int kWindowHeight = 620;
 constexpr int kMargin = 12;
 constexpr int kButtonHeight = 28;
 constexpr int kButtonWidth = 110;

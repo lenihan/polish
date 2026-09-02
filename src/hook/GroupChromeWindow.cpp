@@ -13,6 +13,9 @@ constexpr int kTabStripHeight = 36;   // logical (96 DPI) px
 constexpr int kTabMinWidth = 120;     // logical px
 constexpr int kTabMaxWidth = 220;     // logical px
 
+constexpr UINT_PTR kHoverTimerId = 1;
+constexpr UINT kHoverDelayMs = 400;
+
 // Local to this window's own context menu -- TrackPopupMenu's returned
 // command isn't routed through WM_COMMAND, so these don't need to be
 // unique app-wide.
@@ -92,28 +95,91 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         }
 
         case WM_MOUSEMOVE: {
-            if (!draggingIndex_.has_value()) {
-                return 0;
-            }
             RECT clientRect;
             GetClientRect(hwnd, &clientRect);
             const std::vector<RECT> tabRects = ComputeTabRects(clientRect);
             const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+
+            if (draggingIndex_.has_value()) {
+                for (size_t i = 0; i < tabRects.size(); ++i) {
+                    RECT r = tabRects[i];
+                    if (PtInRect(&r, pt) && i != *draggingIndex_) {
+                        if (onTabReordered_) {
+                            onTabReordered_(*draggingIndex_, i);
+                        }
+                        // The dragged tab is now at index i -- reorder
+                        // fires live, once per crossing, not just once
+                        // on drop (see SetOnTabReordered's comment).
+                        draggingIndex_ = i;
+                        break;
+                    }
+                }
+                return 0;
+            }
+
+            // Hover-preview tracking (only when not mid-drag). Needs
+            // WM_MOUSELEAVE to reliably notice the cursor leaving the
+            // whole window (not just leaving a tab rect, which
+            // WM_MOUSEMOVE's own coordinates can't distinguish from
+            // "still over the window but not any tab") --
+            // TrackMouseEvent must be re-armed on every WM_MOUSEMOVE
+            // per its own documented usage pattern.
+            if (!trackingMouseLeave_) {
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                if (TrackMouseEvent(&tme)) {
+                    trackingMouseLeave_ = true;
+                }
+            }
+
+            std::optional<size_t> newHover;
             for (size_t i = 0; i < tabRects.size(); ++i) {
                 RECT r = tabRects[i];
-                if (PtInRect(&r, pt) && i != *draggingIndex_) {
-                    if (onTabReordered_) {
-                        onTabReordered_(*draggingIndex_, i);
-                    }
-                    // The dragged tab is now at index i -- reorder
-                    // fires live, once per crossing, not just once on
-                    // drop (see SetOnTabReordered's comment).
-                    draggingIndex_ = i;
+                if (PtInRect(&r, pt)) {
+                    newHover = i;
                     break;
+                }
+            }
+            if (newHover != hoveredTabIndex_) {
+                hoveredTabIndex_ = newHover;
+                KillTimer(hwnd, kHoverTimerId);
+                if (newHover.has_value()) {
+                    SetTimer(hwnd, kHoverTimerId, kHoverDelayMs, nullptr);
+                } else if (onTabHovered_) {
+                    onTabHovered_(std::nullopt, RECT{});
                 }
             }
             return 0;
         }
+
+        case WM_MOUSELEAVE:
+            trackingMouseLeave_ = false;
+            if (hoveredTabIndex_.has_value()) {
+                hoveredTabIndex_.reset();
+                KillTimer(hwnd, kHoverTimerId);
+                if (onTabHovered_) {
+                    onTabHovered_(std::nullopt, RECT{});
+                }
+            }
+            return 0;
+
+        case WM_TIMER:
+            if (wParam == kHoverTimerId) {
+                KillTimer(hwnd, kHoverTimerId);
+                if (hoveredTabIndex_.has_value() && onTabHovered_) {
+                    RECT clientRect;
+                    GetClientRect(hwnd, &clientRect);
+                    const std::vector<RECT> tabRects = ComputeTabRects(clientRect);
+                    if (*hoveredTabIndex_ < tabRects.size()) {
+                        RECT screenRect = tabRects[*hoveredTabIndex_];
+                        MapWindowPoints(hwnd, nullptr, reinterpret_cast<POINT*>(&screenRect), 2);
+                        onTabHovered_(hoveredTabIndex_, screenRect);
+                    }
+                }
+            }
+            return 0;
 
         case WM_LBUTTONUP: {
             if (draggingIndex_.has_value()) {
@@ -158,57 +224,47 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             return 0;
         }
 
-        case WM_WINDOWPOSCHANGING: {
-            const auto* pos = reinterpret_cast<const WINDOWPOS*>(lParam);
-            if ((pos->flags & SWP_NOMOVE) == 0 && onMoved_) {
-                // The window's outer (non-client) rect and its client
-                // area aren't the same rect -- there's a title bar and
-                // borders between them. That offset doesn't change
-                // during a pure move, so it's measured once from the
-                // window's current (still pre-move, at this point in
-                // the message) state and re-applied to the proposed
-                // WINDOWPOS position -- matches exactly what
-                // ContentRectInScreenCoords() computes at rest, instead
-                // of naively assuming the client area starts right at
-                // the outer rect's edge (which ignored the title bar
-                // entirely and misplaced every member during a drag).
-                RECT outerRect;
-                GetWindowRect(hwnd, &outerRect);
-                POINT clientTopLeft{0, 0};
-                POINT clientBottomRight{0, 0};
-                RECT clientRect;
-                GetClientRect(hwnd, &clientRect);
-                clientBottomRight = {clientRect.right, clientRect.bottom};
-                ClientToScreen(hwnd, &clientTopLeft);
-                ClientToScreen(hwnd, &clientBottomRight);
+        case WM_SIZE:
+            // Members are real children now -- they already move for
+            // free when the chrome itself moves (no callback needed for
+            // that at all, unlike the old reposition-only design). A
+            // *resize* still needs an explicit relayout, since children
+            // don't auto-resize to fill a bigger/smaller parent.
+            if (onResized_) {
+                onResized_();
+            }
+            return 0;
 
-                const int offsetLeft = clientTopLeft.x - outerRect.left;
-                const int offsetTop = clientTopLeft.y - outerRect.top;
-                const int offsetRight = outerRect.right - clientBottomRight.x;
-                const int offsetBottom = outerRect.bottom - clientBottomRight.y;
+        case WM_DPICHANGED: {
+            // Standard MSDN-documented handling: resize to the rect
+            // Windows suggests for the new DPI (a Per-Monitor-V2-aware
+            // window doesn't get resized automatically just because it
+            // moved to a different-DPI monitor -- the app has to do it).
+            // If the size actually changes, this SetWindowPos triggers
+            // WM_SIZE on its own, which re-lays-out members above --
+            // every layout/paint calculation already calls
+            // GetDpiForWindow fresh rather than caching a stale DPI, so
+            // no separate DPI-specific relayout path is needed here.
+            const auto* suggestedRect = reinterpret_cast<const RECT*>(lParam);
+            SetWindowPos(hwnd, nullptr, suggestedRect->left, suggestedRect->top,
+                         suggestedRect->right - suggestedRect->left, suggestedRect->bottom - suggestedRect->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            return 0;
+        }
 
-                const int width = (pos->flags & SWP_NOSIZE) ? (outerRect.right - outerRect.left) : pos->cx;
-                const int height = (pos->flags & SWP_NOSIZE) ? (outerRect.bottom - outerRect.top) : pos->cy;
-
-                const int newClientLeft = pos->x + offsetLeft;
-                const int newClientTop = pos->y + offsetTop;
-                const int newClientRight = pos->x + width - offsetRight;
-                const int newClientBottom = pos->y + height - offsetBottom;
-
-                const UINT dpi = GetDpiForWindow(hwnd);
-                const int tabHeight = Scale(kTabStripHeight, dpi);
-                const RECT newContentRect{newClientLeft, newClientTop + tabHeight, newClientRight,
-                                           newClientBottom};
-                onMoved_(newContentRect);
+        case WM_CLOSE:
+            // Runs before DefWindowProcW's default WM_CLOSE handling
+            // (which calls DestroyWindow) -- see SetOnClosing's comment
+            // for why the owner must release members here, synchronously,
+            // not after.
+            if (onClosing_) {
+                onClosing_();
             }
             return DefWindowProcW(hwnd, message, wParam, lParam);
-        }
 
         case WM_DESTROY:
             // Not the app's main message window -- no PostQuitMessage
-            // here. Cleanup of any group-level state (GroupManager
-            // membership, etc.) when a chrome window closes is M6 scope,
-            // not this milestone's.
+            // here.
             return 0;
 
         default:
@@ -318,6 +374,17 @@ RECT GroupChromeWindow::ContentRectInScreenCoords() const {
     ClientToScreen(window_, &topLeft);
     ClientToScreen(window_, &bottomRight);
     return RECT{topLeft.x, topLeft.y, bottomRight.x, bottomRight.y};
+}
+
+RECT GroupChromeWindow::ContentRectInClientCoords() const {
+    if (window_ == nullptr) {
+        return RECT{};
+    }
+    RECT client;
+    GetClientRect(window_, &client);
+    const UINT dpi = GetDpiForWindow(window_);
+    const int tabHeight = Scale(kTabStripHeight, dpi);
+    return RECT{client.left, client.top + tabHeight, client.right, client.bottom};
 }
 
 void GroupChromeWindow::GrowContentAreaTo(SIZE minContentSize) {

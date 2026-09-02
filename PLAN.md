@@ -541,7 +541,14 @@ feature's own terminology changed.)
 
 **Resolved design decisions:**
 
-- **Never `SetParent` across process boundaries — reposition-only.**
+- **Superseded 2026-09-02 — see "Architecture reversal" below.** The
+  "never `SetParent`" decision below was correct for the goal it was
+  evaluated against at the time, but the user later clarified the
+  feature's actual goal (collapsing many windows, e.g. 20 Notepads,
+  into a handful of Alt+Tab-reachable groups) in a way that changes the
+  tradeoff entirely — kept here for the record, not because it's still
+  the design.
+- **~~Never `SetParent` across process boundaries — reposition-only.~~**
   Researched, not assumed: cross-process `SetParent` attaches the two
   threads' input queues (a hang in the member's process hangs Polish's
   UI thread too — Raymond Chen), is silently blocked by UIPI for
@@ -559,15 +566,14 @@ feature's own terminology changed.)
 - **The group is a regular, taskbar-visible, Alt+Tab-visible application
   window — not a special Polish-owned overlay.** Revised mid-planning
   from an earlier "group excluded from Alt+Tab" idea; the user corrected
-  this explicitly ("it is a regular .exe"). Both the group and each
-  member window show up in Alt+Tab independently, which turned out to
-  need **zero changes** to `IsCandidateWindow`/`RebuildAltTabCandidates`
-  — backgrounded members just stay fully live and `WS_VISIBLE`, pushed
-  behind the active one in z-order, never minimized or restyled. The one
-  real new requirement this creates: a group must notice via
-  `OnForegroundChanged` when one of its own members gets activated some
-  other way (e.g. Alt+Tab, not its own tab strip) and sync its
-  active-tab state/chrome to match.
+  this explicitly ("it is a regular .exe"). This part of the decision
+  still stands post-reversal. **The "member windows also show up in
+  Alt+Tab independently" half of this bullet does not** — see
+  "Architecture reversal" below: reparented members are children, and
+  `EnumWindows`-based candidate lists (Alt+Tab, the picker) structurally
+  can't see children at all, which turned out to be exactly the point
+  once the actual goal (collapsing many windows into few Alt+Tab
+  entries) was clarified.
 - **Creation**: explicit "New Group" action (tray menu item and a
   **Win+Alt+G** global hotkey) → picker of currently open windows to
   populate it. **Add/remove**: picker-based for v1; drag-in/drag-out is
@@ -843,13 +849,336 @@ excluded, multi-monitor/DPI, cleanup on group destroy).
   since growth doesn't currently clamp to monitor work-area bounds --
   carried into M6's multi-monitor edge-case pass below rather than
   guessed at now.
-- [ ] Next: M6 — edge cases: a member closed while backgrounded (tab)
-  and while tiled (reflow both); an elevated window excluded from the
-  picker as designed (already true since M2, re-verify here);
-  multi-monitor/mixed-DPI member (including the mixed-DPI case deferred
-  since M0) and the grow-to-fit-vs-monitor-bounds gap noted just above;
-  chrome window destroyed (Polish exiting, or explicit ungroup) leaves
-  every member back in normal independent state.
+- [ ] M6 remaining: a member closed while backgrounded (tab) and while
+  tiled (reflow both); an elevated window excluded from the picker as
+  designed (already true since M2, re-verify here); multi-monitor/
+  mixed-DPI member (including the mixed-DPI case deferred since M0) and
+  the grow-to-fit-vs-monitor-bounds gap noted above. ("Chrome window
+  destroyed leaves every member back in normal independent state" — the
+  other M6 item originally listed here — is now done, below; it became
+  a hard safety requirement rather than a nice-to-have once reparenting
+  landed.)
+
+### Architecture reversal (2026-09-02): real `SetParent` containment, not reposition-only
+
+Live use surfaced a real gap the reposition-only design didn't address:
+nothing stopped a member window from just being dragged away by its own
+title bar, since it was always a fully independent top-level window —
+Polish only ever reacted to drops, never prevented an in-progress drag.
+The user asked directly why not just use real `SetParent`, which
+prompted re-examining the original "never `SetParent`" decision rather
+than patching around it.
+
+**The real tradeoff, once actually laid out**: `EnumWindows` — the API
+Polish's own Alt+Tab and the picker both depend on — does not enumerate
+child windows at all. So reparenting a member for true containment and
+keeping it individually reachable via Alt+Tab are mutually exclusive at
+the Win32 level, not a matter of implementation care. This seemed like
+a blocker at first. It wasn't: the user clarified the feature's actual
+purpose is collapsing many windows (their own example: 20 Notepads)
+into a handful of Alt+Tab-reachable *groups* — losing individual
+Alt+Tab-reachability for members is exactly the point, not a cost.
+Once that was clear, real `SetParent` was the obviously correct choice,
+and this is now a deliberate, informed reversal of the earlier decision
+— not the DWM-compositing/UIPI/input-queue risks turning out to be
+overblown (they're still real and still relevant to any *other* feature
+that might consider reparenting in this codebase).
+
+**What changed:**
+
+- **`src/windowtracking/WindowReparenting.h/.cpp`** (new) —
+  `ReparentIntoGroup(hwnd, newParent)`: strips the member's own frame
+  (`WS_CAPTION`/`WS_THICKFRAME`/`WS_SYSMENU`/min/max boxes — the
+  group's chrome provides that context now) and its `WS_POPUP` bit,
+  adds `WS_CHILD`, calls `SetParent`, forces a `SWP_FRAMECHANGED`
+  recompute. `RestoreTopLevel(hwnd, backup)` reverses it exactly from
+  the saved pre-change style. **Confirmed empirically, not just
+  theorized**: a child window left parented to a chrome that gets
+  destroyed *is* destroyed too (the exact hazard this API's own
+  comments warn about) — but the destruction is asynchronous for a
+  cross-process child (observed up to ~1s after the parent's
+  `DestroyWindow` call returns, not synchronous within it), which is
+  exactly why release must happen synchronously and *before*
+  `DestroyWindow` is ever called, not "soon after."
+- **`GroupManager`** — `ApplyLayout` now takes the chrome's `HWND` and
+  reparents any not-yet-reparented member on first layout
+  (`EnsureReparented`, tracked via a `std::map<HWND, ReparentBackup>`).
+  Positions members in **client-relative coordinates** now (a child's
+  `SetWindowPos` x/y are relative to its parent's client origin, not
+  the screen — a fundamental coordinate-system change from the old
+  design). Tab mode no longer needs the promote/demote `HWND_TOPMOST`
+  z-order pulse at all — that trick was for independent top-level
+  windows; true children are simply shown (`SW_SHOW`) or hidden
+  (`SW_HIDE`), unambiguous and instant. New `ReleaseGroup`/
+  `ReleaseMember` restore members to top-level.
+- **`GroupChromeWindow`** — the `WM_WINDOWPOSCHANGING`-based "follow
+  the drag" mechanism (`SetOnMoved`) is gone entirely: children move
+  for free when their parent moves, no callback needed. Replaced by
+  `SetOnResized` (`WM_SIZE` — a resize still needs an explicit
+  relayout, since children don't auto-resize with their parent) and
+  `SetOnClosing` (`WM_CLOSE`, fired *before* the default handling
+  destroys the window — this is the safety-critical hook: the owner
+  must release every member here or they're destroyed with the chrome).
+  New `ContentRectInClientCoords()` alongside the existing
+  `ContentRectInScreenCoords()` (still used by `GrowContentAreaTo`,
+  which only needs it for its own size comparisons).
+- **`main.cpp`** — `ActivateGroupTab` now uses `SetForegroundWindow`
+  on the chrome plus `SetFocus` on the member, not
+  `SetForegroundWindow` on the member directly (which doesn't apply to
+  a child the way it does a top-level window). `SyncGroupFromForeground`
+  is gone — its entire premise (a member independently firing
+  `EVENT_SYSTEM_FOREGROUND`) can no longer happen once members are
+  children; that event is inherently a top-level-window concept.
+  `OnMemberTitleChanged`/the `EVENT_OBJECT_NAMECHANGE` live-title-sync
+  hook needed no changes — a window's text property fires that event
+  regardless of parent/child status. New `CloseGroup(id)`: releases
+  every member, then defers actually erasing the chrome from
+  `g_groupChromeWindows` via a posted `kCloseGroupMessage` rather than
+  doing it synchronously — erasing it inline would delete the
+  `GroupChromeWindow` object (running its own `DestroyWindow`-calling
+  destructor) while still unwinding that very object's own `WM_CLOSE`
+  call stack. The app-exit path (`WM_DESTROY` on the message window)
+  needed the same release-before-destroy treatment added explicitly,
+  since destroying that window directly never sends any chrome a
+  `WM_CLOSE` at all.
+- **Picker window enlarged** (420×480 → 640×620 logical px) — a
+  separate, smaller bug reported at the same time: window titles were
+  being cut off.
+
+**Verified** with a new compiled harness (same spike methodology as
+M0/M4/M5) plus one carefully-scoped live run against the real app: 9
+harness checks (frame-stripping, child status, Tab-mode show/hide,
+tab-switch visibility flip, Tile-mode simultaneous slots, `ReleaseGroup`
+restoring top-level status, **the critical safety case — members
+survive chrome destruction after release**, `onResized_`/`onClosing_`
+firing correctly) all pass, plus the asynchronous-destruction finding
+above (confirmed by deliberately *not* releasing a member and watching
+it get destroyed ~1s after its parent). The live run created a real
+group from two Notepad windows (matched by an exact title string this
+script itself set, never a broad "select all" — the previous test
+mistake that swept up real desktop windows is not being repeated),
+confirmed both correctly reparented with only one visible, then closed
+the group via its own close button and confirmed both windows survived,
+returned to independent top-level state, and resumed normal operation
+(restore-position sync re-engaged on them immediately, per the log).
+
+### Follow-up usability pass (2026-09-02): flashing bug, configurable hotkey, DPI review
+
+More real-use feedback right after the reparenting rework landed, all
+addressed in the same sitting:
+
+- **Real bug, fixed: a tile-mode group with two Notepads visibly
+  flashed.** Root cause: `ReflowGroupTo`'s auto-grow-to-fit step
+  (`GrowContentAreaTo`) resizes the chrome, which synchronously fires
+  `WM_SIZE` -- re-entering `ReflowGroupTo` itself via `onResized_`
+  *before* the outer call's own follow-up `ApplyLayout` had run. If the
+  grown size didn't converge in exactly one step (plausible with two
+  members' minimums side by side in a tile grid), each reentrant call
+  ran its own layout pass and could grow again, cascading into repeated
+  resize/show/hide cycles -- the flashing. Fixed with a reentrancy
+  guard (`g_reflowGrowInProgress`): a nested call during the grow step
+  is now a no-op, since the outer call always finishes the job itself
+  right after `GrowContentAreaTo` returns. Verified the mechanism is a
+  real, confirmed risk via code tracing; could not force this specific
+  test environment's default chrome size to actually need growth against
+  two Notepads (unlike earlier in this session, on a different display),
+  so this fix is code-reviewed and mechanism-confirmed rather than
+  visually re-observed fixed -- flagged honestly, not claimed as
+  independently re-verified.
+- **New: configurable "New Group" hotkey.** Win+Alt+G is claimed by
+  something else on this dev machine (a real, reproducible constraint,
+  not hypothetical), so a fixed hotkey wasn't viable. Added
+  `Settings::groupHotkeyModifiers`/`groupHotkeyVirtualKey` (registry-
+  persisted, default Win+Alt+G), a new `src/hook/GroupHotkeyDialog.h/.cpp`
+  (four modifier checkboxes + a one-character field -- not a live
+  "press your shortcut" capture, which is unreliable for the Win key
+  specifically since the shell often intercepts it first), and a new
+  tray item "Change Group Hotkey..." wired through `ChangeGroupHotkey`
+  in `main.cpp`, which loops the dialog with an inline error if the
+  chosen combination is already claimed (checked by actually attempting
+  `RegisterHotKey`, not just guessed) rather than silently leaving no
+  hotkey registered.
+  - **Real bug found and fixed along the way**: the key field's
+    `EM_SETLIMITTEXT` was set to 1 to match "exactly one character," but
+    since the field starts *pre-filled* with the current key (already 1
+    character), there was never room to insert a replacement -- any
+    typed key produced `EN_MAXTEXT` and was silently rejected. A user
+    would have had to know to clear the field first, which nothing in
+    the UI suggested. Confirmed directly (not guessed) via a diagnostic
+    log showing the exact `EN_MAXTEXT` notification code. Fixed the
+    standard way for a single-key-capture field: allow a little more
+    room (4 chars) and auto-trim to just the most recently typed
+    character on `EN_CHANGE`, giving the same "typing replaces what was
+    there" feel without requiring the user to select/clear first.
+    Verified correct via code review of the real keyboard-input path
+    (`TranslateMessage`/`DispatchMessageW`, the standard pattern) --
+    automated cross-process `WM_CHAR`/`SendInput` simulation of this one
+    interaction proved unreliable as a *test* technique in this
+    environment (inconsistent results attributable to cross-process
+    input-delivery timing, not the fix itself), so this was not directly
+    re-observed working end-to-end the way the rest of this session's
+    fixes were; flagged rather than glossed over.
+- **DPI/multi-monitor code review** (live testing deferred again --
+  no second monitor available this session): found and fixed one real
+  gap -- `GroupChromeWindow` never handled `WM_DPICHANGED`. Every
+  layout/paint calculation already calls `GetDpiForWindow` fresh rather
+  than caching a stale value, so the chrome would eventually
+  self-correct on the next *unrelated* interaction (a tab click, an
+  edit) -- but dragging a group to a different-DPI monitor didn't
+  proactively resize/relayout it, so it would sit visibly wrong until
+  something else happened to trigger a reflow. Fixed with the standard
+  MSDN-documented pattern: resize to the suggested rect Windows provides
+  in `WM_DPICHANGED`'s `lParam`, which triggers `WM_SIZE` (and therefore
+  the existing `onResized_` relayout) on its own if the size actually
+  changed -- no new relayout path needed. Also noted, not actionable:
+  reparenting incidentally makes "mixed DPI across a single group's
+  members" structurally impossible now (they're all children of one
+  parent, necessarily on the same monitor as it), simplifying what used
+  to be a real concern under the old reposition-only design. Still
+  genuinely untested against real multi-monitor/DPI-switching hardware
+  -- this remains open, carried in M6.
+
+### Persistent flashing bug, second attempt (2026-09-02)
+
+The reentrancy-guard fix above did not resolve it -- user re-tested with
+2 real Notepads in a Tile group and still saw flashing (screenshot: one
+tile rendering blank/white). Root cause reconsidered from scratch:
+**this app's *pre-existing* restore-position-sync feature** (tracks
+whichever window was last foreground as `g_trackedWindow`, and calls
+`SetWindowPlacement` on it whenever `EVENT_OBJECT_LOCATIONCHANGE`
+settles) **was never taught that a window can stop being independently
+trackable by becoming a group member.** If a Notepad happened to be
+`g_trackedWindow` at the moment it was added to a group, nothing clears
+that -- reparenting doesn't fire `EVENT_SYSTEM_FOREGROUND`, so
+`OnForegroundChanged` (the only place that normally updates/clears
+`g_trackedWindow`) never runs for this transition. Every position change
+`GroupManager` then makes to that member (parent-client-relative
+coordinates) keeps re-triggering restore-sync's own settle-and-
+`SetWindowPlacement` logic on the same window (screen/workspace
+coordinate semantics) -- two systems fighting over one window's
+position. Fixed in `ReflowGroupTo`: after every `ApplyLayout` call,
+if `g_trackedWindow` is found to be a member of the group just laid
+out, clear it and its settle-tracking state (`g_inMoveSizeLoop`,
+`g_pendingSettleRect`, the settle timer) -- the same reset
+`EVENT_OBJECT_DESTROY`'s handler already does, just triggered from a
+different place since that event never fires for this transition.
+**Not independently re-verified live** (session constraints) --
+logically sound and traced to a real, specific mechanism via code
+reading, not guessed, but flagged honestly rather than claimed fixed
+without evidence. Re-test before considering this closed.
+
+### Major scope expansion requested (2026-09-02) -- not yet started
+
+User feedback after using the reparented group feature, verbatim intent
+preserved (numbering theirs):
+
+1. **Replace the picker with a persistent two-list management dialog.**
+   No Tab/Tile choice in this dialog at all (moved to the toolbar, see
+   #2) -- just two lists: "Active windows" (candidates) and "Group"
+   (current members). Adding moves a window from Active -> Group;
+   removing moves it back Group -> Active (not a checkbox model
+   anymore). The Group list is reorderable (drag, presumably, matching
+   the existing tab-drag-reorder gesture) -- order matters directly for
+   tile/tab layout order (#3, #5). **Same dialog accessible from the
+   group's own toolbar**, not just at creation -- i.e. this dialog *is*
+   both "New Group" and "Edit windows..." now, unified.
+2. **A real toolbar on the group chrome**, replacing today's plain tab-
+   strip-or-label header, with controls for:
+   - **Alignment**: Horizontal (default) / Vertical -- affects both tab
+     placement (#4) and tile grid growth direction (#5).
+   - **Tab (default) / Tile** mode toggle (currently a context-menu
+     item -- moves to the toolbar).
+   - **Window management** -- opens the dialog from #1 (add/remove/
+     reorder).
+3. **Tab order follows Group-list order** (from #1's dialog) --
+   reordering tabs by dragging (already built) must also reorder the
+   underlying list, and vice versa; today's `GroupState::Reorder` +
+   drag-tab wiring already does the membership-order part, just needs
+   to be the *same* order the management dialog's list shows/edits.
+4. **Orientation affects tab placement**: Vertical alignment puts tabs
+   on the left side (currently always a horizontal strip across the
+   top); Horizontal keeps tabs on top. This is a real rendering change
+   to `GroupChromeWindow`'s tab strip (currently hardcoded to a
+   horizontal strip at the top, `kTabStripHeight`-only layout).
+5. **Tile grid growth direction follows alignment**: a grid that grows
+   horizontally or vertically depending on the Horizontal/Vertical
+   setting, filled from the upper-left in Group-list order. Today's
+   `GroupManager::ApplyTileLayout` always computes a roughly-square
+   `cols = ceil(sqrt(n))` grid regardless of orientation -- needs an
+   orientation-aware column/row-count strategy instead (e.g. Horizontal
+   = prefer more columns/wider grid, Vertical = prefer more rows/taller
+   grid).
+6. **Rename the product-facing feature to "Polish Groups"** and make it
+   pinnable to the Start menu. The chrome window's title is currently
+   just "Group" (`GroupChromeWindow::Show`'s hardcoded
+   `CreateWindowExW` title) -- likely needs an actual per-group name
+   (not just the literal string "Polish Groups" repeated for every
+   instance) plus whatever's needed for a taskbar-pinnable/Start-
+   pinnable identity (AppUserModelID, a real icon instead of relying on
+   defaults, etc. -- not yet researched).
+7. **Nested groups**: a group can contain other groups as members. The
+   entire `GroupMemberKind::NestedGroup` enum case and `nestedGroup`
+   field already exist in `GroupState`/`GroupMember` specifically
+   because this was anticipated from the very first planning pass (see
+   the plan file referenced at the top of this section) -- v1
+   deliberately never populated it. This is the milestone that finally
+   needs it: real recursive layout (a nested group's chrome would
+   itself need to become a reparented child of the outer group, or some
+   other containment strategy -- not yet designed), recursive
+   reparenting/z-order/show-hide, and recursive `ReleaseGroup` cleanup
+   (already-tricky child-destruction-order safety, now one level deeper).
+8. **Alt+backtick MRU switching scoped to one group's members**, active only
+   when a group chrome is the current foreground window -- cycles
+   between that group's own members in most-recently-used order (the
+   same MRU-list pattern `ActivationHistory` already implements
+   app-wide for real Alt+Tab, but scoped to just one group's
+   membership). Needs its own keyboard hook or `WM_HOTKEY`-per-group
+   registration strategy -- not yet designed; Alt+backtick specifically may
+   also need checking against existing OS/app reservations the way
+   Win+Alt+G turned out to be already claimed.
+
+**Scope note**: this is a substantial redesign, not an incremental fix
+-- it touches the picker/management-dialog UI, the toolbar and tab-strip
+rendering, the tile layout algorithm, the product's naming/identity, and
+adds a genuinely new capability (nesting) the architecture was only
+ever *shaped* for, never built. Recommend treating this as its own
+planning pass (milestones, in roughly the order above since #1-3 are
+foundational to #4-5, and #7-8 are more independent/deferrable) rather
+than an ad-hoc continuation, given how much has already landed in this
+session.
+
+### Two more real bugs, fixed (2026-09-02, same day)
+
+User confirmed the restore-sync-conflict flashing fix worked. Two more
+issues from continued real use:
+
+- **Blank tab until mouse-over, fixed.** Switching Tab-mode tabs left
+  the newly-shown member visually blank until the user moved the mouse
+  over it. `SWP_SHOWWINDOW` makes a window visible but doesn't guarantee
+  it actually repaints -- a window that was just hidden (or freshly
+  reparented) can sit on a stale/uncomposited DWM redirection surface.
+  Fixed in `GroupManager`'s `PositionMember`: an explicit
+  `RedrawWindow(..., RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN |
+  RDW_ERASE)` right after showing a member (`RDW_ALLCHILDREN` matters
+  for apps like Explorer that are themselves composed of child panes).
+- **New: tab hover thumbnail preview.** Hovering a tab for ~400ms now
+  shows a small live DWM thumbnail of that member, so you can see which
+  window it is before switching. New `src/hook/GroupTabThumbnail.h/.cpp`
+  -- a plain (non-layered) `WS_POPUP` hosting a `DwmRegisterThumbnail`
+  preview, reusing the exact technique already confirmed working during
+  the original Alt+Tab research (M0(b) of that earlier plan: DWM
+  thumbnails work fine on a plain popup, no `WS_EX_LAYERED` needed).
+  `GroupChromeWindow` gained `WM_MOUSEMOVE`/`WM_MOUSELEAVE`/`WM_TIMER`-
+  based hover detection (`TrackMouseEvent` re-armed each move, a 400ms
+  debounce timer) and a new `SetOnTabHovered` callback reporting the
+  hovered index and its screen rect; `main.cpp`'s `OnGroupTabHovered`
+  owns one shared, lazily-created `GroupTabThumbnail` instance and looks
+  up the real member `HWND` via `GroupState`.
+
+Both build clean, all 36 tests pass, app starts and runs without error
+in a quick smoke test. Neither was re-verified live end-to-end this
+session (time constraints on both sides) -- please confirm when you get
+a chance.
 
 ## History (condensed)
 

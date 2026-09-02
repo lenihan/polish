@@ -29,10 +29,10 @@ namespace polish {
 // GroupManager, driven from main.cpp) -- it only renders and reports
 // input back to its owner via callbacks: which tab was clicked, a tab
 // dragged to a new position, a mode-switch or edit-membership request
-// from the right-click context menu, and when the window itself is
-// being moved (so the owner can re-drive member windows to follow in
-// lockstep -- see PLAN.md's group-dragging mechanism, no SetParent
-// involved).
+// from the right-click context menu, and when the window is resized
+// (so the owner can re-lay-out members to fill the new content area --
+// members are real children now, so they already move for free when
+// the chrome itself moves; only a *resize* needs an explicit relayout).
 class GroupChromeWindow {
 public:
     explicit GroupChromeWindow(HINSTANCE instance);
@@ -66,9 +66,16 @@ public:
     // re-applying layout (GroupManager::ApplyLayout) afterward.
     void SetMode(GroupMode mode);
 
-    // The area below the tab strip, in screen coordinates -- where
-    // GroupManager should position every member window.
+    // The area below the tab strip, in screen coordinates -- used by
+    // GrowContentAreaTo to measure the chrome's current content size.
     RECT ContentRectInScreenCoords() const;
+
+    // The area below the tab strip, in coordinates relative to this
+    // window's own client origin -- what GroupManager::ApplyLayout
+    // needs, since members are real children now and a child's
+    // SetWindowPos x/y are relative to its parent's client area, not
+    // the screen.
+    RECT ContentRectInClientCoords() const;
 
     // Resizes the chrome window (top-left held fixed) so its content
     // area is at least `minContentSize`, if it isn't already. Exists
@@ -106,16 +113,34 @@ public:
         onEditWindowsRequested_ = std::move(callback);
     }
 
-    // Called synchronously, once per WM_WINDOWPOSCHANGING where the
-    // window's position is actually changing (i.e. mid-drag, once per
-    // incremental move), with the content rect (screen coordinates) the
-    // window is about to have -- the *proposed* new position, since at
-    // WM_WINDOWPOSCHANGING time the window itself hasn't actually moved
-    // yet (querying its current on-screen position here would give the
-    // stale, pre-move rect and members would visibly lag a frame behind
-    // during a drag). The owner re-drives member windows to follow from
-    // here, not via SetParent.
-    void SetOnMoved(std::function<void(const RECT&)> callback) { onMoved_ = std::move(callback); }
+    // Called synchronously on WM_CLOSE, before the default handling
+    // (DefWindowProc) destroys the window -- members are real children
+    // now, so the owner MUST release them here (restore to top-level)
+    // or they'd be destroyed along with this window. Covers every way
+    // a user can close it: the X button, Alt+F4, "Close window" from
+    // the taskbar -- all of those send WM_CLOSE, not WM_DESTROY
+    // directly.
+    void SetOnClosing(std::function<void()> callback) { onClosing_ = std::move(callback); }
+
+    // Called whenever the chrome's client size actually changes
+    // (WM_SIZE), so the owner can re-lay-out members to fill the new
+    // content area. Not fired on a pure move -- children already move
+    // for free with their parent, so a plain drag needs no callback at
+    // all now (contrast the old reposition-only design's WM_MOVING-
+    // driven follow logic, no longer needed).
+    void SetOnResized(std::function<void()> callback) { onResized_ = std::move(callback); }
+
+    // Called after the mouse rests on a tab for a short delay, with
+    // that tab's index and its rect in *screen* coordinates (so the
+    // owner can position a preview popup relative to it without this
+    // class needing to know anything about previews itself) -- or with
+    // std::nullopt when the hover ends (mouse moved off all tabs, or
+    // left the window). Debounced internally (WM_MOUSEMOVE fires
+    // continuously; this only fires on a genuine hover-target change,
+    // after the delay, and once on leaving).
+    void SetOnTabHovered(std::function<void(std::optional<size_t>, const RECT&)> callback) {
+        onTabHovered_ = std::move(callback);
+    }
 
 private:
     static LRESULT CALLBACK WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -135,7 +160,11 @@ private:
     std::function<void(size_t, size_t)> onTabReordered_;
     std::function<void()> onModeToggleRequested_;
     std::function<void()> onEditWindowsRequested_;
-    std::function<void(const RECT&)> onMoved_;
+    std::function<void()> onResized_;
+    std::function<void()> onClosing_;
+    std::function<void(std::optional<size_t>, const RECT&)> onTabHovered_;
+    std::optional<size_t> hoveredTabIndex_;
+    bool trackingMouseLeave_ = false;
 };
 
 }  // namespace polish

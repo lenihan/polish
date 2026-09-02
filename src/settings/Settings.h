@@ -11,6 +11,15 @@ namespace polish {
 struct Settings {
     bool restoreSyncEnabled = true;
     bool altTabEnabled = true;
+
+    // The "New Group" global hotkey -- RegisterHotKey's own modifier
+    // flags (MOD_ALT/MOD_CONTROL/MOD_SHIFT/MOD_WIN, OR'd together) and
+    // a single virtual-key code. Default Win+Alt+G. User-configurable
+    // (see GroupHotkeyDialog) because a machine can already have that
+    // combination claimed by something else -- confirmed happening on
+    // the dev machine itself.
+    UINT groupHotkeyModifiers = MOD_WIN | MOD_ALT;
+    UINT groupHotkeyVirtualKey = 'G';
 };
 
 Settings LoadSettings();
