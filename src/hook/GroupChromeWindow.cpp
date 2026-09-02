@@ -13,6 +13,8 @@ constexpr wchar_t kWindowClassName[] = L"PolishGroupChromeWindow";
 constexpr int kTabStripHeight = 36;   // logical (96 DPI) px
 constexpr int kTabMinWidth = 120;     // logical px
 constexpr int kTabMaxWidth = 220;     // logical px
+constexpr int kTabStripLeftPadding = 8;  // logical px, before the first tab
+constexpr int kTabGap = 4;               // logical px, between adjacent tabs
 
 constexpr UINT_PTR kHoverTimerId = 1;
 constexpr UINT kHoverDelayMs = 400;
@@ -334,19 +336,25 @@ std::vector<RECT> GroupChromeWindow::ComputeTabRects(const RECT& clientRect) con
     const int tabHeight = Scale(kTabStripHeight, dpi);
     const int tabMinWidth = Scale(kTabMinWidth, dpi);
     const int tabMaxWidth = Scale(kTabMaxWidth, dpi);
+    // Matches File Explorer/Notepad's own tab strip: a small inset
+    // before the first tab, and a small gap between tabs (rather than
+    // them sitting flush against each other and the window edge).
+    const int leftPadding = Scale(kTabStripLeftPadding, dpi);
+    const int tabGap = Scale(kTabGap, dpi);
 
-    const int availableWidth = clientRect.right - clientRect.left;
-    int tabWidth = availableWidth / static_cast<int>(memberTitles_.size());
+    const int memberCount = static_cast<int>(memberTitles_.size());
+    const int availableWidth = clientRect.right - clientRect.left - leftPadding - (memberCount - 1) * tabGap;
+    int tabWidth = availableWidth / memberCount;
     tabWidth = std::max(tabMinWidth, std::min(tabWidth, tabMaxWidth));
 
-    int x = clientRect.left;
+    int x = clientRect.left + leftPadding;
     for (size_t i = 0; i < memberTitles_.size(); ++i) {
         if (x >= clientRect.right) {
             break;
         }
         rects.push_back(
             RECT{x, clientRect.top, std::min(x + tabWidth, static_cast<int>(clientRect.right)), clientRect.top + tabHeight});
-        x += tabWidth;
+        x += tabWidth + tabGap;
     }
     return rects;
 }
@@ -411,6 +419,13 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     const int iconTextGap = Scale(4, dpi);
     const int cornerRadius = Scale(8, dpi);
 
+    // The active tab's label is bold, matching File Explorer/Notepad --
+    // inactive tabs keep the regular weight already selected into hdc.
+    LOGFONTW boldLogFont{};
+    GetObjectW(font, sizeof(boldLogFont), &boldLogFont);
+    boldLogFont.lfWeight = FW_BOLD;
+    HFONT boldFont = CreateFontIndirectW(&boldLogFont);
+
     for (size_t i = 0; i < tabRects.size(); ++i) {
         const RECT& tabRect = tabRects[i];
         const bool active = (i == activeIndex_);
@@ -455,9 +470,11 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
         }
 
         SetTextColor(hdc, active ? kActiveTextColor : kInactiveTextColor);
+        SelectObject(hdc, active ? boldFont : font);
         DrawTextW(hdc, memberTitles_[i].c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     }
     SelectObject(hdc, oldFont);
+    DeleteObject(boldFont);
 }
 
 RECT GroupChromeWindow::ContentRectInScreenCoords() const {
