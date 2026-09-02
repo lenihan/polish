@@ -1,5 +1,6 @@
 #include "hook/GroupChromeWindow.h"
 
+#include <dwmapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -22,7 +23,44 @@ constexpr UINT kHoverDelayMs = 400;
 constexpr UINT kContextMenuSwitchMode = 1;
 constexpr UINT kContextMenuEditWindows = 2;
 
+// Some SDK headers don't yet define this (added Windows 10 20H1) --
+// the numeric value is stable/documented, safe to fall back to.
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+#endif
+
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
+
+// The user's actual chosen app theme (Settings > Personalization >
+// Colors > "Choose your mode"), not just assumed light -- confirmed
+// necessary: a hardcoded light palette looked jarringly out of place
+// sitting in an otherwise all-dark desktop. Same registry value every
+// dark-mode-aware Win32 app reads; no public API for it.
+bool IsDarkModeEnabled() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                       L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ,
+                       &key) != ERROR_SUCCESS) {
+        return false;
+    }
+    DWORD value = 1;
+    DWORD size = sizeof(value);
+    DWORD type = 0;
+    const bool ok = RegQueryValueExW(key, L"AppsUseLightTheme", nullptr, &type, reinterpret_cast<BYTE*>(&value),
+                                      &size) == ERROR_SUCCESS &&
+                     type == REG_DWORD;
+    RegCloseKey(key);
+    return ok && value == 0;
+}
+
+// Applies (or removes) the dark native title bar/frame to match --
+// otherwise the chrome's own OS-drawn title bar stays light even when
+// everything this app paints itself, and every other app on screen, is
+// dark.
+void ApplyDarkTitleBar(HWND hwnd, bool dark) {
+    BOOL enabled = dark ? TRUE : FALSE;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &enabled, sizeof(enabled));
+}
 
 }  // namespace
 
@@ -144,6 +182,7 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             }
             if (newHover != hoveredTabIndex_) {
                 hoveredTabIndex_ = newHover;
+                InvalidateRect(hwnd, nullptr, FALSE);  // reflect the new hover highlight
                 KillTimer(hwnd, kHoverTimerId);
                 if (newHover.has_value()) {
                     SetTimer(hwnd, kHoverTimerId, kHoverDelayMs, nullptr);
@@ -158,6 +197,7 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             trackingMouseLeave_ = false;
             if (hoveredTabIndex_.has_value()) {
                 hoveredTabIndex_.reset();
+                InvalidateRect(hwnd, nullptr, FALSE);
                 KillTimer(hwnd, kHoverTimerId);
                 if (onTabHovered_) {
                     onTabHovered_(std::nullopt, RECT{});
@@ -252,6 +292,19 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             return 0;
         }
 
+        case WM_SETTINGCHANGE:
+            // Fires when the user flips Settings > Personalization >
+            // Colors > "Choose your mode" while a group is already open
+            // -- re-apply the native title bar and repaint the
+            // self-painted tab strip so both follow live, not just on
+            // next creation. lParam names the changed setting as a
+            // string ("ImmersiveColorSet" for a theme change), but
+            // re-checking the registry directly is cheap enough to just
+            // always do it rather than string-compare lParam.
+            ApplyDarkTitleBar(hwnd, IsDarkModeEnabled());
+            InvalidateRect(hwnd, nullptr, TRUE);
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+
         case WM_CLOSE:
             // Runs before DefWindowProcW's default WM_CLOSE handling
             // (which calls DestroyWindow) -- see SetOnClosing's comment
@@ -299,16 +352,33 @@ std::vector<RECT> GroupChromeWindow::ComputeTabRects(const RECT& clientRect) con
 }
 
 void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
+    // Windows 11's own tab style (File Explorer, Notepad): a strip the
+    // tabs sit in, an active tab that's the *same* color as the content
+    // area below it (so it visually merges/"grows out of" the content,
+    // no border between them), rounded top corners only, and inactive
+    // tabs with no fill at all -- just text on the strip background,
+    // until hovered. Light/dark palettes mirror File Explorer's and
+    // Notepad's own, since those are the apps most likely to be sitting
+    // right next to a group's chrome on screen.
+    const bool dark = IsDarkModeEnabled();
+    const COLORREF kStripColor = dark ? RGB(0x20, 0x20, 0x20) : RGB(0xF3, 0xF3, 0xF3);
+    const COLORREF kContentColor = dark ? RGB(0x20, 0x20, 0x20) : RGB(0xFF, 0xFF, 0xFF);
+    const COLORREF kActiveTabColor = kContentColor;
+    const COLORREF kHoverTabColor = dark ? RGB(0x2B, 0x2B, 0x2B) : RGB(0xE9, 0xE9, 0xE9);
+    const COLORREF kActiveBorderColor = dark ? RGB(0x3F, 0x3F, 0x3F) : RGB(0xD8, 0xD8, 0xD8);
+    const COLORREF kActiveTextColor = dark ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x1A, 0x1A, 0x1A);
+    const COLORREF kInactiveTextColor = dark ? RGB(0xB0, 0xB0, 0xB0) : RGB(0x5A, 0x5A, 0x5A);
+
     const UINT dpi = GetDpiForWindow(window_);
     const int tabHeight = Scale(kTabStripHeight, dpi);
 
     RECT stripRect{clientRect.left, clientRect.top, clientRect.right, clientRect.top + tabHeight};
-    HBRUSH stripBrush = CreateSolidBrush(RGB(0xE8, 0xE8, 0xE8));
+    HBRUSH stripBrush = CreateSolidBrush(kStripColor);
     FillRect(hdc, &stripRect, stripBrush);
     DeleteObject(stripBrush);
 
     RECT contentRect{clientRect.left, clientRect.top + tabHeight, clientRect.right, clientRect.bottom};
-    HBRUSH contentBrush = CreateSolidBrush(RGB(0xFA, 0xFA, 0xFA));
+    HBRUSH contentBrush = CreateSolidBrush(kContentColor);
     FillRect(hdc, &contentRect, contentBrush);
     DeleteObject(contentBrush);
 
@@ -322,7 +392,7 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
         // job), so the header is just a plain label.
         RECT labelRect = stripRect;
         InflateRect(&labelRect, -Scale(8, dpi), 0);
-        SetTextColor(hdc, RGB(0x00, 0x00, 0x00));
+        SetTextColor(hdc, kActiveTextColor);
         const std::wstring label =
             L"Group (" + std::to_wstring(memberTitles_.size()) + L" window(s), tiled)";
         DrawTextW(hdc, label.c_str(), -1, &labelRect, DT_SINGLELINE | DT_VCENTER);
@@ -336,21 +406,42 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
         return;
     }
 
-    HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(0xC0, 0xC0, 0xC0));
-    HGDIOBJ oldPen = SelectObject(hdc, borderPen);
-
     const int iconSize = Scale(16, dpi);
     const int iconTextGap = Scale(4, dpi);
+    const int cornerRadius = Scale(8, dpi);
 
     for (size_t i = 0; i < tabRects.size(); ++i) {
         const RECT& tabRect = tabRects[i];
         const bool active = (i == activeIndex_);
+        const bool hovered = !active && hoveredTabIndex_.has_value() && *hoveredTabIndex_ == i;
 
-        HBRUSH tabBrush = CreateSolidBrush(active ? RGB(0x00, 0x78, 0xD7) : RGB(0xE8, 0xE8, 0xE8));
-        HGDIOBJ oldBrush = SelectObject(hdc, tabBrush);
-        Rectangle(hdc, tabRect.left, tabRect.top, tabRect.right, tabRect.bottom);
-        SelectObject(hdc, oldBrush);
-        DeleteObject(tabBrush);
+        if (active || hovered) {
+            const COLORREF fill = active ? kActiveTabColor : kHoverTabColor;
+            HBRUSH tabBrush = CreateSolidBrush(fill);
+            HGDIOBJ oldBrush = SelectObject(hdc, tabBrush);
+            HPEN tabPen = active ? CreatePen(PS_SOLID, 1, kActiveBorderColor) : CreatePen(PS_NULL, 0, 0);
+            HGDIOBJ oldPen = SelectObject(hdc, tabPen);
+            // Rounded top corners only: RoundRect rounds all four
+            // corners of whatever rect it's given, so the bottom
+            // corners are pushed below tabRect.bottom (outside the
+            // visible tab) before drawing, then clipped back to
+            // tabRect's real bounds -- draws past the clip and gets cut
+            // off cleanly, rather than needing a custom top-only-
+            // rounded path. Without the clip, a hovered (not active)
+            // tab's fill color -- unlike the active tab's, which
+            // matches the content area exactly -- would visibly bleed a
+            // sliver into the content area below.
+            IntersectClipRect(hdc, tabRect.left, tabRect.top, tabRect.right, tabRect.bottom);
+            RoundRect(hdc, tabRect.left, tabRect.top, tabRect.right, tabRect.bottom + cornerRadius, cornerRadius,
+                      cornerRadius);
+            SelectClipRgn(hdc, nullptr);
+            SelectObject(hdc, oldPen);
+            SelectObject(hdc, oldBrush);
+            DeleteObject(tabBrush);
+            if (!active) {
+                DeleteObject(tabPen);
+            }
+        }
 
         RECT textRect = tabRect;
         InflateRect(&textRect, -Scale(8, dpi), 0);
@@ -362,12 +453,9 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
             textRect.left += iconSize + iconTextGap;
         }
 
-        SetTextColor(hdc, active ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x00, 0x00, 0x00));
+        SetTextColor(hdc, active ? kActiveTextColor : kInactiveTextColor);
         DrawTextW(hdc, memberTitles_[i].c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     }
-
-    SelectObject(hdc, oldPen);
-    DeleteObject(borderPen);
     SelectObject(hdc, oldFont);
 }
 
@@ -492,6 +580,9 @@ void GroupChromeWindow::Show(const std::vector<std::wstring>& memberTitles, Grou
     if (window_ == nullptr) {
         window_ = CreateWindowExW(0, kWindowClassName, L"Group", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
                                    CW_USEDEFAULT, 800, 600, nullptr, nullptr, instance_, this);
+        if (window_ != nullptr) {
+            ApplyDarkTitleBar(window_, IsDarkModeEnabled());
+        }
     }
     if (window_ == nullptr) {
         return;
