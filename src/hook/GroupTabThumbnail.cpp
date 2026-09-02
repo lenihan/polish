@@ -12,12 +12,41 @@ constexpr int kHeight = 160;  // logical px
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
+// PW_RENDERFULLCONTENT (Windows 8.1+) -- captures a window's actual
+// rendered content (including hardware-accelerated/DirectComposition
+// surfaces a plain BitBlt-based capture can't see), which the plain
+// PW_CLIENTONLY-only flag alone doesn't guarantee on every app.
+constexpr UINT kPrintWindowRenderFullContent = 0x00000002;
+
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_NCCREATE) {
+        auto* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(createStruct->lpCreateParams));
+        return DefWindowProcW(hwnd, message, wParam, lParam);
+    }
     if (message == WM_PAINT) {
+        auto* snapshotPtr = reinterpret_cast<HBITMAP*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         PAINTSTRUCT paint;
         HDC hdc = BeginPaint(hwnd, &paint);
         RECT client{};
         GetClientRect(hwnd, &client);
+
+        if (snapshotPtr != nullptr && *snapshotPtr != nullptr) {
+            HDC memDC = CreateCompatibleDC(hdc);
+            HGDIOBJ oldBitmap = SelectObject(memDC, *snapshotPtr);
+            BITMAP bitmapInfo{};
+            GetObject(*snapshotPtr, sizeof(bitmapInfo), &bitmapInfo);
+            SetStretchBltMode(hdc, HALFTONE);
+            StretchBlt(hdc, 0, 0, client.right, client.bottom, memDC, 0, 0, bitmapInfo.bmWidth,
+                       bitmapInfo.bmHeight, SRCCOPY);
+            SelectObject(memDC, oldBitmap);
+            DeleteDC(memDC);
+        } else {
+            HBRUSH background = CreateSolidBrush(RGB(0xF0, 0xF0, 0xF0));
+            FillRect(hdc, &client, background);
+            DeleteObject(background);
+        }
+
         HBRUSH borderBrush = CreateSolidBrush(RGB(0x40, 0x40, 0x40));
         FrameRect(hdc, &client, borderBrush);
         DeleteObject(borderBrush);
@@ -46,6 +75,9 @@ GroupTabThumbnail::GroupTabThumbnail(HINSTANCE instance) : instance_(instance) {
 
 GroupTabThumbnail::~GroupTabThumbnail() {
     Hide();
+    if (snapshot_ != nullptr) {
+        DeleteObject(snapshot_);
+    }
     if (window_ != nullptr) {
         DestroyWindow(window_);
     }
@@ -54,22 +86,39 @@ GroupTabThumbnail::~GroupTabThumbnail() {
 void GroupTabThumbnail::ShowFor(HWND member, const RECT& tabScreenRect) {
     if (window_ == nullptr) {
         // WS_EX_NOACTIVATE so hovering a tab never steals focus from
-        // whatever the user is actually working in; a plain, non-
-        // layered WS_POPUP is enough for DwmRegisterThumbnail (already
-        // confirmed working this way during the original Alt+Tab
-        // research -- no WS_EX_LAYERED needed for a DWM thumbnail
-        // specifically, unlike this app's dim overlay/highlight border,
-        // which paint their own content instead of hosting one).
+        // whatever the user is actually working in. GWLP_USERDATA is
+        // set to &snapshot_ (a stable address for this object's
+        // lifetime) via lpCreateParams so WM_PAINT can always paint
+        // whatever the *current* snapshot is, not a stale copy.
         window_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, kWindowClassName, L"",
-                                   WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance_, nullptr);
+                                   WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance_, &snapshot_);
     }
     if (window_ == nullptr) {
         return;
     }
 
-    if (thumbnail_ != nullptr) {
-        DwmUnregisterThumbnail(thumbnail_);
-        thumbnail_ = nullptr;
+    RECT memberClient{};
+    GetClientRect(member, &memberClient);
+    const int memberWidth = memberClient.right - memberClient.left;
+    const int memberHeight = memberClient.bottom - memberClient.top;
+    if (memberWidth > 0 && memberHeight > 0) {
+        HDC screenDC = GetDC(nullptr);
+        HDC memDC = CreateCompatibleDC(screenDC);
+        HBITMAP freshSnapshot = CreateCompatibleBitmap(screenDC, memberWidth, memberHeight);
+        HGDIOBJ oldBitmap = SelectObject(memDC, freshSnapshot);
+        const BOOL captured = PrintWindow(member, memDC, kPrintWindowRenderFullContent);
+        SelectObject(memDC, oldBitmap);
+        DeleteDC(memDC);
+        ReleaseDC(nullptr, screenDC);
+
+        if (captured) {
+            if (snapshot_ != nullptr) {
+                DeleteObject(snapshot_);
+            }
+            snapshot_ = freshSnapshot;
+        } else {
+            DeleteObject(freshSnapshot);
+        }
     }
 
     const UINT dpi = GetDpiForWindow(window_) != 0 ? GetDpiForWindow(window_) : GetDpiForSystem();
@@ -80,36 +129,21 @@ void GroupTabThumbnail::ShowFor(HWND member, const RECT& tabScreenRect) {
     // area so it can't be positioned partly off-screen near an edge.
     int x = tabScreenRect.left + ((tabScreenRect.right - tabScreenRect.left) - width) / 2;
     int y = tabScreenRect.bottom + Scale(4, dpi);
-    RECT workArea{};
     MONITORINFO monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
     if (GetMonitorInfoW(MonitorFromRect(&tabScreenRect, MONITOR_DEFAULTTONEAREST), &monitorInfo)) {
-        workArea = monitorInfo.rcWork;
+        const RECT& workArea = monitorInfo.rcWork;
         x = std::clamp(x, static_cast<int>(workArea.left), static_cast<int>(workArea.right) - width);
         y = std::clamp(y, static_cast<int>(workArea.top), static_cast<int>(workArea.bottom) - height);
     }
 
     SetWindowPos(window_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
     ShowWindow(window_, SW_SHOWNOACTIVATE);
-
-    if (DwmRegisterThumbnail(window_, member, &thumbnail_) == S_OK) {
-        RECT client{};
-        GetClientRect(window_, &client);
-        DWM_THUMBNAIL_PROPERTIES props{};
-        props.dwFlags = DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY | DWM_TNP_SOURCECLIENTAREAONLY;
-        props.rcDestination = client;
-        props.fVisible = TRUE;
-        props.opacity = 255;
-        props.fSourceClientAreaOnly = TRUE;
-        DwmUpdateThumbnailProperties(thumbnail_, &props);
-    }
+    InvalidateRect(window_, nullptr, TRUE);
+    UpdateWindow(window_);
 }
 
 void GroupTabThumbnail::Hide() {
-    if (thumbnail_ != nullptr) {
-        DwmUnregisterThumbnail(thumbnail_);
-        thumbnail_ = nullptr;
-    }
     if (window_ != nullptr) {
         ShowWindow(window_, SW_HIDE);
     }
