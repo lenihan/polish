@@ -355,19 +355,20 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     // Windows 11's own tab style (File Explorer, Notepad): a strip the
     // tabs sit in, an active tab that's the *same* color as the content
     // area below it (so it visually merges/"grows out of" the content,
-    // no border between them), rounded top corners only, and inactive
-    // tabs with no fill at all -- just text on the strip background,
-    // until hovered. Light/dark palettes mirror File Explorer's and
-    // Notepad's own, since those are the apps most likely to be sitting
-    // right next to a group's chrome on screen.
+    // no border between them), rounded top corners only. Inactive tabs
+    // now get their own (much darker) fill too, rather than just
+    // showing the strip color -- background contrast is the primary way
+    // the active tab stands out; text color only needs a slight nudge on
+    // top of that, not a stark black-vs-white split.
     const bool dark = IsDarkModeEnabled();
     const COLORREF kStripColor = dark ? RGB(0x20, 0x20, 0x20) : RGB(0xF3, 0xF3, 0xF3);
     const COLORREF kContentColor = dark ? RGB(0x20, 0x20, 0x20) : RGB(0xFF, 0xFF, 0xFF);
     const COLORREF kActiveTabColor = kContentColor;
+    const COLORREF kInactiveTabColor = dark ? RGB(0x0A, 0x0A, 0x0A) : RGB(0xDD, 0xDD, 0xDD);
     const COLORREF kHoverTabColor = dark ? RGB(0x2B, 0x2B, 0x2B) : RGB(0xE9, 0xE9, 0xE9);
     const COLORREF kActiveBorderColor = dark ? RGB(0x3F, 0x3F, 0x3F) : RGB(0xD8, 0xD8, 0xD8);
     const COLORREF kActiveTextColor = dark ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x1A, 0x1A, 0x1A);
-    const COLORREF kInactiveTextColor = dark ? RGB(0xB0, 0xB0, 0xB0) : RGB(0x5A, 0x5A, 0x5A);
+    const COLORREF kInactiveTextColor = dark ? RGB(0xE0, 0xE0, 0xE0) : RGB(0x00, 0x00, 0x00);
 
     const UINT dpi = GetDpiForWindow(window_);
     const int tabHeight = Scale(kTabStripHeight, dpi);
@@ -415,8 +416,8 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
         const bool active = (i == activeIndex_);
         const bool hovered = !active && hoveredTabIndex_.has_value() && *hoveredTabIndex_ == i;
 
-        if (active || hovered) {
-            const COLORREF fill = active ? kActiveTabColor : kHoverTabColor;
+        {
+            const COLORREF fill = active ? kActiveTabColor : (hovered ? kHoverTabColor : kInactiveTabColor);
             HBRUSH tabBrush = CreateSolidBrush(fill);
             HGDIOBJ oldBrush = SelectObject(hdc, tabBrush);
             HPEN tabPen = active ? CreatePen(PS_SOLID, 1, kActiveBorderColor) : CreatePen(PS_NULL, 0, 0);
@@ -427,10 +428,10 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
             // visible tab) before drawing, then clipped back to
             // tabRect's real bounds -- draws past the clip and gets cut
             // off cleanly, rather than needing a custom top-only-
-            // rounded path. Without the clip, a hovered (not active)
-            // tab's fill color -- unlike the active tab's, which
-            // matches the content area exactly -- would visibly bleed a
-            // sliver into the content area below.
+            // rounded path. Without the clip, a non-active tab's fill
+            // color -- unlike the active tab's, which matches the
+            // content area exactly -- would visibly bleed a sliver into
+            // the content area below.
             IntersectClipRect(hdc, tabRect.left, tabRect.top, tabRect.right, tabRect.bottom);
             RoundRect(hdc, tabRect.left, tabRect.top, tabRect.right, tabRect.bottom + cornerRadius, cornerRadius,
                       cornerRadius);
