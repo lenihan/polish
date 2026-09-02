@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace polish {
@@ -29,6 +30,13 @@ struct GroupMember {
 
 enum class GroupMode { Tab, Tile };
 
+// Horizontal (default): tabs across the top, tile grid biased wide.
+// Vertical: tabs down the left edge, tile grid biased tall. Affects
+// both GroupChromeWindow's tab-strip placement and
+// GroupManager::ApplyTileLayout's grid shape -- kept as one setting
+// rather than two so they can never disagree with each other.
+enum class GroupAlignment { Horizontal, Vertical };
+
 // Pure state for one group: its ordered membership, which member is
 // "active" (tab mode: the one currently shown/promoted; tile mode:
 // still tracked, e.g. for keyboard focus, even though every member is
@@ -41,6 +49,8 @@ public:
 
     GroupId Id() const { return id_; }
     GroupMode Mode() const { return mode_; }
+    GroupAlignment Alignment() const { return alignment_; }
+    const std::wstring& Name() const { return name_; }
 
     // Changes the group's display mode at runtime (v1: Tab <-> Tile,
     // user-triggered from the chrome's context menu). Pure bookkeeping
@@ -48,6 +58,16 @@ public:
     // responsible for re-applying layout (GroupManager::ApplyLayout)
     // and updating the chrome's own rendering afterward.
     void SetMode(GroupMode mode) { mode_ = mode; }
+
+    // Changes tab-strip/tile-grid orientation. Same pure-bookkeeping
+    // contract as SetMode -- the caller re-applies layout and updates
+    // the chrome's rendering afterward.
+    void SetAlignment(GroupAlignment alignment) { alignment_ = alignment; }
+
+    // User-facing name (e.g. "projA"), shown in the chrome's title bar.
+    // Defaults to "Group <id>" at construction so it's never empty
+    // before the user renames it via the management dialog.
+    void SetName(std::wstring name) { name_ = std::move(name); }
 
     // Appends hwnd as a new member. No-op if hwnd is already a member.
     // The newly added member becomes active if it's the first one added.
@@ -88,6 +108,8 @@ public:
 private:
     GroupId id_;
     GroupMode mode_;
+    GroupAlignment alignment_ = GroupAlignment::Horizontal;
+    std::wstring name_;
     std::vector<GroupMember> members_;
     std::optional<size_t> activeIndex_;
 };

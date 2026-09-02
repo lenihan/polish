@@ -1,6 +1,7 @@
 #include "windowtracking/GroupState.h"
 
 #include <algorithm>
+#include <format>
 
 namespace polish {
 
@@ -10,7 +11,8 @@ bool IsWindowMember(const GroupMember& member, HWND hwnd) {
 }
 }  // namespace
 
-GroupState::GroupState(GroupId id, GroupMode mode) : id_(id), mode_(mode) {}
+GroupState::GroupState(GroupId id, GroupMode mode)
+    : id_(id), mode_(mode), name_(std::format(L"Group {}", id)) {}
 
 void GroupState::AddWindow(HWND hwnd) {
     if (Contains(hwnd)) {

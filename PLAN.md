@@ -1147,6 +1147,27 @@ foundational to #4-5, and #7-8 are more independent/deferrable) rather
 than an ad-hoc continuation, given how much has already landed in this
 session.
 
+**Milestone plan written (2026-09-02)**, saved at
+`C:\Users\david\.claude\plans\i-want-to-make-compressed-dusk.md`: M1
+(data model: `GroupAlignment` + per-group `Name()`) through M9 (Alt+`
+MRU switching). Two decisions locked in during planning: group names
+are user-editable (not auto-generated), and the alignment/mode/manage-
+windows controls live in the group chrome's own custom-drawn title bar
+as three small icon toggle buttons -- not a separate toolbar row --
+so no content space is taken from member windows. M4 (the custom title
+bar, replacing the native one via `WM_NCCALCSIZE`/`WM_NCHITTEST`) is
+flagged as the riskiest single piece and starts with a throwaway spike
+before touching `GroupChromeWindow` for real.
+
+**M1 done.** `GroupState` gained `GroupAlignment` (`Horizontal`
+default) and a `std::wstring name_` (auto-defaulted to `L"Group
+<id>"` at construction), with `Alignment()`/`SetAlignment()` and
+`Name()`/`SetName()` mirroring the existing `Mode()`/`SetMode()` pair.
+3 new tests in `GroupStateTests.cpp` (default alignment/name,
+`SetAlignment` leaves membership untouched, `SetName` overrides the
+auto-generated default) -- 39/39 tests pass. Pure plumbing, no UI
+wiring yet (that starts at M2).
+
 ### Two more real bugs, fixed (2026-09-02, same day)
 
 User confirmed the restore-sync-conflict flashing fix worked. Two more

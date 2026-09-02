@@ -19,6 +19,12 @@ TEST_CASE("GroupState: new group has an id, default Tab mode, and no members") {
     CHECK(state.ActiveWindow() == std::nullopt);
 }
 
+TEST_CASE("GroupState: new group defaults to Horizontal alignment and an auto-generated name") {
+    GroupState state(42);
+    CHECK(state.Alignment() == GroupAlignment::Horizontal);
+    CHECK(state.Name() == L"Group 42");
+}
+
 TEST_CASE("GroupState: mode can be set at construction") {
     GroupState state(1, GroupMode::Tile);
     CHECK(state.Mode() == GroupMode::Tile);
@@ -154,6 +160,21 @@ TEST_CASE("GroupState: SetMode changes the mode without touching membership") {
     CHECK(state.Mode() == GroupMode::Tile);
     CHECK(state.MemberCount() == 1);
     CHECK(state.ActiveWindow() == AsHwnd(1));
+}
+
+TEST_CASE("GroupState: SetAlignment changes the alignment without touching membership") {
+    GroupState state(1);
+    state.AddWindow(AsHwnd(1));
+    state.SetAlignment(GroupAlignment::Vertical);
+    CHECK(state.Alignment() == GroupAlignment::Vertical);
+    CHECK(state.MemberCount() == 1);
+    CHECK(state.ActiveWindow() == AsHwnd(1));
+}
+
+TEST_CASE("GroupState: SetName replaces the auto-generated name") {
+    GroupState state(1);
+    state.SetName(L"projA");
+    CHECK(state.Name() == L"projA");
 }
 
 TEST_CASE("GroupState: Reorder moves a member forward, shifting others back") {
