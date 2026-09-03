@@ -874,19 +874,43 @@ void OnMemberTitleChanged(HWND hwnd) {
     chromeIt->second->SetMemberIcons(CollectMemberIcons(*group));
 }
 
+// Hides the tab hover-preview thumbnail (no-op if it isn't showing)
+// and forces the group's chrome to repaint. The thumbnail is a
+// WS_EX_TOPMOST popup sitting right below the tab strip -- hiding it
+// doesn't reliably trigger the chrome to repaint whatever sliver of
+// the tab-strip/content boundary it was covering (same class of
+// stale-composited-surface issue RedrawWindow already had to fix for
+// member tab switches, see GroupManager's PositionMember), which left
+// the active tab's highlight looking stale until something unrelated
+// repainted it.
+void HideGroupTabThumbnail(polish::GroupId id) {
+    if (!g_groupTabThumbnail) {
+        return;
+    }
+    g_groupTabThumbnail->Hide();
+    auto chromeIt = g_groupChromeWindows.find(id);
+    if (chromeIt != g_groupChromeWindows.end()) {
+        InvalidateRect(chromeIt->second->Handle(), nullptr, TRUE);
+    }
+}
+
 // Called from GroupChromeWindow's onTabHovered callback: shows (or
-// hides, if index is nullopt) a live DWM thumbnail preview of the
-// hovered tab's member window, so the user can see which window it is
-// before committing to switch to it.
+// hides, if index is nullopt) a live thumbnail preview of the hovered
+// tab's member window, so the user can see which window it is before
+// committing to switch to it.
 void OnGroupTabHovered(polish::GroupId id, std::optional<size_t> index, const RECT& tabScreenRect) {
     if (!index.has_value()) {
-        if (g_groupTabThumbnail) {
-            g_groupTabThumbnail->Hide();
-        }
+        HideGroupTabThumbnail(id);
         return;
     }
     polish::GroupState* group = g_groupManager.FindGroup(id);
     if (group == nullptr || *index >= group->Members().size()) {
+        return;
+    }
+    // The active tab's content is already fully visible in the group --
+    // nothing useful to preview, so don't show a thumbnail for it.
+    if (group->ActiveIndex().has_value() && *group->ActiveIndex() == *index) {
+        HideGroupTabThumbnail(id);
         return;
     }
     const polish::GroupMember& member = group->Members()[*index];
@@ -995,34 +1019,33 @@ void EditGroupWindows(polish::GroupId id) {
     }
 
     polish::GroupPickerWindow picker(GetModuleHandleW(nullptr));
-    const auto result = picker.ShowModal(chromeIt->second->Handle(), currentMembers, group->Mode(), true);
+    const auto result = picker.ShowModal(chromeIt->second->Handle(), currentMembers, group->Name(), true);
     if (!result.has_value()) {
         polish::LogDebug(L"[Polish] Group: edit-windows picker cancelled");
         return;
     }
 
+    // Anything dropped from the confirmed Group list must be released
+    // back to top-level (GroupState::SetMembers alone only updates
+    // bookkeeping, it doesn't undo the reparenting) -- computed against
+    // the old membership before SetMembers replaces it wholesale.
     for (HWND hwnd : currentMembers) {
         if (std::find(result->windows.begin(), result->windows.end(), hwnd) == result->windows.end()) {
-            group->Remove(hwnd);
             g_groupManager.ReleaseMember(hwnd);
         }
     }
-    for (HWND hwnd : result->windows) {
-        group->AddWindow(hwnd);
-    }
-    if (group->Mode() != result->mode) {
-        group->SetMode(result->mode);
-        chromeIt->second->SetMode(result->mode);
-    }
+    group->SetMembers(result->windows);
+    group->SetName(result->name);
 
     chromeIt->second->SetMemberTitles(CollectMemberTitles(*group));
     chromeIt->second->SetMemberIcons(CollectMemberIcons(*group));
     if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
         chromeIt->second->SetActiveIndex(*activeIndex);
     }
+    SetWindowTextW(chromeIt->second->Handle(), group->Name().c_str());
     ReflowGroupTo(id);
-    polish::LogDebug(std::format(L"[Polish] Group: edited group id={}, now {} window(s), mode={}", id,
-                                  group->MemberCount(), group->Mode() == polish::GroupMode::Tile ? L"Tile" : L"Tab"));
+    polish::LogDebug(std::format(L"[Polish] Group: edited group id={}, now {} window(s), name=\"{}\"", id,
+                                  group->MemberCount(), group->Name()));
 }
 
 // Message id for the deferred close-group cleanup below (WM_APP+1 and
@@ -1064,10 +1087,17 @@ void TriggerNewGroup(HWND owner) {
         polish::LogDebug(L"[Polish] New Group: picker cancelled");
         return;
     }
-    const polish::GroupId id = g_groupManager.CreateGroup(selection->windows, selection->mode);
-    polish::LogDebug(std::format(L"[Polish] New Group: created group id={} with {} window(s), mode={}", id,
-                                  selection->windows.size(),
-                                  selection->mode == polish::GroupMode::Tile ? L"Tile" : L"Tab"));
+    // Mode is no longer chosen in the picker (moving to the chrome's
+    // own title-bar controls) -- every new group starts in Tab mode,
+    // matching GroupState's own default; the existing context-menu
+    // toggle can still switch it afterward.
+    const polish::GroupId id = g_groupManager.CreateGroup(selection->windows);
+    polish::GroupState* newGroup = g_groupManager.FindGroup(id);
+    if (newGroup != nullptr) {
+        newGroup->SetName(selection->name);
+    }
+    polish::LogDebug(std::format(L"[Polish] New Group: created group id={} with {} window(s), name=\"{}\"", id,
+                                  selection->windows.size(), selection->name));
     std::vector<std::wstring> memberTitles;
     for (HWND hwnd : selection->windows) {
         wchar_t title[256] = L"";
@@ -1083,7 +1113,8 @@ void TriggerNewGroup(HWND owner) {
     }
 
     auto chrome = std::make_unique<polish::GroupChromeWindow>(GetModuleHandleW(nullptr));
-    chrome->Show(memberTitles, selection->mode);
+    chrome->Show(memberTitles);
+    SetWindowTextW(chrome->Handle(), selection->name.c_str());
     chrome->SetMemberIcons(memberIcons);
     chrome->SetOnTabClicked([id](size_t index) { ActivateGroupTab(id, index); });
     chrome->SetOnTabReordered([id](size_t from, size_t to) { ReorderGroupTab(id, from, to); });

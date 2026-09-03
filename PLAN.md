@@ -1168,6 +1168,42 @@ default) and a `std::wstring name_` (auto-defaulted to `L"Group
 auto-generated default) -- 39/39 tests pass. Pure plumbing, no UI
 wiring yet (that starts at M2).
 
+**M2 + M3 done together** (landed as one pass -- M2's two-list dialog
+literally returns a final membership order, and the old add/remove
+diff logic couldn't express reordering at all, so shipping M2 without
+M3 would have left the dialog's drag-to-reorder doing nothing real).
+
+- `GroupState` gained `SetMembers(const std::vector<HWND>&)`: replaces
+  membership wholesale in one call (drop/add/reorder), re-deriving the
+  active member by identity the same way `Reorder` already does,
+  falling back to the first member if the previously-active one was
+  dropped. 4 new tests -- 43/43 tests pass.
+- `GroupPickerWindow` rewritten: two side-by-side `WC_LISTVIEWW` lists
+  ("Active windows" / "Group", no more checkboxes), Add/Remove buttons
+  plus double-click (`LVN_ITEMACTIVATE`) to move a row between them,
+  and drag-to-reorder within the Group list only (`LVN_BEGINDRAG` +
+  live reorder-on-crossing during `WM_MOUSEMOVE`, same pattern as
+  `GroupChromeWindow`'s own tab drag-reorder -- not a separate
+  insert-mark line). A name field (`EDIT` control) replaces the old
+  Tab/Tile radio buttons entirely -- mode selection is gone from this
+  dialog, moving to M4's title-bar controls; every new group starts in
+  Tab mode until M4 lands (unchanged from today's actual default, just
+  no longer chosen here).
+- `GroupPickerResult` is now `{windows, name}` (no `mode` field).
+  `main.cpp`'s `TriggerNewGroup`/`EditGroupWindows` updated: creation
+  calls `CreateGroup(windows)` (mode defaults `Tab`) then
+  `SetName(selection->name)`; editing calls `SetMembers`+`SetName`
+  instead of the old manual add/remove/mode diff. Chrome title
+  (`SetWindowTextW`) now shows the group's real name instead of the
+  hardcoded `"Group"` string, on both creation and edit.
+- Build clean, 43/43 tests pass, smoke-tested (clean startup, no log
+  errors). **Not yet live-verified**: actually opening the dialog and
+  exercising Add/Remove/double-click/drag-reorder/name-edit by hand --
+  flagging this explicitly since list-view drag-and-drop specifically
+  was called out in planning as the riskiest part of M2 to get right,
+  and time didn't allow a live pass this round. Please try creating
+  and editing a group before M4 builds on top of this.
+
 ### Two more real bugs, fixed (2026-09-02, same day)
 
 User confirmed the restore-sync-conflict flashing fix worked. Two more

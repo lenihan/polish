@@ -77,6 +77,34 @@ void GroupState::Reorder(size_t fromIndex, size_t toIndex) {
     }
 }
 
+void GroupState::SetMembers(const std::vector<HWND>& windows) {
+    const std::optional<HWND> activeWindow = ActiveWindow();  // by identity, survives reordering
+
+    std::vector<GroupMember> newMembers;
+    newMembers.reserve(windows.size());
+    for (HWND hwnd : windows) {
+        newMembers.push_back(GroupMember{GroupMemberKind::Window, hwnd, 0});
+    }
+    members_ = std::move(newMembers);
+
+    if (members_.empty()) {
+        activeIndex_.reset();
+        return;
+    }
+    if (activeWindow.has_value()) {
+        for (size_t i = 0; i < members_.size(); ++i) {
+            if (IsWindowMember(members_[i], *activeWindow)) {
+                activeIndex_ = i;
+                return;
+            }
+        }
+    }
+    // Previously-active member isn't in the new list (or there wasn't
+    // one) -- fall back to the first member, mirroring AddWindow's
+    // first-member rule.
+    activeIndex_ = 0;
+}
+
 bool GroupState::Contains(HWND hwnd) const {
     return std::any_of(members_.begin(), members_.end(), [hwnd](const GroupMember& m) { return IsWindowMember(m, hwnd); });
 }

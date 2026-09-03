@@ -240,3 +240,42 @@ TEST_CASE("GroupState: Reorder with an out-of-range index is a no-op") {
     CHECK(state.Members()[0].window == AsHwnd(1));
     CHECK(state.Members()[1].window == AsHwnd(2));
 }
+
+TEST_CASE("GroupState: SetMembers replaces membership wholesale, dropping and adding as needed") {
+    GroupState state(1);
+    state.AddWindow(AsHwnd(1));
+    state.AddWindow(AsHwnd(2));
+    state.SetMembers({AsHwnd(2), AsHwnd(3)});  // 1 dropped, 2 kept, 3 added
+    CHECK(state.MemberCount() == 2);
+    CHECK(state.Members()[0].window == AsHwnd(2));
+    CHECK(state.Members()[1].window == AsHwnd(3));
+}
+
+TEST_CASE("GroupState: SetMembers keeps the previously active member active by identity") {
+    GroupState state(1);
+    state.AddWindow(AsHwnd(1));
+    state.AddWindow(AsHwnd(2));
+    state.SetActiveIndex(1);  // AsHwnd(2) is active
+    state.SetMembers({AsHwnd(3), AsHwnd(2), AsHwnd(1)});
+    CHECK(state.ActiveIndex() == 1);
+    CHECK(state.ActiveWindow() == AsHwnd(2));
+}
+
+TEST_CASE("GroupState: SetMembers falls back to the first member when the active one is dropped") {
+    GroupState state(1);
+    state.AddWindow(AsHwnd(1));
+    state.AddWindow(AsHwnd(2));
+    state.SetActiveIndex(1);  // AsHwnd(2) is active
+    state.SetMembers({AsHwnd(3), AsHwnd(4)});  // AsHwnd(2) no longer present
+    CHECK(state.ActiveIndex() == 0);
+    CHECK(state.ActiveWindow() == AsHwnd(3));
+}
+
+TEST_CASE("GroupState: SetMembers with an empty list clears membership and the active member") {
+    GroupState state(1);
+    state.AddWindow(AsHwnd(1));
+    state.SetMembers({});
+    CHECK(state.MemberCount() == 0);
+    CHECK(state.ActiveIndex() == std::nullopt);
+    CHECK(state.ActiveWindow() == std::nullopt);
+}

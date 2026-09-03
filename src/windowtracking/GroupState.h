@@ -88,6 +88,18 @@ public:
     // range.
     void Reorder(size_t fromIndex, size_t toIndex);
 
+    // Replaces the entire membership list in one call: drops members no
+    // longer present, appends new ones, and reorders survivors to match
+    // `windows`'s order -- used by the management dialog's confirmed
+    // Group-list order (add/remove/drag-reorder all collapse into one
+    // call here rather than being diffed against the old membership).
+    // The previously active member stays active if it's still present
+    // (by identity, regardless of its new index); otherwise the first
+    // member in `windows` becomes active, same as AddWindow's own
+    // first-member rule. Safe for an empty `windows` (no active member
+    // afterward).
+    void SetMembers(const std::vector<HWND>& windows);
+
     bool Contains(HWND hwnd) const;
     size_t MemberCount() const { return members_.size(); }
     const std::vector<GroupMember>& Members() const { return members_; }

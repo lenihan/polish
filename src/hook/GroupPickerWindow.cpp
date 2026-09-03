@@ -1,6 +1,7 @@
 #include "hook/GroupPickerWindow.h"
 
 #include <commctrl.h>
+#include <windowsx.h>
 
 #include <algorithm>
 #include <format>
@@ -13,10 +14,10 @@ namespace polish {
 namespace {
 
 constexpr wchar_t kWindowClassName[] = L"PolishGroupPickerWindow";
-constexpr int kCreateButtonId = 1001;
-constexpr int kCancelButtonId = 1002;
-constexpr int kTabModeRadioId = 1003;
-constexpr int kTileModeRadioId = 1004;
+constexpr int kAddButtonId = 1001;
+constexpr int kRemoveButtonId = 1002;
+constexpr int kCreateButtonId = 1003;
+constexpr int kCancelButtonId = 1004;
 
 // Logical (96 DPI) layout constants -- scaled by the window's actual DPI
 // in LayoutControls/before CreateWindowExW.
@@ -25,10 +26,34 @@ constexpr int kWindowHeight = 620;
 constexpr int kMargin = 12;
 constexpr int kButtonHeight = 28;
 constexpr int kButtonWidth = 110;
-constexpr int kModeRowHeight = 24;
-constexpr int kRadioWidth = 90;
+constexpr int kNameRowHeight = 24;
+constexpr int kNameLabelWidth = 50;
+constexpr int kListLabelHeight = 18;
+constexpr int kListLabelGap = 4;
+constexpr int kMidColumnWidth = 100;
+constexpr int kMidButtonHeight = 26;
+constexpr int kMidButtonGap = 4;
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
+
+// A single-line EDIT control does not reliably auto-center its text
+// vertically when given a client rect taller than one line -- text just
+// sits at the top (confirmed live: reordering WM_SETFONT vs. layout
+// didn't change it). Rather than subclass the control to pad its
+// non-client area (WM_NCCALCSIZE), the simpler fix used here is to
+// give the control only the height text actually needs and center
+// *that* short control within its layout row -- no subclassing, no
+// WM_NCPAINT interaction with the WS_EX_CLIENTEDGE border to worry
+// about.
+int MeasureLineHeight(HWND hwnd, HFONT font) {
+    HDC hdc = GetDC(hwnd);
+    HGDIOBJ oldFont = SelectObject(hdc, font);
+    TEXTMETRICW metrics{};
+    GetTextMetricsW(hdc, &metrics);
+    SelectObject(hdc, oldFont);
+    ReleaseDC(hwnd, hdc);
+    return metrics.tmHeight + metrics.tmExternalLeading;
+}
 
 BOOL CALLBACK EnumPickerCandidatesProc(HWND hwnd, LPARAM lParam) {
     if (IsCandidateWindow(hwnd) && !IsElevatedWindow(hwnd)) {
@@ -88,7 +113,7 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
     switch (message) {
         case WM_CREATE:
             CreateControls(hwnd);
-            PopulateList();
+            PopulateLists();
             return 0;
 
         case WM_SIZE:
@@ -97,13 +122,46 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
 
         case WM_COMMAND:
             if (HIWORD(wParam) == BN_CLICKED) {
-                if (LOWORD(wParam) == kCreateButtonId) {
-                    Commit();
-                } else if (LOWORD(wParam) == kCancelButtonId) {
-                    result_.reset();
-                    done_ = true;
+                switch (LOWORD(wParam)) {
+                    case kAddButtonId:
+                        MoveSelection(activeListView_, activeWindows_, groupWindows_);
+                        break;
+                    case kRemoveButtonId:
+                        MoveSelection(groupListView_, groupWindows_, activeWindows_);
+                        break;
+                    case kCreateButtonId:
+                        Commit();
+                        break;
+                    case kCancelButtonId:
+                        result_.reset();
+                        done_ = true;
+                        break;
+                    default:
+                        break;
                 }
             }
+            return 0;
+
+        case WM_NOTIFY:
+            return HandleNotify(reinterpret_cast<NMHDR*>(lParam));
+
+        case WM_MOUSEMOVE:
+            if (dragging_) {
+                POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                ClientToScreen(hwnd, &pt);
+                UpdateDrag(pt);
+            }
+            return 0;
+
+        case WM_LBUTTONUP:
+            if (dragging_) {
+                EndDrag();
+            }
+            return 0;
+
+        case WM_CAPTURECHANGED:
+            dragging_ = false;
+            dragItemIndex_ = -1;
             return 0;
 
         case WM_CLOSE:
@@ -116,95 +174,200 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
     }
 }
 
+LRESULT GroupPickerWindow::HandleNotify(NMHDR* header) {
+    if (header == nullptr) {
+        return 0;
+    }
+    if (header->code == LVN_BEGINDRAG && header->hwndFrom == groupListView_) {
+        const auto* nmlv = reinterpret_cast<const NMLISTVIEW*>(header);
+        BeginDrag(nmlv->iItem);
+    } else if (header->code == LVN_ITEMACTIVATE) {
+        const auto* activate = reinterpret_cast<const NMITEMACTIVATE*>(header);
+        if (activate->iItem < 0) {
+            return 0;
+        }
+        const size_t index = static_cast<size_t>(activate->iItem);
+        if (header->hwndFrom == activeListView_ && index < activeWindows_.size()) {
+            MoveSingle(activeWindows_, groupWindows_, index);
+        } else if (header->hwndFrom == groupListView_ && index < groupWindows_.size()) {
+            MoveSingle(groupWindows_, activeWindows_, index);
+        }
+    }
+    return 0;
+}
+
 void GroupPickerWindow::CreateControls(HWND hwnd) {
     const UINT dpi = GetDpiForWindow(hwnd);
 
-    listView_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT,
-                                 0, 0, 0, 0, hwnd, nullptr, instance_, nullptr);
-    ListView_SetExtendedListViewStyle(listView_, LVS_EX_CHECKBOXES | LVS_EX_FULLROWSELECT);
+    // SS_CENTERIMAGE vertically centers a STATIC control's own text
+    // within whatever rect it's given -- needed since the label spans
+    // the full (taller-than-one-line) name row, to stay visually
+    // aligned with the shrunk-and-centered edit box next to it (see
+    // MeasureLineHeight's comment).
+    nameLabel_ = CreateWindowExW(0, L"STATIC", L"Name:", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, 0, 0, 0,
+                                  0, hwnd, nullptr, instance_, nullptr);
+    nameEdit_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", initialName_.c_str(),
+                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, nullptr, instance_,
+                                 nullptr);
 
-    LVCOLUMNW column{};
-    column.mask = LVCF_TEXT | LVCF_WIDTH;
-    column.pszText = const_cast<LPWSTR>(L"Window");
-    column.cx = Scale(kWindowWidth - 2 * kMargin, dpi);
-    ListView_InsertColumn(listView_, 0, &column);
+    // The list names are separate STATIC labels sitting above each list
+    // (outside its border), not the list view's own built-in column
+    // header -- LVS_NOCOLUMNHEADER hides that entirely, so there's no
+    // redundant/awkward header row baked into the control itself.
+    activeListLabel_ = CreateWindowExW(0, L"STATIC", L"Active windows", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
+                                        nullptr, instance_, nullptr);
+    groupListLabel_ = CreateWindowExW(0, L"STATIC", L"Group", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr,
+                                       instance_, nullptr);
 
-    // WS_GROUP on the first radio starts a new keyboard-navigation/
-    // auto-exclusion group so checking one unchecks the other (standard
-    // Win32 radio-button grouping via tab order, not a container
-    // control) -- Tab is the default (matches GroupMode's own default).
-    tabModeRadio_ = CreateWindowExW(0, L"BUTTON", L"Tab",
-                                     WS_CHILD | WS_VISIBLE | WS_GROUP | BS_AUTORADIOBUTTON, 0, 0, 0, 0, hwnd,
-                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTabModeRadioId)), instance_,
-                                     nullptr);
-    tileModeRadio_ = CreateWindowExW(0, L"BUTTON", L"Tile", WS_CHILD | WS_VISIBLE | BS_AUTORADIOBUTTON, 0, 0, 0,
-                                      0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kTileModeRadioId)),
-                                      instance_, nullptr);
-    SendMessageW(initialMode_ == GroupMode::Tile ? tileModeRadio_ : tabModeRadio_, BM_SETCHECK, BST_CHECKED, 0);
+    activeListView_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+                                       WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_NOCOLUMNHEADER, 0, 0, 0, 0, hwnd,
+                                       nullptr, instance_, nullptr);
+    ListView_SetExtendedListViewStyle(activeListView_, LVS_EX_FULLROWSELECT);
+
+    groupListView_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+                                      WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_NOCOLUMNHEADER, 0, 0, 0, 0, hwnd,
+                                      nullptr, instance_, nullptr);
+    ListView_SetExtendedListViewStyle(groupListView_, LVS_EX_FULLROWSELECT);
+
+    LVCOLUMNW activeColumn{};
+    activeColumn.mask = LVCF_WIDTH;
+    activeColumn.cx = Scale(200, dpi);
+    ListView_InsertColumn(activeListView_, 0, &activeColumn);
+
+    LVCOLUMNW groupColumn{};
+    groupColumn.mask = LVCF_WIDTH;
+    groupColumn.cx = Scale(200, dpi);
+    ListView_InsertColumn(groupListView_, 0, &groupColumn);
+
+    addButton_ = CreateWindowExW(0, L"BUTTON", L"Add >", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd,
+                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(kAddButtonId)), instance_, nullptr);
+    removeButton_ = CreateWindowExW(0, L"BUTTON", L"< Remove", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0,
+                                     hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kRemoveButtonId)),
+                                     instance_, nullptr);
 
     createButton_ = CreateWindowExW(0, L"BUTTON", editing_ ? L"Update Group" : L"Create Group",
                                      WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 0, 0, 0, 0, hwnd,
                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCreateButtonId)), instance_,
                                      nullptr);
-    cancelButton_ = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0,
-                                     0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCancelButtonId)),
+    cancelButton_ = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0,
+                                     hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCancelButtonId)),
                                      instance_, nullptr);
 
-    HFONT dialogFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-    SendMessageW(listView_, WM_SETFONT, reinterpret_cast<WPARAM>(dialogFont), TRUE);
-    SendMessageW(tabModeRadio_, WM_SETFONT, reinterpret_cast<WPARAM>(dialogFont), TRUE);
-    SendMessageW(tileModeRadio_, WM_SETFONT, reinterpret_cast<WPARAM>(dialogFont), TRUE);
-    SendMessageW(createButton_, WM_SETFONT, reinterpret_cast<WPARAM>(dialogFont), TRUE);
-    SendMessageW(cancelButton_, WM_SETFONT, reinterpret_cast<WPARAM>(dialogFont), TRUE);
-
+    // Real sizing (LayoutControls) runs before WM_SETFONT, not after --
+    // a single-line EDIT control's internal vertical-text-centering
+    // offset is computed relative to its size at the time it receives
+    // WM_SETFONT, not recomputed on a later resize. Every control here
+    // is created at a placeholder 0x0 size, so sending WM_SETFONT before
+    // the real MoveWindow left the name field's text pinned to the top
+    // instead of centered.
     LayoutControls();
+
+    HFONT dialogFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    for (HWND control : {nameLabel_, nameEdit_, activeListLabel_, groupListLabel_, activeListView_, groupListView_,
+                          addButton_, removeButton_, createButton_, cancelButton_}) {
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(dialogFont), TRUE);
+    }
 }
 
 void GroupPickerWindow::LayoutControls() {
-    if (listView_ == nullptr) {
+    if (activeListView_ == nullptr) {
         return;
     }
-    const UINT dpi = GetDpiForWindow(window_ != nullptr ? window_ : listView_);
+    // window_ isn't assigned yet the first time this runs (it's called
+    // from WM_CREATE, which fires before CreateWindowExW returns) --
+    // activeListView_ is already a real child window by that point, so
+    // it's a safe DPI-query fallback.
+    const UINT dpi = GetDpiForWindow(window_ != nullptr ? window_ : activeListView_);
     RECT client{};
-    GetClientRect(GetParent(listView_), &client);
+    GetClientRect(GetParent(activeListView_), &client);
 
     const int margin = Scale(kMargin, dpi);
+    const int nameRowHeight = Scale(kNameRowHeight, dpi);
+    const int nameLabelWidth = Scale(kNameLabelWidth, dpi);
+    const int listLabelHeight = Scale(kListLabelHeight, dpi);
+    const int listLabelGap = Scale(kListLabelGap, dpi);
     const int buttonHeight = Scale(kButtonHeight, dpi);
     const int buttonWidth = Scale(kButtonWidth, dpi);
-    const int modeRowHeight = Scale(kModeRowHeight, dpi);
-    const int radioWidth = Scale(kRadioWidth, dpi);
+    const int midColumnWidth = Scale(kMidColumnWidth, dpi);
+    const int midButtonHeight = Scale(kMidButtonHeight, dpi);
+    const int midButtonGap = Scale(kMidButtonGap, dpi);
+
+    MoveWindow(nameLabel_, margin, margin, nameLabelWidth, nameRowHeight, TRUE);
+
+    // Shrink the edit box to one line's actual height and center that
+    // within the row -- see MeasureLineHeight's comment for why (a
+    // single-line EDIT given a taller rect doesn't reliably center its
+    // own text).
+    const int editHeight =
+        std::min(nameRowHeight, MeasureLineHeight(nameEdit_, reinterpret_cast<HFONT>(GetStockObject(
+                                                                  DEFAULT_GUI_FONT))) +
+                                     Scale(6, dpi));
+    const int editY = margin + (nameRowHeight - editHeight) / 2;
+    MoveWindow(nameEdit_, margin + nameLabelWidth, editY, client.right - margin - (margin + nameLabelWidth),
+               editHeight, TRUE);
 
     const int buttonsTop = client.bottom - margin - buttonHeight;
-    const int modeRowTop = buttonsTop - margin - modeRowHeight;
-    const int listBottom = modeRowTop - margin;
-    MoveWindow(listView_, margin, margin, client.right - 2 * margin, listBottom - margin, TRUE);
+    const int listsBottom = buttonsTop - margin;
+    const int listLabelsTop = margin + nameRowHeight + margin;
+    const int listsTop = listLabelsTop + listLabelHeight + listLabelGap;
 
-    MoveWindow(tabModeRadio_, margin, modeRowTop, radioWidth, modeRowHeight, TRUE);
-    MoveWindow(tileModeRadio_, margin + radioWidth, modeRowTop, radioWidth, modeRowHeight, TRUE);
+    const int listWidth = (client.right - 2 * margin - midColumnWidth - 2 * margin) / 2;
+    const int leftListLeft = margin;
+    const int leftListRight = leftListLeft + listWidth;
+    const int midLeft = leftListRight + margin;
+    const int midRight = midLeft + midColumnWidth;
+    const int rightListLeft = midRight + margin;
+    const int rightListRight = client.right - margin;
+
+    MoveWindow(activeListLabel_, leftListLeft, listLabelsTop, listWidth, listLabelHeight, TRUE);
+    MoveWindow(groupListLabel_, rightListLeft, listLabelsTop, rightListRight - rightListLeft, listLabelHeight,
+               TRUE);
+
+    MoveWindow(activeListView_, leftListLeft, listsTop, listWidth, listsBottom - listsTop, TRUE);
+    MoveWindow(groupListView_, rightListLeft, listsTop, rightListRight - rightListLeft, listsBottom - listsTop,
+               TRUE);
+
+    const int midCenterY = listsTop + (listsBottom - listsTop) / 2;
+    MoveWindow(addButton_, midLeft, midCenterY - midButtonHeight - midButtonGap, midColumnWidth, midButtonHeight,
+               TRUE);
+    MoveWindow(removeButton_, midLeft, midCenterY + midButtonGap, midColumnWidth, midButtonHeight, TRUE);
 
     MoveWindow(cancelButton_, client.right - margin - buttonWidth, buttonsTop, buttonWidth, buttonHeight, TRUE);
     MoveWindow(createButton_, client.right - 2 * margin - 2 * buttonWidth, buttonsTop, buttonWidth, buttonHeight,
                TRUE);
 }
 
-void GroupPickerWindow::PopulateList() {
-    candidates_.clear();
-    EnumWindows(EnumPickerCandidatesProc, reinterpret_cast<LPARAM>(&candidates_));
+void GroupPickerWindow::PopulateLists() {
+    std::vector<HWND> candidates;
+    EnumWindows(EnumPickerCandidatesProc, reinterpret_cast<LPARAM>(&candidates));
 
-    // Existing group members are always kept in the list even if they'd
-    // normally be filtered out (e.g. currently minimized) -- editing
-    // membership should never silently drop a member just because of a
-    // transient state at edit time.
+    // Existing group members are always kept in the Group list even if
+    // they'd normally be filtered out of "Active windows" (e.g.
+    // currently minimized) -- editing membership should never silently
+    // drop a member just because of a transient state at edit time.
+    groupWindows_.clear();
     for (HWND hwnd : initialSelection_) {
-        if (IsWindow(hwnd) && std::find(candidates_.begin(), candidates_.end(), hwnd) == candidates_.end()) {
-            candidates_.push_back(hwnd);
+        if (IsWindow(hwnd)) {
+            groupWindows_.push_back(hwnd);
         }
     }
 
-    ListView_DeleteAllItems(listView_);
-    for (size_t i = 0; i < candidates_.size(); ++i) {
+    activeWindows_.clear();
+    for (HWND hwnd : candidates) {
+        if (std::find(groupWindows_.begin(), groupWindows_.end(), hwnd) == groupWindows_.end()) {
+            activeWindows_.push_back(hwnd);
+        }
+    }
+
+    RefreshListView(activeListView_, activeWindows_);
+    RefreshListView(groupListView_, groupWindows_);
+}
+
+void GroupPickerWindow::RefreshListView(HWND listView, const std::vector<HWND>& windows) {
+    ListView_DeleteAllItems(listView);
+    for (size_t i = 0; i < windows.size(); ++i) {
         wchar_t title[256] = L"";
-        GetWindowTextW(candidates_[i], title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+        GetWindowTextW(windows[i], title, static_cast<int>(sizeof(title) / sizeof(title[0])));
         if (title[0] == L'\0') {
             continue;
         }
@@ -212,36 +375,109 @@ void GroupPickerWindow::PopulateList() {
         item.mask = LVIF_TEXT;
         item.iItem = static_cast<int>(i);
         item.pszText = title;
-        ListView_InsertItem(listView_, &item);
-        if (std::find(initialSelection_.begin(), initialSelection_.end(), candidates_[i]) !=
-            initialSelection_.end()) {
-            ListView_SetCheckState(listView_, static_cast<int>(i), TRUE);
+        ListView_InsertItem(listView, &item);
+    }
+    ListView_SetColumnWidth(listView, 0, LVSCW_AUTOSIZE_USEHEADER);
+}
+
+void GroupPickerWindow::MoveSelection(HWND fromListView, std::vector<HWND>& from, std::vector<HWND>& to) {
+    std::vector<int> selectedIndices;
+    int index = -1;
+    while ((index = ListView_GetNextItem(fromListView, index, LVNI_SELECTED)) != -1) {
+        selectedIndices.push_back(index);
+    }
+    if (selectedIndices.empty()) {
+        return;
+    }
+    std::sort(selectedIndices.begin(), selectedIndices.end());
+
+    // Erase in descending order so earlier removals don't shift indices
+    // still to be processed; collect into `moved` in that same
+    // descending order, then reverse once so the append preserves the
+    // original relative (ascending) order.
+    std::vector<HWND> moved;
+    for (auto it = selectedIndices.rbegin(); it != selectedIndices.rend(); ++it) {
+        const size_t idx = static_cast<size_t>(*it);
+        if (idx < from.size()) {
+            moved.push_back(from[idx]);
+            from.erase(from.begin() + static_cast<std::ptrdiff_t>(idx));
         }
     }
-    ListView_SetColumnWidth(listView_, 0, LVSCW_AUTOSIZE_USEHEADER);
+    std::reverse(moved.begin(), moved.end());
+    to.insert(to.end(), moved.begin(), moved.end());
+
+    RefreshListView(activeListView_, activeWindows_);
+    RefreshListView(groupListView_, groupWindows_);
+}
+
+void GroupPickerWindow::MoveSingle(std::vector<HWND>& from, std::vector<HWND>& to, size_t index) {
+    to.push_back(from[index]);
+    from.erase(from.begin() + static_cast<std::ptrdiff_t>(index));
+    RefreshListView(activeListView_, activeWindows_);
+    RefreshListView(groupListView_, groupWindows_);
+}
+
+void GroupPickerWindow::BeginDrag(int itemIndex) {
+    if (itemIndex < 0 || static_cast<size_t>(itemIndex) >= groupWindows_.size()) {
+        return;
+    }
+    dragging_ = true;
+    dragItemIndex_ = itemIndex;
+    SetCapture(window_);
+}
+
+void GroupPickerWindow::UpdateDrag(POINT screenPt) {
+    POINT clientPt = screenPt;
+    ScreenToClient(groupListView_, &clientPt);
+    RECT listRect{};
+    GetClientRect(groupListView_, &listRect);
+    if (!PtInRect(&listRect, clientPt)) {
+        return;  // outside the Group list -- leave the dragged row where it is
+    }
+
+    LVHITTESTINFO hitTest{};
+    hitTest.pt = clientPt;
+    const int hitIndex = ListView_HitTest(groupListView_, &hitTest);
+    if (hitIndex < 0 || hitIndex == dragItemIndex_ || static_cast<size_t>(hitIndex) >= groupWindows_.size()) {
+        return;
+    }
+
+    // Live reorder on crossing -- same pattern as GroupChromeWindow's
+    // own tab drag-reorder, not a separate insert-mark line.
+    const HWND moved = groupWindows_[static_cast<size_t>(dragItemIndex_)];
+    groupWindows_.erase(groupWindows_.begin() + dragItemIndex_);
+    groupWindows_.insert(groupWindows_.begin() + hitIndex, moved);
+    dragItemIndex_ = hitIndex;
+    RefreshListView(groupListView_, groupWindows_);
+    ListView_SetItemState(groupListView_, hitIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+}
+
+void GroupPickerWindow::EndDrag() {
+    ReleaseCapture();
+    dragging_ = false;
+    dragItemIndex_ = -1;
 }
 
 void GroupPickerWindow::Commit() {
-    std::vector<HWND> selected;
-    const int itemCount = ListView_GetItemCount(listView_);
-    for (int i = 0; i < itemCount; ++i) {
-        if (ListView_GetCheckState(listView_, i) != 0) {
-            selected.push_back(candidates_[static_cast<size_t>(i)]);
-        }
+    wchar_t nameBuffer[256] = L"";
+    GetWindowTextW(nameEdit_, nameBuffer, static_cast<int>(sizeof(nameBuffer) / sizeof(nameBuffer[0])));
+    std::wstring name = nameBuffer;
+    if (name.empty()) {
+        name = editing_ ? initialName_ : L"New Group";  // never confirm an empty name
     }
-    const GroupMode mode =
-        (SendMessageW(tileModeRadio_, BM_GETCHECK, 0, 0) == BST_CHECKED) ? GroupMode::Tile : GroupMode::Tab;
-    LogDebug(std::format(L"[Polish] GroupPicker: confirmed with {} of {} candidate(s) selected, mode={}",
-                          selected.size(), candidates_.size(), mode == GroupMode::Tile ? L"Tile" : L"Tab"));
-    result_ = GroupPickerResult{std::move(selected), mode};
+    LogDebug(std::format(L"[Polish] GroupPicker: confirmed with {} window(s), name=\"{}\"", groupWindows_.size(),
+                          name));
+    result_ = GroupPickerResult{groupWindows_, name};
     done_ = true;
 }
 
 std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const std::vector<HWND>& initialSelection,
-                                                                GroupMode initialMode, bool editing) {
+                                                                const std::wstring& initialName, bool editing) {
     initialSelection_ = initialSelection;
-    initialMode_ = initialMode;
+    initialName_ = initialName;
     editing_ = editing;
+    dragging_ = false;
+    dragItemIndex_ = -1;
 
     const UINT dpi = GetDpiForSystem();
     const int width = Scale(kWindowWidth, dpi);
@@ -259,7 +495,7 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
     const int y = monitorRect.top + ((monitorRect.bottom - monitorRect.top) - height) / 2;
 
     window_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClassName,
-                               editing_ ? L"Edit Group — select windows" : L"New Group — select windows",
+                               editing_ ? L"Edit Group — manage windows" : L"New Group — manage windows",
                                WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, width, height, owner, nullptr, instance_,
                                this);
     if (window_ == nullptr) {
@@ -289,9 +525,14 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
 
     DestroyWindow(window_);
     window_ = nullptr;
-    listView_ = nullptr;
-    tabModeRadio_ = nullptr;
-    tileModeRadio_ = nullptr;
+    activeListLabel_ = nullptr;
+    groupListLabel_ = nullptr;
+    activeListView_ = nullptr;
+    groupListView_ = nullptr;
+    addButton_ = nullptr;
+    removeButton_ = nullptr;
+    nameLabel_ = nullptr;
+    nameEdit_ = nullptr;
     createButton_ = nullptr;
     cancelButton_ = nullptr;
     return result_;
