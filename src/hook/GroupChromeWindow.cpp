@@ -5,6 +5,8 @@
 
 #include <algorithm>
 
+#include "resource.h"
+
 namespace polish {
 
 namespace {
@@ -14,7 +16,13 @@ constexpr int kTabStripHeight = 36;   // logical (96 DPI) px
 constexpr int kTabMinWidth = 120;     // logical px
 constexpr int kTabMaxWidth = 220;     // logical px
 constexpr int kTabStripLeftPadding = 8;  // logical px, before the first tab
-constexpr int kTabGap = 4;               // logical px, between adjacent tabs
+// Must be >= kTabCornerRadius (below): the active tab's concave-fillet
+// join to the connector band (DrawConcaveFillet) reaches
+// kTabCornerRadius px to each side of it. A gap narrower than that --
+// confirmed real, a 4px gap against an 8px radius -- let the fillet
+// bleed into the *neighboring* tab's own bottom corner.
+constexpr int kTabGap = 8;               // logical px, between adjacent tabs
+constexpr int kTabCornerRadius = 8;      // logical px -- tabs' rounded top corners
 
 // Tab mode only: a permanent full-width band between the tab strip and
 // the member's own content, colored to match the active tab -- File
@@ -117,6 +125,12 @@ GroupChromeWindow::GroupChromeWindow(HINSTANCE instance) : instance_(instance) {
         windowClass.lpszClassName = kWindowClassName;
         windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+        // Same icon as the tray (TrayIcon::AddIcon) -- otherwise every
+        // group chrome falls back to the generic default window icon in
+        // its own title bar, taskbar button, and Alt+Tab entry, instead
+        // of reading as a Polish window.
+        windowClass.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_POLISH_TRAY));
+        windowClass.hIconSm = windowClass.hIcon;
         RegisterClassExW(&windowClass);
         classRegistered = true;
     }
@@ -438,7 +452,7 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
 
     const UINT dpi = GetDpiForWindow(window_);
     const int tabHeight = Scale(kTabStripHeight, dpi);
-    const int cornerRadius = Scale(8, dpi);
+    const int cornerRadius = Scale(kTabCornerRadius, dpi);
 
     // The strip's own base fill is the inactive-tab color, not a
     // separate "strip background" color -- so the left padding before
