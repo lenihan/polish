@@ -11,6 +11,50 @@ namespace {
 // surfaces a plain BitBlt-based capture can't see), which the plain
 // PW_CLIENTONLY-only flag alone doesn't guarantee on every app.
 constexpr UINT kPrintWindowRenderFullContent = 0x00000002;
+
+// Restores hwnd if it's currently maximized (SetWindowPos silently
+// no-ops on size/position otherwise -- confirmed M0 finding). Shared by
+// PositionMember (about to reposition a member) and CaptureThumbnail
+// (about to capture one): a member added to a group while still
+// maximized was being captured in that state, and PrintWindow returned
+// real content only for the window's much smaller *restored*
+// footprint, leaving the rest of the (maximized-sized) capture solid
+// black -- confirmed via a compiled spike against real File Explorer
+// windows, not assumed.
+void RestoreIfMaximized(HWND hwnd) {
+    WINDOWPLACEMENT placement{};
+    placement.length = sizeof(placement);
+    if (GetWindowPlacement(hwnd, &placement) && placement.showCmd == SW_SHOWMAXIMIZED) {
+        ShowWindow(hwnd, SW_RESTORE);
+    }
+}
+
+// Cheap fingerprint of a bitmap's content (a sampled grid of pixels,
+// not every pixel -- this runs several times in a row during the
+// stabilize loop, so it needs to stay fast) -- FNV-1a over the sampled
+// COLORREFs. Two captures with the same fingerprint are treated as "no
+// visible change" by RefreshThumbnail; this is how it detects that a
+// member's content has settled without any app-specific signal for
+// "I've finished loading."
+UINT32 SampleFingerprint(HBITMAP bitmap, int width, int height) {
+    HDC screenDC = GetDC(nullptr);
+    HDC memDC = CreateCompatibleDC(screenDC);
+    HGDIOBJ oldBitmap = SelectObject(memDC, bitmap);
+    UINT32 hash = 2166136261u;  // FNV-1a 32-bit offset basis
+    const int stepX = std::max(1, width / 24);
+    const int stepY = std::max(1, height / 24);
+    for (int y = 0; y < height; y += stepY) {
+        for (int x = 0; x < width; x += stepX) {
+            const COLORREF c = GetPixel(memDC, x, y);
+            hash ^= static_cast<UINT32>(c);
+            hash *= 16777619u;  // FNV-1a 32-bit prime
+        }
+    }
+    SelectObject(memDC, oldBitmap);
+    DeleteDC(memDC);
+    ReleaseDC(nullptr, screenDC);
+    return hash;
+}
 }  // namespace
 
 GroupManager::~GroupManager() {
@@ -72,6 +116,32 @@ void GroupManager::ReleaseMember(HWND hwnd) {
 }
 
 void GroupManager::CaptureThumbnail(HWND hwnd) {
+    RestoreIfMaximized(hwnd);
+
+    // A member captured immediately after EnsureReparented's SetParent/
+    // style change (no message pump in between, since the member
+    // belongs to a different process's own thread) rendered only part
+    // of its content, the rest solid black -- as if PrintWindow still
+    // saw stale, pre-reparent layout. Confirmed via a compiled spike
+    // against real File Explorer windows: both steps below measurably
+    // shrink the blank region (from most of the window down to a thin
+    // strip), though a residual strip can still remain for apps with
+    // their own async/compositor-based chrome (confirmed even after a
+    // full 3-second settle before ever touching the window) -- treated
+    // as a known, not-fully-solved edge case rather than papered over.
+    //   1. SendMessageW (not PostMessageW) blocks until hwnd's own
+    //      thread has processed every message already queued ahead of
+    //      this one, including the pending WM_NCCALCSIZE/WM_SIZE from
+    //      the style/parent change.
+    //   2. RedrawWindow(RDW_UPDATENOW) then forces a synchronous
+    //      repaint at whatever layout the window now has -- same
+    //      technique PositionMember already uses for a member being
+    //      shown (fixed "blank until redraw" there); this member never
+    //      goes through that path since it's about to be hidden, not
+    //      shown.
+    SendMessageW(hwnd, WM_NULL, 0, 0);
+    RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE);
+
     RECT client{};
     GetClientRect(hwnd, &client);
     const int width = client.right - client.left;
@@ -107,6 +177,35 @@ HBITMAP GroupManager::CachedThumbnail(HWND hwnd) const {
     return it == memberThumbnails_.end() ? nullptr : it->second;
 }
 
+bool GroupManager::RefreshThumbnail(HWND hwnd) {
+    if (!IsWindow(hwnd) || IsWindowVisible(hwnd)) {
+        return false;  // active/visible members don't need a cached thumbnail
+    }
+
+    UINT32 oldFingerprint = 0;
+    bool hadOld = false;
+    if (const auto it = memberThumbnails_.find(hwnd); it != memberThumbnails_.end()) {
+        BITMAP info{};
+        GetObjectW(it->second, sizeof(info), &info);
+        oldFingerprint = SampleFingerprint(it->second, info.bmWidth, info.bmHeight);
+        hadOld = true;
+    }
+
+    CaptureThumbnail(hwnd);
+
+    const auto it = memberThumbnails_.find(hwnd);
+    if (it == memberThumbnails_.end()) {
+        return false;  // capture failed (PrintWindow returned false) -- nothing to compare
+    }
+    if (!hadOld) {
+        return true;  // first-ever capture for this member is always "changed"
+    }
+    BITMAP newInfo{};
+    GetObjectW(it->second, sizeof(newInfo), &newInfo);
+    const UINT32 newFingerprint = SampleFingerprint(it->second, newInfo.bmWidth, newInfo.bmHeight);
+    return newFingerprint != oldFingerprint;
+}
+
 namespace {
 // Restores hwnd first if it's still maximized (SetWindowPos silently
 // no-ops on size/position otherwise -- confirmed M0 finding), then
@@ -120,11 +219,7 @@ namespace {
 // real user report) -- so a caller that only trusts the requested rect
 // would leave that member visibly overflowing the group.
 RECT PositionMember(HWND hwnd, const RECT& rect, bool visible) {
-    WINDOWPLACEMENT placement{};
-    placement.length = sizeof(placement);
-    if (GetWindowPlacement(hwnd, &placement) && placement.showCmd == SW_SHOWMAXIMIZED) {
-        ShowWindow(hwnd, SW_RESTORE);
-    }
+    RestoreIfMaximized(hwnd);
     SetWindowPos(hwnd, nullptr, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
                  SWP_NOZORDER | SWP_NOACTIVATE | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
     if (visible) {

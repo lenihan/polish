@@ -37,6 +37,34 @@ constexpr wchar_t kMessageWindowClassName[] = L"PolishMessageWindow";
 constexpr UINT_PTR kSettleTimerId = 1;
 constexpr UINT kSettleTimerDelayMs = 180;
 
+// A freshly-captured tab thumbnail (GroupManager::CaptureThumbnail, run
+// synchronously right after a member is hidden) can still be
+// incomplete -- confirmed real via a compiled spike against File
+// Explorer: some of its own content (e.g. enumerating drives for a
+// "This PC" view) loads asynchronously, arriving after our capture
+// already ran, no matter how long we force-repaint/flush messages
+// beforehand. Re-capturing once more after a real delay, off the UI
+// thread's own timer (not a blocking Sleep), catches content that
+// finishes loading shortly after. Re-armed (not just started) on every
+// reflow, so a burst of layout changes (e.g. interactively resizing a
+// group) only triggers one sweep, after things go quiet.
+constexpr UINT_PTR kThumbnailRefreshTimerId = 2;
+constexpr UINT kThumbnailRefreshDelayMs = 1200;
+
+// There's no universal Win32 signal for "this window has finished
+// loading its own content" -- every app manages that internally
+// without exposing it (GroupManager::RefreshThumbnail's own comment).
+// So while a tab's thumbnail is actively being hovered, keep
+// re-capturing it a few times a short interval apart, updating the
+// shown popup each time content actually changed, and stop as soon as
+// two captures in a row match (settled) or this many attempts run out
+// -- bounds worst-case latency to kThumbnailStabilizeMaxAttempts *
+// kThumbnailStabilizeIntervalMs (currently ~450ms) rather than polling
+// indefinitely.
+constexpr UINT_PTR kThumbnailStabilizeTimerId = 3;
+constexpr UINT kThumbnailStabilizeIntervalMs = 150;
+constexpr int kThumbnailStabilizeMaxAttempts = 3;
+
 HWND g_messageWindow = nullptr;
 HWINEVENTHOOK g_foregroundHook = nullptr;
 HWINEVENTHOOK g_locationChangeHook = nullptr;
@@ -92,6 +120,15 @@ std::map<polish::GroupId, std::unique_ptr<polish::GroupChromeWindow>> g_groupChr
 // on first hover, not at startup, since most sessions may never hover
 // a tab at all.
 std::unique_ptr<polish::GroupTabThumbnail> g_groupTabThumbnail;
+
+// The member whose thumbnail is currently shown in g_groupTabThumbnail
+// (nullptr when nothing's showing) and its tab's screen rect -- tracked
+// so kThumbnailStabilizeTimerId knows what to keep re-checking/
+// re-displaying while the user is still hovering it. See that timer's
+// own comment for why a single capture isn't trusted.
+HWND g_hoveredThumbnailMember = nullptr;
+RECT g_hoveredThumbnailTabRect{};
+int g_thumbnailStabilizeAttemptsLeft = 0;
 
 // Forward-declared: defined near the rest of the group-management code
 // (TriggerNewGroup etc.), further down; called from OnWinEvent's
@@ -725,6 +762,21 @@ void ChangeGroupHotkey() {
 // callback that step itself triggers (see below).
 bool g_reflowGrowInProgress = false;
 
+// Fired by kThumbnailRefreshTimerId, some time after the last reflow --
+// re-captures every currently-hidden member's thumbnail across every
+// group (GroupManager::RefreshThumbnail already no-ops for a
+// visible/active member, so this is cheap/safe to call broadly rather
+// than needing to track exactly which group/members just changed).
+void RefreshAllHiddenThumbnails() {
+    for (const polish::GroupState& group : g_groupManager.Groups()) {
+        for (const polish::GroupMember& member : group.Members()) {
+            if (member.kind == polish::GroupMemberKind::Window && member.window != nullptr) {
+                g_groupManager.RefreshThumbnail(member.window);
+            }
+        }
+    }
+}
+
 // Reparents (if not already) and positions/shows group id's members --
 // the single path both the initial layout (TriggerNewGroup) and every
 // later reflow (a tab click, a resize, an edit) go through, so they can
@@ -765,6 +817,11 @@ void ReflowGroupTo(polish::GroupId id) {
     const HWND chromeHandle = chromeIt->second->Handle();
     const RECT contentRect = chromeIt->second->ContentRectInClientCoords();
     const SIZE needed = g_groupManager.ApplyLayout(*group, chromeHandle, contentRect);
+
+    // Re-arm (not just start) the delayed thumbnail-refresh sweep on
+    // every reflow -- see kThumbnailRefreshTimerId's own comment for
+    // why a single synchronous capture isn't always enough.
+    SetTimer(g_messageWindow, kThumbnailRefreshTimerId, kThumbnailRefreshDelayMs, nullptr);
 
     // A member's position is fully owned by GroupManager now -- but
     // nothing else proactively notices when a window that restore-sync
@@ -890,6 +947,8 @@ void OnMemberTitleChanged(HWND hwnd) {
 // the active tab's highlight looking stale until something unrelated
 // repainted it.
 void HideGroupTabThumbnail(polish::GroupId id) {
+    g_hoveredThumbnailMember = nullptr;
+    KillTimer(g_messageWindow, kThumbnailStabilizeTimerId);
     if (!g_groupTabThumbnail) {
         return;
     }
@@ -926,11 +985,49 @@ void OnGroupTabHovered(polish::GroupId id, std::optional<size_t> index, const RE
     if (!g_groupTabThumbnail) {
         g_groupTabThumbnail = std::make_unique<polish::GroupTabThumbnail>(GetModuleHandleW(nullptr));
     }
-    // A pre-captured snapshot from GroupManager's cache, not a live
-    // capture -- see GroupTabThumbnail.h's comment for why a live
-    // capture of an already-hidden (every non-active tab, always) member
-    // doesn't reliably work.
+    // A fresh, synchronous re-capture right now -- not just whatever
+    // GroupManager's background sweep last cached -- so hovering
+    // immediately after a group is created (before that sweep has even
+    // fired) shows the best available snapshot right away, not a
+    // possibly-stale one. See GroupTabThumbnail.h's comment for why a
+    // *live* capture of an already-hidden member doesn't reliably work
+    // on its own -- CaptureThumbnail's own message-flush/redraw
+    // handling is still what makes this call meaningful.
+    g_groupManager.RefreshThumbnail(member.window);
     g_groupTabThumbnail->ShowFor(g_groupManager.CachedThumbnail(member.window), tabScreenRect);
+
+    // Keep silently improving the shown preview for a bit in case its
+    // content was still mid-load -- see kThumbnailStabilizeTimerId's
+    // own comment for why (no universal "finished loading" signal
+    // exists to just check once instead).
+    g_hoveredThumbnailMember = member.window;
+    g_hoveredThumbnailTabRect = tabScreenRect;
+    g_thumbnailStabilizeAttemptsLeft = kThumbnailStabilizeMaxAttempts;
+    SetTimer(g_messageWindow, kThumbnailStabilizeTimerId, kThumbnailStabilizeIntervalMs, nullptr);
+}
+
+// Fired by kThumbnailStabilizeTimerId while a tab's thumbnail is
+// actively being hovered: re-captures it once more and, if the content
+// actually changed, updates the already-shown popup with the newer
+// image. Stops (kills its own timer) once a capture comes back
+// unchanged -- content has settled -- or the attempt budget runs out;
+// also implicitly stopped by HideGroupTabThumbnail clearing
+// g_hoveredThumbnailMember whenever hover moves elsewhere first.
+void StabilizeHoveredThumbnail() {
+    if (g_hoveredThumbnailMember == nullptr || g_thumbnailStabilizeAttemptsLeft <= 0) {
+        KillTimer(g_messageWindow, kThumbnailStabilizeTimerId);
+        return;
+    }
+    --g_thumbnailStabilizeAttemptsLeft;
+    const bool changed = g_groupManager.RefreshThumbnail(g_hoveredThumbnailMember);
+    if (changed && g_groupTabThumbnail) {
+        g_groupTabThumbnail->ShowFor(g_groupManager.CachedThumbnail(g_hoveredThumbnailMember),
+                                      g_hoveredThumbnailTabRect);
+    }
+    if (!changed || g_thumbnailStabilizeAttemptsLeft <= 0) {
+        KillTimer(g_messageWindow, kThumbnailStabilizeTimerId);
+        g_hoveredThumbnailMember = nullptr;
+    }
 }
 
 // Called when a group's tab strip is clicked (GroupChromeWindow's
@@ -1218,6 +1315,11 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             if (wParam == kSettleTimerId) {
                 KillTimer(hwnd, kSettleTimerId);
                 CheckSettledRectAndRecord();
+            } else if (wParam == kThumbnailRefreshTimerId) {
+                KillTimer(hwnd, kThumbnailRefreshTimerId);
+                RefreshAllHiddenThumbnails();
+            } else if (wParam == kThumbnailStabilizeTimerId) {
+                StabilizeHoveredThumbnail();
             }
             return 0;
 

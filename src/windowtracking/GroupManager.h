@@ -97,6 +97,22 @@ public:
     // lazily whenever a caller wants to show a preview.
     HBITMAP CachedThumbnail(HWND hwnd) const;
 
+    // Re-captures hwnd's thumbnail if it's currently hidden (a no-op,
+    // returning false, for a visible/active member or a window that's
+    // gone). Returns true if the new capture looks different from
+    // whatever was cached before (a cheap sampled-pixel comparison, not
+    // exact) -- there's no universal Win32 signal for "this window has
+    // finished loading its own content" (every app manages that
+    // internally without exposing it), so a caller wanting real
+    // confidence the capture is stable should call this repeatedly a
+    // few times a short interval apart and stop once it returns false
+    // twice in a row, rather than trusting a single capture or a fixed
+    // delay. Used both for a delayed background sweep after a reflow,
+    // and for a short live "settle" loop while a tab is actively being
+    // hovered (see main.cpp's kThumbnailRefreshTimerId and
+    // kThumbnailStabilizeTimerId).
+    bool RefreshThumbnail(HWND hwnd);
+
 private:
     SIZE ApplyTabLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRect);
     SIZE ApplyTileLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRect);
