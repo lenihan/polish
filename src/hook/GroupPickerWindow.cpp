@@ -201,6 +201,15 @@ LRESULT GroupPickerWindow::HandleNotify(NMHDR* header) {
         } else if (header->hwndFrom == groupListView_ && index < groupWindows_.size()) {
             MoveSingle(groupWindows_, activeWindows_, index);
         }
+    } else if (header->code == LVN_ITEMCHANGED &&
+               (header->hwndFrom == groupListView_ || header->hwndFrom == activeListView_)) {
+        // Covers selection changes RefreshListView's own call to
+        // UpdateButtonStates doesn't -- the user clicking a different
+        // row directly, not via Add/Remove/Move.
+        const auto* changed = reinterpret_cast<const NMLISTVIEW*>(header);
+        if ((changed->uChanged & LVIF_STATE) != 0) {
+            UpdateButtonStates();
+        }
     }
     return 0;
 }
@@ -223,19 +232,29 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
     // (outside its border), not the list view's own built-in column
     // header -- LVS_NOCOLUMNHEADER hides that entirely, so there's no
     // redundant/awkward header row baked into the control itself.
-    activeListLabel_ = CreateWindowExW(0, L"STATIC", L"Active windows", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
+    // "Open windows," not "Active windows" -- "active" reads as "the
+    // window with focus" to a user, not "currently open," which is
+    // what this list actually means.
+    activeListLabel_ = CreateWindowExW(0, L"STATIC", L"Open windows", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
                                         nullptr, instance_, nullptr);
     groupListLabel_ = CreateWindowExW(0, L"STATIC", L"Group", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr,
                                        instance_, nullptr);
 
-    activeListView_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-                                       WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_NOCOLUMNHEADER, 0, 0, 0, 0, hwnd,
-                                       nullptr, instance_, nullptr);
+    // LVS_SHOWSELALWAYS -- without it, a list view hides its selection
+    // highlight entirely as soon as it loses keyboard focus (standard
+    // Win32 default), which happens the instant Move Up/Down/Add/
+    // Remove is clicked -- looked exactly like the selection was lost,
+    // even though it wasn't.
+    activeListView_ = CreateWindowExW(
+        WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SHOWSELALWAYS, 0, 0, 0, 0, hwnd, nullptr,
+        instance_, nullptr);
     ListView_SetExtendedListViewStyle(activeListView_, LVS_EX_FULLROWSELECT);
 
-    groupListView_ = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-                                      WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_NOCOLUMNHEADER, 0, 0, 0, 0, hwnd,
-                                      nullptr, instance_, nullptr);
+    groupListView_ = CreateWindowExW(
+        WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
+        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SHOWSELALWAYS, 0, 0, 0, 0, hwnd, nullptr,
+        instance_, nullptr);
     ListView_SetExtendedListViewStyle(groupListView_, LVS_EX_FULLROWSELECT);
 
     LVCOLUMNW activeColumn{};
@@ -360,10 +379,13 @@ void GroupPickerWindow::LayoutControls() {
                midButtonHeight, TRUE);
     MoveWindow(moveDownButton_, moveColumnLeft, midCenterY + midButtonGap, moveColumnWidth, midButtonHeight, TRUE);
 
+    // Standard dialog pairing: Cancel at the far right, the primary
+    // action immediately to its left -- aligning Create Group to the
+    // Group list instead (tried previously) stopped making sense once
+    // the Move Up/Down column shifted where that list actually sits.
     MoveWindow(cancelButton_, client.right - margin - buttonWidth, buttonsTop, buttonWidth, buttonHeight, TRUE);
-    // Left edge aligned with the Group list, not flush against Cancel --
-    // ties it visually to the list it actually confirms.
-    MoveWindow(createButton_, rightListLeft, buttonsTop, buttonWidth, buttonHeight, TRUE);
+    MoveWindow(createButton_, client.right - 2 * margin - 2 * buttonWidth, buttonsTop, buttonWidth, buttonHeight,
+               TRUE);
 }
 
 void GroupPickerWindow::PopulateLists() {
@@ -371,7 +393,7 @@ void GroupPickerWindow::PopulateLists() {
     EnumWindows(EnumPickerCandidatesProc, reinterpret_cast<LPARAM>(&candidates));
 
     // Existing group members are always kept in the Group list even if
-    // they'd normally be filtered out of "Active windows" (e.g.
+    // they'd normally be filtered out of "Open windows" (e.g.
     // currently minimized) -- editing membership should never silently
     // drop a member just because of a transient state at edit time.
     groupWindows_.clear();
@@ -407,6 +429,12 @@ void GroupPickerWindow::RefreshListView(HWND listView, const std::vector<HWND>& 
         ListView_InsertItem(listView, &item);
     }
     ListView_SetColumnWidth(listView, 0, LVSCW_AUTOSIZE_USEHEADER);
+
+    // A refresh (Add/Remove/Move/double-click) always clears selection
+    // in whichever list it touched, unless something explicitly
+    // reselects afterward -- recompute every button's state rather than
+    // trusting whatever it was before.
+    UpdateButtonStates();
 }
 
 void GroupPickerWindow::MoveSelection(HWND fromListView, std::vector<HWND>& from, std::vector<HWND>& to) {
@@ -464,6 +492,28 @@ void GroupPickerWindow::MoveSelectedInGroupList(int direction) {
     RefreshListView(groupListView_, groupWindows_);
     ListView_SetItemState(groupListView_, newIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
     ListView_EnsureVisible(groupListView_, newIndex, FALSE);
+}
+
+// Every button whose usefulness depends on current selection/list
+// state, recomputed together: Add/Remove need something selected in
+// the list they'd move *from*; Move Up/Down additionally need
+// somewhere left to go; Create Group needs at least one member. All
+// disabled otherwise so each button's own state communicates whether
+// clicking it would do anything, rather than it being a silent no-op.
+void GroupPickerWindow::UpdateButtonStates() {
+    if (activeListView_ == nullptr || groupListView_ == nullptr) {
+        return;
+    }
+    EnableWindow(addButton_, ListView_GetSelectedCount(activeListView_) > 0);
+    EnableWindow(removeButton_, ListView_GetSelectedCount(groupListView_) > 0);
+
+    const int index = ListView_GetNextItem(groupListView_, -1, LVNI_SELECTED);
+    const bool hasSelection = index >= 0;
+    EnableWindow(moveUpButton_, hasSelection && index > 0);
+    EnableWindow(moveDownButton_,
+                 hasSelection && static_cast<size_t>(index) + 1 < groupWindows_.size());
+
+    EnableWindow(createButton_, !groupWindows_.empty());
 }
 
 void GroupPickerWindow::BeginDrag(int itemIndex) {

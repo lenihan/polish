@@ -14,7 +14,7 @@ struct GroupPickerResult {
 };
 
 // The unified "New Group"/"Manage windows..." dialog: two side-by-side
-// lists -- "Active windows" (open candidates not yet in the group) and
+// lists -- "Open windows" (open candidates not yet in the group) and
 // "Group" (current membership, in order) -- with Add/Remove (or a
 // double-click) moving a selection between them, and the Group list
 // reorderable both by drag (order feeds directly into
@@ -48,7 +48,7 @@ public:
     // `initialSelection` pre-populates the Group list (used for editing
     // an existing group's membership -- an empty list is exactly
     // creation); existing members are always kept in the Group list
-    // even if they'd normally be filtered out of "Active windows" (e.g.
+    // even if they'd normally be filtered out of "Open windows" (e.g.
     // currently minimized) -- editing should never silently drop a
     // member just because of a transient state at edit time.
     // `initialName` pre-fills the name field. `editing` only affects
@@ -69,6 +69,7 @@ private:
     void MoveSelection(HWND fromListView, std::vector<HWND>& from, std::vector<HWND>& to);
     void MoveSingle(std::vector<HWND>& from, std::vector<HWND>& to, size_t index);
     void MoveSelectedInGroupList(int direction);
+    void UpdateButtonStates();
     void BeginDrag(int itemIndex);
     void UpdateDrag(POINT screenPt);
     void EndDrag();
