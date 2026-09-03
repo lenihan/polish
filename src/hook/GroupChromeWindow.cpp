@@ -16,6 +16,13 @@ constexpr int kTabMaxWidth = 220;     // logical px
 constexpr int kTabStripLeftPadding = 8;  // logical px, before the first tab
 constexpr int kTabGap = 4;               // logical px, between adjacent tabs
 
+// Tab mode only: a permanent full-width band between the tab strip and
+// the member's own content, colored to match the active tab -- File
+// Explorer's own command-bar area does the same thing. Real reserved
+// space (subtracted from the content rect, not just painted over it),
+// so it stays visible regardless of what the member itself renders.
+constexpr int kTabConnectorHeight = 10;  // logical px
+
 constexpr UINT_PTR kHoverTimerId = 1;
 constexpr UINT kHoverDelayMs = 400;
 
@@ -62,6 +69,40 @@ bool IsDarkModeEnabled() {
 void ApplyDarkTitleBar(HWND hwnd, bool dark) {
     BOOL enabled = dark ? TRUE : FALSE;
     DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &enabled, sizeof(enabled));
+}
+
+// Draws the concave quarter-circle join where a narrower element (the
+// active tab) meets a wider surface below it (the full-width connector
+// band) -- the exact transition Windows 11 File Explorer uses between
+// its active tab and its command bar, rather than a sharp 90-degree
+// corner. `cornerX/cornerY` is the outer point where the tab's side
+// meets the band's top edge; `leftSide` selects the tab's bottom-left
+// vs. bottom-right corner (the two are mirror images of each other).
+//
+// Method: near cornerX/cornerY, everything is `innerColor` (continuing
+// both the tab's side and the band's top edge as one shape); a quarter
+// circle of radius `radius`, centered on the *outer* far corner of that
+// square, is then carved out in `outerColor` -- leaving a concave arc
+// that curves from the tab's straight side into the band's straight top
+// edge instead of meeting at a hard corner.
+void DrawConcaveFillet(HDC hdc, int cornerX, int cornerY, int radius, COLORREF innerColor, COLORREF outerColor,
+                       bool leftSide) {
+    const RECT square = leftSide ? RECT{cornerX - radius, cornerY - radius, cornerX, cornerY}
+                                  : RECT{cornerX, cornerY - radius, cornerX + radius, cornerY};
+    HBRUSH innerBrush = CreateSolidBrush(innerColor);
+    FillRect(hdc, &square, innerBrush);
+    DeleteObject(innerBrush);
+
+    const int farX = leftSide ? square.left : square.right;
+    const int farY = square.top;
+    HRGN circleRgn = CreateEllipticRgn(farX - radius, farY - radius, farX + radius, farY + radius);
+    HRGN squareRgn = CreateRectRgn(square.left, square.top, square.right, square.bottom);
+    CombineRgn(squareRgn, squareRgn, circleRgn, RGN_AND);
+    HBRUSH outerBrush = CreateSolidBrush(outerColor);
+    FillRgn(hdc, squareRgn, outerBrush);
+    DeleteObject(outerBrush);
+    DeleteObject(circleRgn);
+    DeleteObject(squareRgn);
 }
 
 }  // namespace
@@ -397,6 +438,7 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
 
     const UINT dpi = GetDpiForWindow(window_);
     const int tabHeight = Scale(kTabStripHeight, dpi);
+    const int cornerRadius = Scale(8, dpi);
 
     // The strip's own base fill is the inactive-tab color, not a
     // separate "strip background" color -- so the left padding before
@@ -409,7 +451,24 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     FillRect(hdc, &stripRect, stripBrush);
     DeleteObject(stripBrush);
 
-    RECT contentRect{clientRect.left, clientRect.top + tabHeight, clientRect.right, clientRect.bottom};
+    // Tab mode only: a permanent full-width band, colored to match the
+    // active tab, between the strip and the member's own content --
+    // File Explorer's own command-bar area does the same thing (see
+    // kTabConnectorHeight's comment). Straight edges all the way to the
+    // window's own left/right edges -- rounding those corners (tried
+    // first) left an unpainted notch outside the round arc but inside
+    // the clipped rect, showing whatever stale content was underneath
+    // (a real, confirmed white artifact at the window's edges). Only
+    // the tab-to-band join itself (DrawConcaveFillet, below) needs a
+    // curve.
+    if (mode_ == GroupMode::Tab) {
+        RECT bandRect{clientRect.left, stripRect.bottom, clientRect.right, stripRect.bottom + Scale(kTabConnectorHeight, dpi)};
+        HBRUSH bandBrush = CreateSolidBrush(kActiveTabColor);
+        FillRect(hdc, &bandRect, bandBrush);
+        DeleteObject(bandBrush);
+    }
+
+    RECT contentRect{clientRect.left, clientRect.top + HeaderHeight(dpi), clientRect.right, clientRect.bottom};
     HBRUSH contentBrush = CreateSolidBrush(kContentColor);
     FillRect(hdc, &contentRect, contentBrush);
     DeleteObject(contentBrush);
@@ -440,7 +499,6 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
 
     const int iconSize = Scale(16, dpi);
     const int iconTextGap = Scale(4, dpi);
-    const int cornerRadius = Scale(8, dpi);
 
     // The active tab's label is bold, matching File Explorer/Notepad --
     // inactive tabs keep the regular weight already selected into hdc.
@@ -482,6 +540,19 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
             }
         }
 
+        if (active) {
+            // Bridges the active tab into the connector band below it
+            // (painted earlier, above) with the same concave join File
+            // Explorer uses, instead of the sharp corner a plain
+            // rectangle-meets-rectangle join would leave. Also covers
+            // the active tab's own border-pen line at that seam (drawn
+            // above, clipped exactly to tabRect.bottom).
+            DrawConcaveFillet(hdc, tabRect.left, tabRect.bottom, cornerRadius, kActiveTabColor, kInactiveTabColor,
+                               /*leftSide=*/true);
+            DrawConcaveFillet(hdc, tabRect.right, tabRect.bottom, cornerRadius, kActiveTabColor, kInactiveTabColor,
+                               /*leftSide=*/false);
+        }
+
         RECT textRect = tabRect;
         InflateRect(&textRect, -Scale(8, dpi), 0);
 
@@ -500,6 +571,14 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     DeleteObject(boldFont);
 }
 
+int GroupChromeWindow::HeaderHeight(UINT dpi) const {
+    int height = Scale(kTabStripHeight, dpi);
+    if (mode_ == GroupMode::Tab) {
+        height += Scale(kTabConnectorHeight, dpi);
+    }
+    return height;
+}
+
 RECT GroupChromeWindow::ContentRectInScreenCoords() const {
     if (window_ == nullptr) {
         return RECT{};
@@ -507,9 +586,8 @@ RECT GroupChromeWindow::ContentRectInScreenCoords() const {
     RECT client;
     GetClientRect(window_, &client);
     const UINT dpi = GetDpiForWindow(window_);
-    const int tabHeight = Scale(kTabStripHeight, dpi);
 
-    POINT topLeft{client.left, client.top + tabHeight};
+    POINT topLeft{client.left, client.top + HeaderHeight(dpi)};
     POINT bottomRight{client.right, client.bottom};
     ClientToScreen(window_, &topLeft);
     ClientToScreen(window_, &bottomRight);
@@ -523,8 +601,7 @@ RECT GroupChromeWindow::ContentRectInClientCoords() const {
     RECT client;
     GetClientRect(window_, &client);
     const UINT dpi = GetDpiForWindow(window_);
-    const int tabHeight = Scale(kTabStripHeight, dpi);
-    return RECT{client.left, client.top + tabHeight, client.right, client.bottom};
+    return RECT{client.left, client.top + HeaderHeight(dpi), client.right, client.bottom};
 }
 
 void GroupChromeWindow::InvalidateTabStrip() {
@@ -534,9 +611,8 @@ void GroupChromeWindow::InvalidateTabStrip() {
     RECT client{};
     GetClientRect(window_, &client);
     const UINT dpi = GetDpiForWindow(window_);
-    const int tabHeight = Scale(kTabStripHeight, dpi);
-    RECT stripRect{client.left, client.top, client.right, client.top + tabHeight};
-    InvalidateRect(window_, &stripRect, TRUE);
+    RECT headerRect{client.left, client.top, client.right, client.top + HeaderHeight(dpi)};
+    InvalidateRect(window_, &headerRect, TRUE);
 }
 
 void GroupChromeWindow::GrowContentAreaTo(SIZE minContentSize) {

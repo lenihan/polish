@@ -168,6 +168,12 @@ private:
     std::vector<RECT> ComputeTabRects(const RECT& clientRect) const;
     void ShowContextMenu(int screenX, int screenY);
 
+    // Total space reserved above the member content: the tab strip
+    // itself, plus (Tab mode only) the connector band below it. Tile
+    // mode has no per-tab connector (no single active tab to connect),
+    // so it reserves just the strip.
+    int HeaderHeight(UINT dpi) const;
+
     HINSTANCE instance_;
     HWND window_ = nullptr;
     std::vector<std::wstring> memberTitles_;
