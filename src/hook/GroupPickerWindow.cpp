@@ -18,6 +18,8 @@ constexpr int kAddButtonId = 1001;
 constexpr int kRemoveButtonId = 1002;
 constexpr int kCreateButtonId = 1003;
 constexpr int kCancelButtonId = 1004;
+constexpr int kMoveUpButtonId = 1005;
+constexpr int kMoveDownButtonId = 1006;
 
 // Logical (96 DPI) layout constants -- scaled by the window's actual DPI
 // in LayoutControls/before CreateWindowExW.
@@ -33,6 +35,7 @@ constexpr int kListLabelGap = 4;
 constexpr int kMidColumnWidth = 100;
 constexpr int kMidButtonHeight = 26;
 constexpr int kMidButtonGap = 4;
+constexpr int kMoveColumnWidth = 90;
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
@@ -128,6 +131,12 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                         break;
                     case kRemoveButtonId:
                         MoveSelection(groupListView_, groupWindows_, activeWindows_);
+                        break;
+                    case kMoveUpButtonId:
+                        MoveSelectedInGroupList(-1);
+                        break;
+                    case kMoveDownButtonId:
+                        MoveSelectedInGroupList(1);
                         break;
                     case kCreateButtonId:
                         Commit();
@@ -245,6 +254,17 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
                                      hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kRemoveButtonId)),
                                      instance_, nullptr);
 
+    // Drag-to-reorder within the Group list works but isn't
+    // discoverable on its own -- these are the primary, always-visible
+    // way to reorder (act on whatever's currently selected in the
+    // Group list).
+    moveUpButton_ = CreateWindowExW(0, L"BUTTON", L"Move Up", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0,
+                                     hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kMoveUpButtonId)),
+                                     instance_, nullptr);
+    moveDownButton_ = CreateWindowExW(0, L"BUTTON", L"Move Down", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0,
+                                       0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kMoveDownButtonId)),
+                                       instance_, nullptr);
+
     createButton_ = CreateWindowExW(0, L"BUTTON", editing_ ? L"Update Group" : L"Create Group",
                                      WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 0, 0, 0, 0, hwnd,
                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCreateButtonId)), instance_,
@@ -264,7 +284,8 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
 
     HFONT dialogFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     for (HWND control : {nameLabel_, nameEdit_, activeListLabel_, groupListLabel_, activeListView_, groupListView_,
-                          addButton_, removeButton_, createButton_, cancelButton_}) {
+                          addButton_, removeButton_, moveUpButton_, moveDownButton_, createButton_,
+                          cancelButton_}) {
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(dialogFont), TRUE);
     }
 }
@@ -291,6 +312,7 @@ void GroupPickerWindow::LayoutControls() {
     const int midColumnWidth = Scale(kMidColumnWidth, dpi);
     const int midButtonHeight = Scale(kMidButtonHeight, dpi);
     const int midButtonGap = Scale(kMidButtonGap, dpi);
+    const int moveColumnWidth = Scale(kMoveColumnWidth, dpi);
 
     MoveWindow(nameLabel_, margin, margin, nameLabelWidth, nameRowHeight, TRUE);
 
@@ -311,13 +333,15 @@ void GroupPickerWindow::LayoutControls() {
     const int listLabelsTop = margin + nameRowHeight + margin;
     const int listsTop = listLabelsTop + listLabelHeight + listLabelGap;
 
-    const int listWidth = (client.right - 2 * margin - midColumnWidth - 2 * margin) / 2;
+    const int listWidth =
+        (client.right - 3 * margin - midColumnWidth - moveColumnWidth - 2 * margin) / 2;
     const int leftListLeft = margin;
     const int leftListRight = leftListLeft + listWidth;
     const int midLeft = leftListRight + margin;
     const int midRight = midLeft + midColumnWidth;
     const int rightListLeft = midRight + margin;
-    const int rightListRight = client.right - margin;
+    const int rightListRight = rightListLeft + listWidth;
+    const int moveColumnLeft = rightListRight + margin;
 
     MoveWindow(activeListLabel_, leftListLeft, listLabelsTop, listWidth, listLabelHeight, TRUE);
     MoveWindow(groupListLabel_, rightListLeft, listLabelsTop, rightListRight - rightListLeft, listLabelHeight,
@@ -331,6 +355,10 @@ void GroupPickerWindow::LayoutControls() {
     MoveWindow(addButton_, midLeft, midCenterY - midButtonHeight - midButtonGap, midColumnWidth, midButtonHeight,
                TRUE);
     MoveWindow(removeButton_, midLeft, midCenterY + midButtonGap, midColumnWidth, midButtonHeight, TRUE);
+
+    MoveWindow(moveUpButton_, moveColumnLeft, midCenterY - midButtonHeight - midButtonGap, moveColumnWidth,
+               midButtonHeight, TRUE);
+    MoveWindow(moveDownButton_, moveColumnLeft, midCenterY + midButtonGap, moveColumnWidth, midButtonHeight, TRUE);
 
     MoveWindow(cancelButton_, client.right - margin - buttonWidth, buttonsTop, buttonWidth, buttonHeight, TRUE);
     // Left edge aligned with the Group list, not flush against Cancel --
@@ -416,6 +444,26 @@ void GroupPickerWindow::MoveSingle(std::vector<HWND>& from, std::vector<HWND>& t
     from.erase(from.begin() + static_cast<std::ptrdiff_t>(index));
     RefreshListView(activeListView_, activeWindows_);
     RefreshListView(groupListView_, groupWindows_);
+}
+
+// Swaps the Group list's currently-selected row with its neighbor
+// (`direction` -1 = up, +1 = down) -- the discoverable alternative to
+// drag-to-reorder (which still works, see LVN_BEGINDRAG in
+// HandleNotify). No-op if nothing is selected or the move would go out
+// of range.
+void GroupPickerWindow::MoveSelectedInGroupList(int direction) {
+    const int index = ListView_GetNextItem(groupListView_, -1, LVNI_SELECTED);
+    if (index < 0) {
+        return;
+    }
+    const int newIndex = index + direction;
+    if (newIndex < 0 || static_cast<size_t>(newIndex) >= groupWindows_.size()) {
+        return;
+    }
+    std::swap(groupWindows_[static_cast<size_t>(index)], groupWindows_[static_cast<size_t>(newIndex)]);
+    RefreshListView(groupListView_, groupWindows_);
+    ListView_SetItemState(groupListView_, newIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_EnsureVisible(groupListView_, newIndex, FALSE);
 }
 
 void GroupPickerWindow::BeginDrag(int itemIndex) {
@@ -532,6 +580,8 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
     groupListView_ = nullptr;
     addButton_ = nullptr;
     removeButton_ = nullptr;
+    moveUpButton_ = nullptr;
+    moveDownButton_ = nullptr;
     nameLabel_ = nullptr;
     nameEdit_ = nullptr;
     createButton_ = nullptr;

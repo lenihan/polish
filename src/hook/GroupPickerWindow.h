@@ -16,12 +16,15 @@ struct GroupPickerResult {
 // The unified "New Group"/"Manage windows..." dialog: two side-by-side
 // lists -- "Active windows" (open candidates not yet in the group) and
 // "Group" (current membership, in order) -- with Add/Remove (or a
-// double-click) moving a selection between them and drag-to-reorder
-// within the Group list (order feeds directly into GroupChromeWindow's
-// tab order and GroupManager's tile fill order). No Tab/Tile choice
-// here anymore -- that's moving to the chrome's own title-bar controls
-// (see PLAN.md's milestone plan, M4) -- and no checkbox model either;
-// membership is purely "which list a window is currently in."
+// double-click) moving a selection between them, and the Group list
+// reorderable both by drag (order feeds directly into
+// GroupChromeWindow's tab order and GroupManager's tile fill order)
+// and via explicit Move Up/Move Down buttons -- drag alone isn't
+// discoverable, so the buttons are the primary, always-visible path.
+// No Tab/Tile choice here anymore -- that's moving to the chrome's own
+// title-bar controls (see PLAN.md's milestone plan, M4) -- and no
+// checkbox model either; membership is purely "which list a window is
+// currently in."
 //
 // Not a real Win32 modal dialog (no .rc dialog template, no DialogBoxW)
 // -- a plain WS_POPUP top-level window built the same from-scratch way
@@ -65,6 +68,7 @@ private:
     void RefreshListView(HWND listView, const std::vector<HWND>& windows);
     void MoveSelection(HWND fromListView, std::vector<HWND>& from, std::vector<HWND>& to);
     void MoveSingle(std::vector<HWND>& from, std::vector<HWND>& to, size_t index);
+    void MoveSelectedInGroupList(int direction);
     void BeginDrag(int itemIndex);
     void UpdateDrag(POINT screenPt);
     void EndDrag();
@@ -78,6 +82,8 @@ private:
     HWND groupListView_ = nullptr;
     HWND addButton_ = nullptr;
     HWND removeButton_ = nullptr;
+    HWND moveUpButton_ = nullptr;
+    HWND moveDownButton_ = nullptr;
     HWND nameLabel_ = nullptr;
     HWND nameEdit_ = nullptr;
     HWND createButton_ = nullptr;
