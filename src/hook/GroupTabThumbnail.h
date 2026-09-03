@@ -16,12 +16,18 @@ namespace polish {
 // child portion of that isn't something the API is built for. Confirmed
 // by a real, blank-preview report, not assumed.
 //
-// PrintWindow(..., PW_RENDERFULLCONTENT) instead: a static snapshot
-// captured at hover time (not live-updating), but it works at the
-// window-content level rather than relying on DWM's compositing
-// architecture, so it correctly captures a child window's actual
-// content -- including hardware-accelerated/DirectComposition-rendered
-// content, which is exactly what PW_RENDERFULLCONTENT was added for.
+// Not a PrintWindow(..., PW_RENDERFULLCONTENT) capture taken live at
+// hover time either -- also tried, and also confirmed blank for some
+// apps (Settings, Outlook) via a compiled spike: every non-active tab's
+// member is WS_HIDE'n by the time a hover can even happen, and
+// PrintWindow only reliably returns real content for a *visible*
+// window -- composited apps (Settings/Outlook) return a blank capture
+// once hidden, even though GDI-classic apps (Notepad) happen to still
+// work. So capturing has to happen *before* a member is hidden, not
+// lazily on hover -- see GroupManager::CachedThumbnail, which captures
+// at the exact moment a member transitions from visible to hidden and
+// hands the result here. This class just displays whatever bitmap it's
+// given; it no longer does any capturing of its own.
 class GroupTabThumbnail {
 public:
     explicit GroupTabThumbnail(HINSTANCE instance);
@@ -30,11 +36,15 @@ public:
     GroupTabThumbnail(const GroupTabThumbnail&) = delete;
     GroupTabThumbnail& operator=(const GroupTabThumbnail&) = delete;
 
-    // Captures a fresh snapshot of `member`'s current content and shows
-    // it, positioned just below `tabScreenRect` (screen coordinates --
-    // the hovered tab's own rect). Safe to call repeatedly for a
-    // different member while already showing one.
-    void ShowFor(HWND member, const RECT& tabScreenRect);
+    // Shows a copy of `snapshot` (borrowed -- not taken ownership of;
+    // copied internally so it's safe even if the caller's own copy is
+    // later replaced/freed), positioned just below `tabScreenRect`
+    // (screen coordinates -- the hovered tab's own rect). A null
+    // `snapshot` (e.g. no capture exists yet for this member) leaves
+    // whatever was previously shown in place, or a plain placeholder
+    // background if nothing has ever been shown. Safe to call
+    // repeatedly for a different member while already showing one.
+    void ShowFor(HBITMAP snapshot, const RECT& tabScreenRect);
 
     // Hides the preview. Safe to call when already hidden.
     void Hide();
@@ -42,7 +52,7 @@ public:
 private:
     HINSTANCE instance_;
     HWND window_ = nullptr;
-    HBITMAP snapshot_ = nullptr;
+    HBITMAP snapshot_ = nullptr;  // this class's own copy
 };
 
 }  // namespace polish

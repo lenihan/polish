@@ -24,6 +24,8 @@ namespace polish {
 // its parent silently loses whatever wasn't saved).
 class GroupManager {
 public:
+    ~GroupManager();
+
     // Creates a new group containing exactly `windows`, in the given
     // order, and returns its id. An empty `windows` list is allowed (a
     // group with no members yet). Does not reparent anything itself --
@@ -85,10 +87,21 @@ public:
     // (e.g. it was never actually added, or already released).
     void ReleaseMember(HWND hwnd);
 
+    // A static preview of a Tab-mode member's content, captured the
+    // instant it was last hidden (switched away from) -- used for the
+    // tab hover-preview popup. nullptr if hwnd has never been hidden as
+    // a member yet (e.g. it's the currently-active one, or a brand-new
+    // group whose first reflow hasn't run). Capturing happens
+    // automatically inside ApplyLayout -- see ApplyTabLayout's own
+    // comment for why it must happen at that exact moment rather than
+    // lazily whenever a caller wants to show a preview.
+    HBITMAP CachedThumbnail(HWND hwnd) const;
+
 private:
     SIZE ApplyTabLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRect);
     SIZE ApplyTileLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRect);
     void EnsureReparented(HWND hwnd, HWND chromeWindow);
+    void CaptureThumbnail(HWND hwnd);
 
     std::vector<GroupState> groups_;
     GroupId nextId_ = 1;
@@ -97,6 +110,9 @@ private:
     // EnsureReparented uses to decide whether reparenting is still
     // needed.
     std::map<HWND, ReparentBackup> reparentBackups_;
+    // Owned by this class -- freed on ReleaseMember and in the
+    // destructor. See CachedThumbnail.
+    std::map<HWND, HBITMAP> memberThumbnails_;
 };
 
 }  // namespace polish

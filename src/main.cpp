@@ -920,7 +920,11 @@ void OnGroupTabHovered(polish::GroupId id, std::optional<size_t> index, const RE
     if (!g_groupTabThumbnail) {
         g_groupTabThumbnail = std::make_unique<polish::GroupTabThumbnail>(GetModuleHandleW(nullptr));
     }
-    g_groupTabThumbnail->ShowFor(member.window, tabScreenRect);
+    // A pre-captured snapshot from GroupManager's cache, not a live
+    // capture -- see GroupTabThumbnail.h's comment for why a live
+    // capture of an already-hidden (every non-active tab, always) member
+    // doesn't reliably work.
+    g_groupTabThumbnail->ShowFor(g_groupManager.CachedThumbnail(member.window), tabScreenRect);
 }
 
 // Called when a group's tab strip is clicked (GroupChromeWindow's

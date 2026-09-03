@@ -12,12 +12,6 @@ constexpr int kHeight = 160;  // logical px
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
-// PW_RENDERFULLCONTENT (Windows 8.1+) -- captures a window's actual
-// rendered content (including hardware-accelerated/DirectComposition
-// surfaces a plain BitBlt-based capture can't see), which the plain
-// PW_CLIENTONLY-only flag alone doesn't guarantee on every app.
-constexpr UINT kPrintWindowRenderFullContent = 0x00000002;
-
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     if (message == WM_NCCREATE) {
         auto* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
@@ -83,7 +77,7 @@ GroupTabThumbnail::~GroupTabThumbnail() {
     }
 }
 
-void GroupTabThumbnail::ShowFor(HWND member, const RECT& tabScreenRect) {
+void GroupTabThumbnail::ShowFor(HBITMAP snapshot, const RECT& tabScreenRect) {
     if (window_ == nullptr) {
         // WS_EX_NOACTIVATE so hovering a tab never steals focus from
         // whatever the user is actually working in. GWLP_USERDATA is
@@ -97,27 +91,32 @@ void GroupTabThumbnail::ShowFor(HWND member, const RECT& tabScreenRect) {
         return;
     }
 
-    RECT memberClient{};
-    GetClientRect(member, &memberClient);
-    const int memberWidth = memberClient.right - memberClient.left;
-    const int memberHeight = memberClient.bottom - memberClient.top;
-    if (memberWidth > 0 && memberHeight > 0) {
-        HDC screenDC = GetDC(nullptr);
-        HDC memDC = CreateCompatibleDC(screenDC);
-        HBITMAP freshSnapshot = CreateCompatibleBitmap(screenDC, memberWidth, memberHeight);
-        HGDIOBJ oldBitmap = SelectObject(memDC, freshSnapshot);
-        const BOOL captured = PrintWindow(member, memDC, kPrintWindowRenderFullContent);
-        SelectObject(memDC, oldBitmap);
-        DeleteDC(memDC);
-        ReleaseDC(nullptr, screenDC);
+    // Copied into this class's own bitmap rather than displaying
+    // `snapshot` directly -- the caller (GroupManager's cache) may
+    // replace or free its copy the next time that member's thumbnail is
+    // recaptured, which could otherwise leave this popup holding a
+    // dangling handle while still visible.
+    if (snapshot != nullptr) {
+        BITMAP bitmapInfo{};
+        if (GetObjectW(snapshot, sizeof(bitmapInfo), &bitmapInfo) != 0 && bitmapInfo.bmWidth > 0 &&
+            bitmapInfo.bmHeight > 0) {
+            HDC screenDC = GetDC(nullptr);
+            HDC srcDC = CreateCompatibleDC(screenDC);
+            HDC dstDC = CreateCompatibleDC(screenDC);
+            HBITMAP freshCopy = CreateCompatibleBitmap(screenDC, bitmapInfo.bmWidth, bitmapInfo.bmHeight);
+            HGDIOBJ oldSrc = SelectObject(srcDC, snapshot);
+            HGDIOBJ oldDst = SelectObject(dstDC, freshCopy);
+            BitBlt(dstDC, 0, 0, bitmapInfo.bmWidth, bitmapInfo.bmHeight, srcDC, 0, 0, SRCCOPY);
+            SelectObject(srcDC, oldSrc);
+            SelectObject(dstDC, oldDst);
+            DeleteDC(srcDC);
+            DeleteDC(dstDC);
+            ReleaseDC(nullptr, screenDC);
 
-        if (captured) {
             if (snapshot_ != nullptr) {
                 DeleteObject(snapshot_);
             }
-            snapshot_ = freshSnapshot;
-        } else {
-            DeleteObject(freshSnapshot);
+            snapshot_ = freshCopy;
         }
     }
 

@@ -5,6 +5,20 @@
 
 namespace polish {
 
+namespace {
+// PW_RENDERFULLCONTENT (Windows 8.1+) -- captures a window's actual
+// rendered content (including hardware-accelerated/DirectComposition
+// surfaces a plain BitBlt-based capture can't see), which the plain
+// PW_CLIENTONLY-only flag alone doesn't guarantee on every app.
+constexpr UINT kPrintWindowRenderFullContent = 0x00000002;
+}  // namespace
+
+GroupManager::~GroupManager() {
+    for (auto& [hwnd, bitmap] : memberThumbnails_) {
+        DeleteObject(bitmap);
+    }
+}
+
 GroupId GroupManager::CreateGroup(const std::vector<HWND>& windows, GroupMode mode) {
     const GroupId id = nextId_++;
     GroupState state(id, mode);
@@ -49,6 +63,48 @@ void GroupManager::ReleaseMember(HWND hwnd) {
         RestoreTopLevel(hwnd, it->second);
     }
     reparentBackups_.erase(it);
+
+    const auto thumbIt = memberThumbnails_.find(hwnd);
+    if (thumbIt != memberThumbnails_.end()) {
+        DeleteObject(thumbIt->second);
+        memberThumbnails_.erase(thumbIt);
+    }
+}
+
+void GroupManager::CaptureThumbnail(HWND hwnd) {
+    RECT client{};
+    GetClientRect(hwnd, &client);
+    const int width = client.right - client.left;
+    const int height = client.bottom - client.top;
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+
+    HDC screenDC = GetDC(nullptr);
+    HDC memDC = CreateCompatibleDC(screenDC);
+    HBITMAP bitmap = CreateCompatibleBitmap(screenDC, width, height);
+    HGDIOBJ oldBitmap = SelectObject(memDC, bitmap);
+    const BOOL captured = PrintWindow(hwnd, memDC, kPrintWindowRenderFullContent);
+    SelectObject(memDC, oldBitmap);
+    DeleteDC(memDC);
+    ReleaseDC(nullptr, screenDC);
+
+    if (!captured) {
+        DeleteObject(bitmap);
+        return;
+    }
+    const auto it = memberThumbnails_.find(hwnd);
+    if (it != memberThumbnails_.end()) {
+        DeleteObject(it->second);
+        it->second = bitmap;
+    } else {
+        memberThumbnails_[hwnd] = bitmap;
+    }
+}
+
+HBITMAP GroupManager::CachedThumbnail(HWND hwnd) const {
+    const auto it = memberThumbnails_.find(hwnd);
+    return it == memberThumbnails_.end() ? nullptr : it->second;
 }
 
 namespace {
@@ -124,6 +180,19 @@ SIZE GroupManager::ApplyTabLayout(const GroupState& group, HWND /*chromeWindow*/
         const bool isActive = active.has_value() && member.window == *active;
         if (isActive) {
             continue;  // handled after this loop, once every hide is done
+        }
+        if (IsWindowVisible(member.window)) {
+            // This is the exact transition from visible to hidden --
+            // the only reliable moment to capture a thumbnail. A *live*
+            // capture taken later, while hovering an already-hidden
+            // tab, returns blank content for composited apps (Settings,
+            // Outlook -- confirmed via a compiled spike, not assumed);
+            // capturing here, every reflow pass, would be wrong too
+            // (this loop also runs on plain resizes with no actual
+            // active-tab change, which would recapture an
+            // already-hidden -- and therefore already-blank -- member
+            // and clobber a previously-good cached snapshot).
+            CaptureThumbnail(member.window);
         }
         const RECT actualRect = PositionMember(member.window, contentRect, false);
         neededWidth = std::max(neededWidth, static_cast<int>(actualRect.right - actualRect.left));
