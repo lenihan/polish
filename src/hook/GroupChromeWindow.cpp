@@ -104,6 +104,18 @@ LRESULT CALLBACK GroupChromeWindow::WindowProcThunk(HWND hwnd, UINT message, WPA
 
 LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+        case WM_ERASEBKGND:
+            // The window class's default background brush (COLOR_WINDOW,
+            // i.e. white) would otherwise paint on every erase -- visibly
+            // for a frame -- before WM_PAINT's own PaintTabStrip repaints
+            // over it with the real (often dark) colors. Confirmed real:
+            // switching tabs showed a white flash on an otherwise dark
+            // group. PaintTabStrip always fully repaints the client area
+            // on its own, every time, so the default erase step is pure
+            // overhead here -- returning nonzero tells Windows this
+            // message was handled without actually erasing anything.
+            return 1;
+
         case WM_PAINT: {
             PAINTSTRUCT paint;
             HDC hdc = BeginPaint(hwnd, &paint);
@@ -375,7 +387,6 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     // the active tab stands out; text color only needs a slight nudge on
     // top of that, not a stark black-vs-white split.
     const bool dark = IsDarkModeEnabled();
-    const COLORREF kStripColor = dark ? RGB(0x20, 0x20, 0x20) : RGB(0xF3, 0xF3, 0xF3);
     const COLORREF kContentColor = dark ? RGB(0x20, 0x20, 0x20) : RGB(0xFF, 0xFF, 0xFF);
     const COLORREF kActiveTabColor = kContentColor;
     const COLORREF kInactiveTabColor = dark ? RGB(0x0A, 0x0A, 0x0A) : RGB(0xDD, 0xDD, 0xDD);
@@ -387,8 +398,14 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     const UINT dpi = GetDpiForWindow(window_);
     const int tabHeight = Scale(kTabStripHeight, dpi);
 
+    // The strip's own base fill is the inactive-tab color, not a
+    // separate "strip background" color -- so the left padding before
+    // the first tab, the gaps between tabs, and any leftover space past
+    // the last tab all read as "more inactive tab" instead of a
+    // visually distinct empty band. Active/hover tabs simply draw their
+    // own fill on top.
     RECT stripRect{clientRect.left, clientRect.top, clientRect.right, clientRect.top + tabHeight};
-    HBRUSH stripBrush = CreateSolidBrush(kStripColor);
+    HBRUSH stripBrush = CreateSolidBrush(kInactiveTabColor);
     FillRect(hdc, &stripRect, stripBrush);
     DeleteObject(stripBrush);
 
@@ -419,17 +436,6 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     if (tabRects.empty()) {
         SelectObject(hdc, oldFont);
         return;
-    }
-
-    // The leftover strip space to the right of the last tab (when tabs
-    // don't fill the full width) matches an inactive tab's own
-    // background, not the plain strip color -- reads as "more inactive
-    // tab" rather than a visually distinct empty band.
-    if (const RECT& lastTab = tabRects.back(); lastTab.right < clientRect.right) {
-        RECT trailingRect{lastTab.right, clientRect.top, clientRect.right, clientRect.top + tabHeight};
-        HBRUSH trailingBrush = CreateSolidBrush(kInactiveTabColor);
-        FillRect(hdc, &trailingRect, trailingBrush);
-        DeleteObject(trailingBrush);
     }
 
     const int iconSize = Scale(16, dpi);
