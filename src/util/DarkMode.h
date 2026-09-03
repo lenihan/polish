@@ -25,4 +25,14 @@ void ApplyDarkTitleBar(HWND hwnd, bool dark);
 // on the next menu shown.
 void ApplyDarkModeToMenu(HWND ownerWindow);
 
+// The user's chosen Windows accent color (Settings > Personalization >
+// Colors), for highlighting something as interactive/draggable the
+// same way the OS itself would. Reads
+// HKCU\Software\Microsoft\Windows\DWM\AccentColor directly -- no public
+// API for this either; that value's low 3 bytes are already in
+// COLORREF's own 0x00BBGGRR layout, so no channel reordering is
+// needed, just masking off its top (alpha) byte. Falls back to
+// GetSysColor(COLOR_HIGHLIGHT) if the registry value is missing.
+COLORREF GetAccentColor();
+
 }  // namespace polish

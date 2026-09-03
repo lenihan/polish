@@ -68,4 +68,22 @@ void ApplyDarkModeToMenu(HWND ownerWindow) {
     SetWindowTheme(ownerWindow, IsDarkModeEnabled() ? L"DarkMode_Explorer" : nullptr, nullptr);
 }
 
+COLORREF GetAccentColor() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", 0, KEY_READ, &key) ==
+        ERROR_SUCCESS) {
+        DWORD value = 0;
+        DWORD size = sizeof(value);
+        DWORD type = 0;
+        const bool ok = RegQueryValueExW(key, L"AccentColor", nullptr, &type, reinterpret_cast<BYTE*>(&value),
+                                          &size) == ERROR_SUCCESS &&
+                         type == REG_DWORD;
+        RegCloseKey(key);
+        if (ok) {
+            return static_cast<COLORREF>(value & 0x00FFFFFF);
+        }
+    }
+    return GetSysColor(COLOR_HIGHLIGHT);
+}
+
 }  // namespace polish

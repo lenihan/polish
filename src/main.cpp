@@ -8,6 +8,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "hook/AltTabDimOverlay.h"
@@ -816,7 +817,13 @@ void ReflowGroupTo(polish::GroupId id) {
     }
     const HWND chromeHandle = chromeIt->second->Handle();
     const RECT contentRect = chromeIt->second->ContentRectInClientCoords();
-    const SIZE needed = g_groupManager.ApplyLayout(*group, chromeHandle, contentRect);
+    const SIZE needed =
+        g_groupManager.ApplyLayout(*group, chromeHandle, contentRect, chromeIt->second->TileSplitterWidthPx());
+    // A no-op in Tab mode (both come back empty) -- ApplyLayout is what
+    // actually (re)computes these, so the chrome's own copy (used for
+    // splitter rendering/hit-testing) needs refreshing after every call
+    // to it, not just the first.
+    chromeIt->second->SetTileSplitters(g_groupManager.TileColumnBoundaries(id), g_groupManager.TileRowBoundaries(id));
 
     // Re-arm (not just start) the delayed thumbnail-refresh sweep on
     // every reflow -- see kThumbnailRefreshTimerId's own comment for
@@ -854,7 +861,81 @@ void ReflowGroupTo(polish::GroupId id) {
     g_reflowGrowInProgress = true;
     chromeIt->second->GrowContentAreaTo(needed);
     g_reflowGrowInProgress = false;
-    g_groupManager.ApplyLayout(*group, chromeHandle, chromeIt->second->ContentRectInClientCoords());
+    g_groupManager.ApplyLayout(*group, chromeHandle, chromeIt->second->ContentRectInClientCoords(),
+                                chromeIt->second->TileSplitterWidthPx());
+    chromeIt->second->SetTileSplitters(g_groupManager.TileColumnBoundaries(id), g_groupManager.TileRowBoundaries(id));
+}
+
+// Called live while a Tile-mode splitter is being dragged
+// (GroupChromeWindow's onTileSplitterDragged callback, already clamped
+// there so neither adjacent tile shrinks below its visible-content
+// floor) -- updates just that one pair of adjacent tiles' stored
+// fractions and reflows, so the drag visibly resizes tiles in real
+// time rather than only once on drop.
+void OnTileSplitterDragged(polish::GroupId id, bool column, size_t index, int newPixelPosition) {
+    polish::GroupState* group = g_groupManager.FindGroup(id);
+    auto chromeIt = g_groupChromeWindows.find(id);
+    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
+        return;
+    }
+    const RECT contentRect = chromeIt->second->ContentRectInClientCoords();
+    const int totalSize = column ? (contentRect.right - contentRect.left) : (contentRect.bottom - contentRect.top);
+    g_groupManager.SetTileBoundary(*group, column, index, newPixelPosition, totalSize,
+                                    chromeIt->second->TileSplitterWidthPx());
+    ReflowGroupTo(id);
+}
+
+// Remembers each splitter's most recent *custom* (non-50/50) fraction
+// pair, keyed by (group, axis, index) -- so a double-click can toggle
+// back to it after having snapped to an even split. Only ever holds an
+// entry while that splitter is currently sitting at 50/50 because of a
+// double-click; a live drag (OnTileSplitterDragged) doesn't touch this
+// map at all, so dragging away from an even split simply leaves no
+// stale entry to toggle back to (there's nothing to "undo" yet).
+std::map<std::tuple<polish::GroupId, bool, size_t>, std::pair<double, double>> g_tileSplitterLastCustom;
+
+// Called when a Tile-mode splitter is double-clicked
+// (GroupChromeWindow's onTileSplitterDoubleClicked callback) -- toggles
+// that one pair of adjacent tiles between an even 50/50 split and
+// whatever custom split they had before, so a quick double-click undoes
+// a drag without having to eyeball it back into place.
+void OnTileSplitterDoubleClicked(polish::GroupId id, bool column, size_t index) {
+    polish::GroupState* group = g_groupManager.FindGroup(id);
+    if (group == nullptr) {
+        return;
+    }
+    std::vector<double> fractions = column ? group->TileColumnFractions() : group->TileRowFractions();
+    if (index + 1 >= fractions.size()) {
+        return;
+    }
+
+    const double pairTotal = fractions[index] + fractions[index + 1];
+    const double evenSplit = pairTotal / 2.0;
+    constexpr double kEvenTolerance = 0.005;  // ~0.5% of the pair -- comfortably tighter than any visible difference
+    const auto key = std::make_tuple(id, column, index);
+
+    if (std::abs(fractions[index] - evenSplit) < kEvenTolerance) {
+        // Already even -- toggle back to the last custom split, if any.
+        const auto it = g_tileSplitterLastCustom.find(key);
+        if (it == g_tileSplitterLastCustom.end()) {
+            return;  // nothing to restore
+        }
+        fractions[index] = it->second.first;
+        fractions[index + 1] = it->second.second;
+        g_tileSplitterLastCustom.erase(it);
+    } else {
+        // Currently custom -- remember it, then snap to even.
+        g_tileSplitterLastCustom[key] = {fractions[index], fractions[index + 1]};
+        fractions[index] = evenSplit;
+        fractions[index + 1] = evenSplit;
+    }
+
+    if (column) {
+        group->SetTileColumnFractions(std::move(fractions));
+    } else {
+        group->SetTileRowFractions(std::move(fractions));
+    }
+    ReflowGroupTo(id);
 }
 
 // Current window titles for group's members, in membership order --
@@ -1235,6 +1316,12 @@ void TriggerNewGroup(HWND owner) {
     chrome->SetOnClosing([id]() { CloseGroup(id); });
     chrome->SetOnTabHovered(
         [id](std::optional<size_t> index, const RECT& tabScreenRect) { OnGroupTabHovered(id, index, tabScreenRect); });
+    chrome->SetOnTileSplitterDragged(
+        [id](bool column, size_t index, int newPixelPosition) {
+            OnTileSplitterDragged(id, column, index, newPixelPosition);
+        });
+    chrome->SetOnTileSplitterDoubleClicked(
+        [id](bool column, size_t index) { OnTileSplitterDoubleClicked(id, column, index); });
     polish::LogDebug(std::format(L"[Polish] New Group: chrome window created hwnd={} for group id={}",
                                   reinterpret_cast<void*>(chrome->Handle()), id));
 

@@ -1313,3 +1313,99 @@ this codebase:**
   (using the system codepage) unless `/utf-8` is passed as a compile
   option — no warning, no error, just corrupted text baked into the
   binary.
+
+### Tile mode: no header, resizable splitters (2026-09-03)
+
+Two requests, both shipped and verified via a compiled spike (real
+Notepad windows, screenshotted before/after a simulated drag — see
+`spike_tile_visual.cpp` in scratchpad):
+
+1. **Removed Tile mode's custom header entirely.** It only ever showed
+   a plain "Group (N window(s), tiled)" label — pure duplication, since
+   the native OS title bar already shows the group's real `Name()`.
+   `GroupChromeWindow::HeaderHeight` now returns 0 for Tile mode (was
+   always `kTabStripHeight`), handing that space back to the tiles.
+2. **User-resizable tile splitters.** `GroupState` gained
+   `tileColumnFractions_`/`tileRowFractions_` (each a vector of
+   fractions summing to 1.0, empty until customized). `GroupManager`:
+   `ApplyLayout`/`ApplyTileLayout` now take `GroupState&` (were
+   `const&`) since they auto-populate equal-split fractions the first
+   time a shape is seen and whenever the grid reshapes (a member
+   added/removed changes the column/row count, invalidating old
+   fractions); caches the resulting pixel boundaries
+   (`TileColumnBoundaries`/`TileRowBoundaries`) for the chrome to
+   render; `SetTileBoundary` applies a drag, touching only the two
+   adjacent cells' fractions. `GroupChromeWindow` renders a thin
+   draggable bar at each boundary, hit-tests it (with slop) on
+   `WM_LBUTTONDOWN`, shows `IDC_SIZEWE`/`IDC_SIZENS` on hover
+   (`WM_SETCURSOR`), and clamps every drag so neither adjacent tile
+   shrinks below `kMinTileSize` (80 logical px) — enough to still see
+   that a window is there, not shrunk to nothing. Fires
+   `onTileSplitterDragged_` live (once per mouse-move, not just on
+   drop), which `main.cpp`'s `OnTileSplitterDragged` turns into
+   `GroupManager::SetTileBoundary` + `ReflowGroupTo`.
+
+Deliberately out of scope for this pass: the earlier-abandoned M6
+milestone (alignment-biased wide/tall grid shape) — the grid's
+column/row *count* is still the same `ceil(sqrt(n))`-based square-ish
+formula as before; only per-cell *sizing* is now user-adjustable.
+
+**Follow-up, same day**: three real problems in the first version above,
+all fixed and verified via the same spike (before/during-drag/
+after-release screenshots):
+
+- **Splitters were drawn *over* the members' shared edge**, not given
+  their own reserved space — too thin to reliably grab, and the
+  overlap was the likely cause of visible update artifacts after a
+  drag. Fixed properly, not papered over: `GroupManager::ApplyLayout`/
+  `ApplyTileLayout`/`SetTileBoundary` all gained a `splitterWidthPx`
+  parameter that reserves real gap space between adjacent columns/rows
+  in the grid math itself (content-only fractions exclude the gaps
+  entirely; cached boundaries are gap *centers* in real coordinates) —
+  members now never overlap a splitter. Widened `kSplitterWidth`
+  8px→16px-effective (`Scale`d) in the process, and
+  `GroupChromeWindow::TileSplitterWidthPx()` is the single source of
+  truth both `main.cpp` and `GroupManager` read it from, so the two
+  sides can't drift out of sync.
+- **No hover feedback.** Added `hoveredSplitter_` tracking
+  (`WM_MOUSEMOVE`/`WM_MOUSELEAVE`, narrow per-splitter invalidate via
+  the new `InvalidateSplitterBand`) and render the hovered (or
+  actively dragged) splitter in `GetAccentColor()` (new in
+  `util/DarkMode.h/.cpp`, reads `HKCU\...\DWM\AccentColor` — same
+  "no public API, read the registry" pattern as dark-mode detection)
+  instead of the plain border color — the same visual language Windows
+  itself uses for "this is draggable."
+- **Visible update artifacts after releasing a drag** — confirmed via
+  spike screenshot (a stray black rectangle in the status bar,
+  present right after the drag, gone one frame later). Fixed via one
+  final `RedrawWindow(RDW_ALLCHILDREN | RDW_UPDATENOW | ...)` on the
+  chrome itself when `WM_LBUTTONUP` ends a splitter drag — cheap
+  (once per drag, not once per mouse-move) and guarantees a fully
+  clean frame regardless of any transient repaint race during the
+  drag itself. Also narrowed `SetTileSplitters`' own invalidate from
+  the whole window to just a band around each old+new boundary
+  position, matching the same "don't invalidate more than you need to"
+  lesson already learned for the tab strip's own hover highlight.
+
+### Future ideas / backlog (not started, just captured)
+
+Requested in passing, worth remembering but not yet designed or
+scoped:
+
+- **Clipboard copy flash**: a brief visual flash at the point something
+  is copied to the clipboard, so it's obvious what was just copied and
+  from where.
+- **Paste history popup**: on paste, a popup letting you cycle through
+  clipboard history rather than only ever pasting the most recent item.
+- **Quick Access rename without renaming the underlying file/folder**:
+  today Windows' Quick Access only shows the real name; want a
+  friendly alias independent of the actual filesystem name. Should
+  support files, not just folders (Quick Access is folder-only today).
+- **Radial start menu**: opens from the center of the screen, 8-way
+  drag to pick an item; a submenu can open its own 8 options, with the
+  opposite drag direction closing back out of it (mirroring how you
+  opened it).
+- **Thinner, solid Alt+Tab highlight border**: switch the Alt+Tab
+  selected-window highlight (`AltTabHighlightBorder`) to a thinner
+  line, about the same size as the tile-mode resize splitter, and
+  fully opaque (no transparency) instead of its current look.

@@ -25,6 +25,20 @@ TEST_CASE("GroupState: new group defaults to Horizontal alignment and an auto-ge
     CHECK(state.Name() == L"Group 42");
 }
 
+TEST_CASE("GroupState: new group has no tile column/row fractions until customized") {
+    GroupState state(1);
+    CHECK(state.TileColumnFractions().empty());
+    CHECK(state.TileRowFractions().empty());
+}
+
+TEST_CASE("GroupState: SetTileColumnFractions/SetTileRowFractions round-trip") {
+    GroupState state(1);
+    state.SetTileColumnFractions({0.3, 0.7});
+    state.SetTileRowFractions({0.25, 0.5, 0.25});
+    CHECK(state.TileColumnFractions() == std::vector<double>{0.3, 0.7});
+    CHECK(state.TileRowFractions() == std::vector<double>{0.25, 0.5, 0.25});
+}
+
 TEST_CASE("GroupState: mode can be set at construction") {
     GroupState state(1, GroupMode::Tile);
     CHECK(state.Mode() == GroupMode::Tile);

@@ -117,6 +117,18 @@ public:
     // (e.g. Alt+Tab). No-op if hwnd isn't a member.
     void SetActiveWindow(HWND hwnd);
 
+    // Tile mode only: user-adjustable column widths / row heights, each
+    // a fraction of the content area's total width/height (a vector
+    // sums to 1.0). Empty means "not yet customized" --
+    // GroupManager::ApplyTileLayout falls back to an equal split, and
+    // is also what resets these back to empty whenever the grid's
+    // column/row *count* changes (a member added/removed reshapes the
+    // grid, so fractions sized for the old shape don't carry over).
+    const std::vector<double>& TileColumnFractions() const { return tileColumnFractions_; }
+    const std::vector<double>& TileRowFractions() const { return tileRowFractions_; }
+    void SetTileColumnFractions(std::vector<double> fractions) { tileColumnFractions_ = std::move(fractions); }
+    void SetTileRowFractions(std::vector<double> fractions) { tileRowFractions_ = std::move(fractions); }
+
 private:
     GroupId id_;
     GroupMode mode_;
@@ -124,6 +136,8 @@ private:
     std::wstring name_;
     std::vector<GroupMember> members_;
     std::optional<size_t> activeIndex_;
+    std::vector<double> tileColumnFractions_;
+    std::vector<double> tileRowFractions_;
 };
 
 }  // namespace polish

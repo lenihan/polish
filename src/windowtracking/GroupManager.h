@@ -59,8 +59,15 @@ public:
     //    same parent (the old promote/demote HWND_TOPMOST pulse was for
     //    independent top-level windows and doesn't apply to children).
     //  - Tile: contentRectClientCoords is divided into a roughly square
-    //    grid (one slot per member), and every member is positioned
-    //    into its own slot and shown simultaneously.
+    //    grid (one slot per member), user-resizable via
+    //    TileColumnBoundaries/TileRowBoundaries/SetTileBoundary, and
+    //    every member is positioned into its own slot and shown
+    //    simultaneously. `tileSplitterWidthPx` (ignored in Tab mode)
+    //    reserves that many real pixels between adjacent columns/rows
+    //    for the chrome's draggable splitter -- members never overlap
+    //    it, unlike an earlier version of this where the splitter was
+    //    drawn *over* the members' shared edge and could visibly race
+    //    with their own repaints.
     //
     // Returns the smallest content-area size that would fit every
     // member without any of them being clamped by their own declared
@@ -72,7 +79,8 @@ public:
     // compare and, if it's larger, grow the chrome to at least this
     // size and call ApplyLayout again, rather than leaving a member
     // visibly overflowing the group.
-    SIZE ApplyLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRectClientCoords);
+    SIZE ApplyLayout(GroupState& group, HWND chromeWindow, const RECT& contentRectClientCoords,
+                      int tileSplitterWidthPx = 0);
 
     // Restores every reparented member of `group` back to an
     // independent top-level window (WindowReparenting::RestoreTopLevel)
@@ -113,9 +121,40 @@ public:
     // kThumbnailStabilizeTimerId).
     bool RefreshThumbnail(HWND hwnd);
 
+    // Tile mode only: the last-computed column/row boundaries from the
+    // most recent ApplyLayout call -- content-rect-relative pixel
+    // positions, *excluding* the two outer edges (N columns have N-1
+    // of these), each the *center* of that column/row pair's reserved
+    // splitter gap (see ApplyLayout's own comment on
+    // tileSplitterWidthPx). Empty if the group isn't in Tile mode, has
+    // 0-1 members, or ApplyLayout hasn't run for it yet. Used by the
+    // chrome to render/hit-test the resize splitters between tiles.
+    std::vector<int> TileColumnBoundaries(GroupId id) const;
+    std::vector<int> TileRowBoundaries(GroupId id) const;
+
+    // Tile mode only: moves the boundary between column (or row, if
+    // `column` is false) `index` and `index + 1` to `newPixelPosition`
+    // -- content-rect-relative, in the *same* real/gap-reserved pixel
+    // space as TileColumnBoundaries/TileRowBoundaries (a splitter gap
+    // center), not the content-only space ApplyLayout's fractions
+    // divide up internally; this converts between the two itself.
+    // `totalSize` is the content area's current real width (columns)
+    // or height (rows); `splitterWidthPx` must match whatever was
+    // passed to the ApplyLayout call that produced the boundaries
+    // being dragged. Only the two adjacent cells' stored fractions
+    // change, every other column/row is untouched, matching standard
+    // splitter behavior. Clamps within the pair's own combined span as
+    // a safety net; the primary minimum-visible-size enforcement
+    // happens in pixel space in the chrome, before this is even called
+    // (see GroupChromeWindow's own splitter-drag handling). No-op if
+    // `index + 1` is out of range for the group's current column/row
+    // count.
+    void SetTileBoundary(GroupState& group, bool column, size_t index, int newPixelPosition, int totalSize,
+                          int splitterWidthPx);
+
 private:
     SIZE ApplyTabLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRect);
-    SIZE ApplyTileLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRect);
+    SIZE ApplyTileLayout(GroupState& group, HWND chromeWindow, const RECT& contentRect, int splitterWidthPx);
     void EnsureReparented(HWND hwnd, HWND chromeWindow);
     void CaptureThumbnail(HWND hwnd);
 
@@ -129,6 +168,10 @@ private:
     // Owned by this class -- freed on ReleaseMember and in the
     // destructor. See CachedThumbnail.
     std::map<HWND, HBITMAP> memberThumbnails_;
+    // Populated by ApplyTileLayout each time it runs. See
+    // TileColumnBoundaries/TileRowBoundaries.
+    std::map<GroupId, std::vector<int>> tileColumnBoundaries_;
+    std::map<GroupId, std::vector<int>> tileRowBoundaries_;
 };
 
 }  // namespace polish

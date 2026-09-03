@@ -5,6 +5,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "windowtracking/GroupState.h"
@@ -160,6 +161,40 @@ public:
         onTabHovered_ = std::move(callback);
     }
 
+    // Tile mode only: the draggable resize splitters' positions --
+    // content-rect-relative pixels, matching
+    // GroupManager::TileColumnBoundaries/TileRowBoundaries exactly (call
+    // this again after every reflow, since a member added/removed or a
+    // window resize can shift them). Repaints. A No-op boundary list
+    // (e.g. a single-column/row grid) simply renders no splitters.
+    void SetTileSplitters(std::vector<int> columnBoundaries, std::vector<int> rowBoundaries);
+
+    // Called live while a splitter is being dragged (once per mouse-
+    // move, not just on drop) with which boundary (column vs. row,
+    // index into GroupManager::TileColumnBoundaries/TileRowBoundaries)
+    // and its new content-rect-relative pixel position -- already
+    // clamped so neither adjacent tile shrinks below this window's own
+    // visible-content floor (kMinTileSize). The owner is responsible
+    // for calling GroupManager::SetTileBoundary and re-applying layout.
+    void SetOnTileSplitterDragged(std::function<void(bool column, size_t index, int newPixelPosition)> callback) {
+        onTileSplitterDragged_ = std::move(callback);
+    }
+
+    // Called when a splitter is double-clicked -- the owner toggles it
+    // between an even 50/50 split and whatever custom split it had
+    // before, so a quick double-click undoes a drag without having to
+    // eyeball it back into place.
+    void SetOnTileSplitterDoubleClicked(std::function<void(bool column, size_t index)> callback) {
+        onTileSplitterDoubleClicked_ = std::move(callback);
+    }
+
+    // Tile mode only: this window's current DPI-scaled splitter width,
+    // in real pixels -- pass to GroupManager::ApplyLayout's
+    // tileSplitterWidthPx and SetTileBoundary's splitterWidthPx so the
+    // reserved-gap math on both sides always agrees. 0 before the
+    // window exists.
+    int TileSplitterWidthPx() const;
+
 private:
     static LRESULT CALLBACK WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -167,6 +202,19 @@ private:
     void PaintTabStrip(HDC hdc, const RECT& clientRect);
     std::vector<RECT> ComputeTabRects(const RECT& clientRect) const;
     void ShowContextMenu(int screenX, int screenY);
+
+    // Tile mode only. Returns (isColumn, index) for the splitter within
+    // hit-test slop of `clientPt` (client coordinates), or nullopt.
+    std::optional<std::pair<bool, size_t>> HitTestSplitter(POINT clientPt) const;
+    // Clamps a dragged splitter's new position so neither of its two
+    // adjacent tiles shrinks below kMinTileSize, then fires
+    // onTileSplitterDragged_.
+    void DragSplitter(POINT clientPt);
+    // Repaints a narrow band around one splitter (its current cached
+    // position) -- not the whole window, which would also repaint the
+    // content-area fill behind the members. No-op if `index` is out of
+    // range for the current boundary list.
+    void InvalidateSplitterBand(bool column, size_t index);
 
     // Total space reserved above the member content: the tab strip
     // itself, plus (Tab mode only) the connector band below it. Tile
@@ -190,6 +238,22 @@ private:
     std::function<void(std::optional<size_t>, const RECT&)> onTabHovered_;
     std::optional<size_t> hoveredTabIndex_;
     bool trackingMouseLeave_ = false;
+
+    // Tile mode splitters -- content-rect-relative pixel positions, set
+    // by SetTileSplitters after every reflow.
+    std::vector<int> tileColumnBoundaries_;
+    std::vector<int> tileRowBoundaries_;
+    std::function<void(bool, size_t, int)> onTileSplitterDragged_;
+    std::function<void(bool, size_t)> onTileSplitterDoubleClicked_;
+    // (isColumn, index) of the splitter currently being dragged, if
+    // any -- mutually exclusive with draggingIndex_ (Tab-mode tab drag)
+    // since a chrome is only ever in one mode at a time.
+    std::optional<std::pair<bool, size_t>> draggingSplitter_;
+    // (isColumn, index) of the splitter currently under the cursor
+    // (not necessarily being dragged) -- drawn in the accent color so
+    // it reads as draggable, same idea as a browser's own resize
+    // handles.
+    std::optional<std::pair<bool, size_t>> hoveredSplitter_;
 };
 
 }  // namespace polish

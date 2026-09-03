@@ -238,7 +238,8 @@ RECT PositionMember(HWND hwnd, const RECT& rect, bool visible) {
 }
 }  // namespace
 
-SIZE GroupManager::ApplyLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRectClientCoords) {
+SIZE GroupManager::ApplyLayout(GroupState& group, HWND chromeWindow, const RECT& contentRectClientCoords,
+                                int tileSplitterWidthPx) {
     for (const GroupMember& member : group.Members()) {
         if (member.kind == GroupMemberKind::Window && member.window != nullptr && IsWindow(member.window)) {
             EnsureReparented(member.window, chromeWindow);
@@ -246,7 +247,7 @@ SIZE GroupManager::ApplyLayout(const GroupState& group, HWND chromeWindow, const
     }
 
     if (group.Mode() == GroupMode::Tile) {
-        return ApplyTileLayout(group, chromeWindow, contentRectClientCoords);
+        return ApplyTileLayout(group, chromeWindow, contentRectClientCoords, tileSplitterWidthPx);
     }
     return ApplyTabLayout(group, chromeWindow, contentRectClientCoords);
 }
@@ -302,7 +303,8 @@ SIZE GroupManager::ApplyTabLayout(const GroupState& group, HWND /*chromeWindow*/
     return SIZE{neededWidth, neededHeight};
 }
 
-SIZE GroupManager::ApplyTileLayout(const GroupState& group, HWND /*chromeWindow*/, const RECT& contentRect) {
+SIZE GroupManager::ApplyTileLayout(GroupState& group, HWND /*chromeWindow*/, const RECT& contentRect,
+                                    int splitterWidthPx) {
     // Real (non-nested-group) members only -- see the Tab-layout loop's
     // same filter. Counted separately from group.Members().size() so
     // the grid isn't sized larger than what will actually get a slot.
@@ -315,12 +317,63 @@ SIZE GroupManager::ApplyTileLayout(const GroupState& group, HWND /*chromeWindow*
     const int requestedWidth = contentRect.right - contentRect.left;
     const int requestedHeight = contentRect.bottom - contentRect.top;
     if (windows.empty()) {
+        tileColumnBoundaries_.erase(group.Id());
+        tileRowBoundaries_.erase(group.Id());
         return SIZE{requestedWidth, requestedHeight};
     }
 
     const int count = static_cast<int>(windows.size());
     const int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
     const int rows = (count + cols - 1) / cols;
+
+    // User-adjustable column widths/row heights (each a fraction of the
+    // content area's total width/height), falling back to an equal
+    // split whenever they don't match the grid's current column/row
+    // count -- a member added/removed reshapes the grid, so fractions
+    // sized for the old shape don't carry over.
+    std::vector<double> columnFractions = group.TileColumnFractions();
+    if (columnFractions.size() != static_cast<size_t>(cols)) {
+        columnFractions.assign(static_cast<size_t>(cols), 1.0 / cols);
+        group.SetTileColumnFractions(columnFractions);
+    }
+    std::vector<double> rowFractions = group.TileRowFractions();
+    if (rowFractions.size() != static_cast<size_t>(rows)) {
+        rowFractions.assign(static_cast<size_t>(rows), 1.0 / rows);
+        group.SetTileRowFractions(rowFractions);
+    }
+
+    // Splitters reserve real space between adjacent columns/rows --
+    // members never overlap them (an earlier version drew the splitter
+    // *over* the members' shared edge, which could visibly race with
+    // their own repaints; confirmed real). The fractions above divide
+    // up the *content-only* width/height, excluding all the reserved
+    // gaps.
+    const int colGapTotal = (cols - 1) * splitterWidthPx;
+    const int rowGapTotal = (rows - 1) * splitterWidthPx;
+    const int contentOnlyWidth = std::max(0, requestedWidth - colGapTotal);
+    const int contentOnlyHeight = std::max(0, requestedHeight - rowGapTotal);
+
+    // Cumulative column/row edges in *content-only* space (gaps
+    // excluded) -- colEdges[c] is column c's left edge if gaps didn't
+    // exist, colEdges[cols] is the content-only area's own right edge
+    // (forced exactly, absorbing any rounding error from the
+    // fraction*width truncation into the last column rather than
+    // leaving a gap).
+    std::vector<int> colEdges(static_cast<size_t>(cols) + 1, 0);
+    for (int c = 0; c < cols; ++c) {
+        colEdges[static_cast<size_t>(c) + 1] =
+            colEdges[static_cast<size_t>(c)] +
+            static_cast<int>(std::lround(columnFractions[static_cast<size_t>(c)] * contentOnlyWidth));
+    }
+    colEdges[static_cast<size_t>(cols)] = contentOnlyWidth;
+
+    std::vector<int> rowEdges(static_cast<size_t>(rows) + 1, 0);
+    for (int r = 0; r < rows; ++r) {
+        rowEdges[static_cast<size_t>(r) + 1] =
+            rowEdges[static_cast<size_t>(r)] +
+            static_cast<int>(std::lround(rowFractions[static_cast<size_t>(r)] * contentOnlyHeight));
+    }
+    rowEdges[static_cast<size_t>(rows)] = contentOnlyHeight;
 
     // Per-column/row required size, like an HTML table's auto layout --
     // a single oversized member (its own minimum size bigger than its
@@ -331,13 +384,15 @@ SIZE GroupManager::ApplyTileLayout(const GroupState& group, HWND /*chromeWindow*
     for (int i = 0; i < count; ++i) {
         const int col = i % cols;
         const int row = i / cols;
-        // Slot edges computed from contentRect.left/top plus the *next*
-        // column/row boundary, not left + slotWidth per cell -- avoids
-        // integer-division remainder pixels accumulating into a visible
-        // gap or overlap at the grid's right/bottom edge.
-        const RECT slot{contentRect.left + col * requestedWidth / cols, contentRect.top + row * requestedHeight / rows,
-                         contentRect.left + (col + 1) * requestedWidth / cols,
-                         contentRect.top + (row + 1) * requestedHeight / rows};
+        // Shift right/down by however many whole gaps precede this
+        // column/row, converting content-only edges into real,
+        // gap-reserved screen coordinates.
+        const int slotLeft = colEdges[static_cast<size_t>(col)] + col * splitterWidthPx;
+        const int slotRight = colEdges[static_cast<size_t>(col) + 1] + col * splitterWidthPx;
+        const int slotTop = rowEdges[static_cast<size_t>(row)] + row * splitterWidthPx;
+        const int slotBottom = rowEdges[static_cast<size_t>(row) + 1] + row * splitterWidthPx;
+        const RECT slot{contentRect.left + slotLeft, contentRect.top + slotTop, contentRect.left + slotRight,
+                         contentRect.top + slotBottom};
         const RECT actual = PositionMember(windows[static_cast<size_t>(i)], slot, true);
         colWidths[static_cast<size_t>(col)] =
             std::max(colWidths[static_cast<size_t>(col)], static_cast<int>(actual.right - actual.left));
@@ -345,16 +400,89 @@ SIZE GroupManager::ApplyTileLayout(const GroupState& group, HWND /*chromeWindow*
             std::max(rowHeights[static_cast<size_t>(row)], static_cast<int>(actual.bottom - actual.top));
     }
 
-    int neededWidth = 0;
+    // Cache boundaries for the chrome's splitter rendering/hit-testing,
+    // in real (gap-reserved) coordinates -- the *center* of each
+    // reserved gap, internal edges only (a grid of N columns has N-1
+    // draggable boundaries between them; the outer two edges aren't
+    // splitters).
+    std::vector<int> columnBoundaries;
+    for (int c = 1; c < cols; ++c) {
+        columnBoundaries.push_back(colEdges[static_cast<size_t>(c)] + (c - 1) * splitterWidthPx +
+                                    splitterWidthPx / 2);
+    }
+    tileColumnBoundaries_[group.Id()] = std::move(columnBoundaries);
+    std::vector<int> rowBoundaries;
+    for (int r = 1; r < rows; ++r) {
+        rowBoundaries.push_back(rowEdges[static_cast<size_t>(r)] + (r - 1) * splitterWidthPx + splitterWidthPx / 2);
+    }
+    tileRowBoundaries_[group.Id()] = std::move(rowBoundaries);
+
+    int neededWidth = colGapTotal;
     for (int w : colWidths) {
         neededWidth += w;
     }
-    int neededHeight = 0;
+    int neededHeight = rowGapTotal;
     for (int h : rowHeights) {
         neededHeight += h;
     }
 
     return SIZE{std::max(neededWidth, requestedWidth), std::max(neededHeight, requestedHeight)};
+}
+
+std::vector<int> GroupManager::TileColumnBoundaries(GroupId id) const {
+    const auto it = tileColumnBoundaries_.find(id);
+    return it == tileColumnBoundaries_.end() ? std::vector<int>{} : it->second;
+}
+
+std::vector<int> GroupManager::TileRowBoundaries(GroupId id) const {
+    const auto it = tileRowBoundaries_.find(id);
+    return it == tileRowBoundaries_.end() ? std::vector<int>{} : it->second;
+}
+
+void GroupManager::SetTileBoundary(GroupState& group, bool column, size_t index, int newPixelPosition,
+                                    int totalSize, int splitterWidthPx) {
+    if (totalSize <= 0) {
+        return;
+    }
+    std::vector<double> fractions = column ? group.TileColumnFractions() : group.TileRowFractions();
+    const size_t count = fractions.size();
+    if (index + 1 >= count) {
+        return;
+    }
+
+    // `newPixelPosition`/`totalSize` are in real (gap-reserved) space --
+    // the same space TileColumnBoundaries/TileRowBoundaries report,
+    // where this boundary is the *center* of its reserved splitter gap.
+    // Convert into content-only space (gaps excluded), matching how
+    // ApplyTileLayout's own fractions divide things up: subtract the
+    // `index` whole gaps preceding this one, then step back from the
+    // gap's center to its left edge.
+    const int gapTotal = static_cast<int>(count - 1) * splitterWidthPx;
+    const int contentOnlySize = std::max(1, totalSize - gapTotal);
+    const int contentOnlyPosition =
+        newPixelPosition - static_cast<int>(index) * splitterWidthPx - splitterWidthPx / 2;
+
+    // The span this one boundary can move within: the edge just before
+    // `index` and the edge just after `index + 1` -- everything outside
+    // this pair stays exactly as it was.
+    double prevEdgeFraction = 0.0;
+    for (size_t i = 0; i < index; ++i) {
+        prevEdgeFraction += fractions[i];
+    }
+    const double pairFraction = fractions[index] + fractions[index + 1];
+    const double nextEdgeFraction = prevEdgeFraction + pairFraction;
+
+    const double newFraction = static_cast<double>(contentOnlyPosition) / contentOnlySize;
+    const double clamped = std::clamp(newFraction, prevEdgeFraction, nextEdgeFraction);
+
+    fractions[index] = clamped - prevEdgeFraction;
+    fractions[index + 1] = nextEdgeFraction - clamped;
+
+    if (column) {
+        group.SetTileColumnFractions(std::move(fractions));
+    } else {
+        group.SetTileRowFractions(std::move(fractions));
+    }
 }
 
 }  // namespace polish

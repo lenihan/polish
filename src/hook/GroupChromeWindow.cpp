@@ -32,6 +32,25 @@ constexpr int kTabCornerRadius = 8;      // logical px -- tabs' rounded top corn
 // so it stays visible regardless of what the member itself renders.
 constexpr int kTabConnectorHeight = 10;  // logical px
 
+// Tile mode: the draggable resize splitters between tiles. Real space
+// is reserved for these in GroupManager's own grid math (members never
+// overlap them) -- kSplitterWidth is that reserved width, and also the
+// rendered bar's width once hovered/dragged. kSplitterRestWidth is the
+// thinner hairline drawn the rest of the time (Windows Terminal/VS
+// Code/Settings-app convention: subtle at rest, grows and accents on
+// hover) -- safe to be much thinner than kSplitterWidth purely visually
+// since the reserved gap and hit-test target don't shrink with it, only
+// the paint does. kSplitterHitSlop adds extra invisible margin on each
+// side purely for hit-testing (confirmed real: an exactly-splitter-
+// width click target was fiddly to grab even after widening the bar
+// itself). kMinTileSize is the floor neither side of a drag can shrink
+// past -- enough to still make out that a window is there, not just a
+// sliver.
+constexpr int kSplitterWidth = 8;      // logical px
+constexpr int kSplitterRestWidth = 2;  // logical px
+constexpr int kSplitterHitSlop = 4;    // logical px, each side
+constexpr int kMinTileSize = 80;       // logical px
+
 constexpr UINT_PTR kHoverTimerId = 1;
 constexpr UINT kHoverDelayMs = 400;
 
@@ -84,6 +103,9 @@ GroupChromeWindow::GroupChromeWindow(HINSTANCE instance) : instance_(instance) {
     if (!classRegistered) {
         WNDCLASSEXW windowClass{};
         windowClass.cbSize = sizeof(windowClass);
+        // CS_DBLCLKS -- WM_LBUTTONDBLCLK never fires without it (default
+        // is off); needed for double-click-to-toggle on a tile splitter.
+        windowClass.style = CS_DBLCLKS;
         windowClass.lpfnWndProc = WindowProcThunk;
         windowClass.hInstance = instance_;
         windowClass.lpszClassName = kWindowClassName;
@@ -123,6 +145,24 @@ LRESULT CALLBACK GroupChromeWindow::WindowProcThunk(HWND hwnd, UINT message, WPA
 
 LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+        case WM_SETCURSOR: {
+            // Only for hovering a splitter -- everything else (the
+            // window's own resize border, etc.) still needs its normal
+            // default handling, so only intercept the plain client-area
+            // case and only when a splitter is actually under the
+            // cursor.
+            if (mode_ == GroupMode::Tile && LOWORD(lParam) == HTCLIENT) {
+                POINT pt;
+                GetCursorPos(&pt);
+                ScreenToClient(hwnd, &pt);
+                if (const auto hit = HitTestSplitter(pt)) {
+                    SetCursor(LoadCursorW(nullptr, hit->first ? IDC_SIZEWE : IDC_SIZENS));
+                    return TRUE;
+                }
+            }
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+        }
+
         case WM_ERASEBKGND:
             // The window class's default background brush (COLOR_WINDOW,
             // i.e. white) would otherwise paint on every erase -- visibly
@@ -146,10 +186,17 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         }
 
         case WM_LBUTTONDOWN: {
+            const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            if (mode_ == GroupMode::Tile) {
+                if (const auto hit = HitTestSplitter(pt)) {
+                    draggingSplitter_ = *hit;
+                    SetCapture(hwnd);
+                }
+                return 0;
+            }
             RECT clientRect;
             GetClientRect(hwnd, &clientRect);
             const std::vector<RECT> tabRects = ComputeTabRects(clientRect);
-            const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             for (size_t i = 0; i < tabRects.size(); ++i) {
                 RECT r = tabRects[i];  // PtInRect takes a non-const RECT*
                 if (PtInRect(&r, pt)) {
@@ -166,10 +213,43 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         }
 
         case WM_MOUSEMOVE: {
+            const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            if (draggingSplitter_.has_value()) {
+                DragSplitter(pt);
+                return 0;
+            }
+            if (mode_ == GroupMode::Tile) {
+                // Splitter hover highlight -- Tile mode has no tabs, so
+                // this stands in for (doesn't compete with) the tab
+                // hover-preview tracking below, which only ever applies
+                // in Tab mode anyway (ComputeTabRects is always empty
+                // here). Cursor shape itself is WM_SETCURSOR's job, not
+                // this handler's.
+                if (!trackingMouseLeave_) {
+                    TRACKMOUSEEVENT tme{};
+                    tme.cbSize = sizeof(tme);
+                    tme.dwFlags = TME_LEAVE;
+                    tme.hwndTrack = hwnd;
+                    if (TrackMouseEvent(&tme)) {
+                        trackingMouseLeave_ = true;
+                    }
+                }
+                const auto newHover = HitTestSplitter(pt);
+                if (newHover != hoveredSplitter_) {
+                    if (hoveredSplitter_.has_value()) {
+                        InvalidateSplitterBand(hoveredSplitter_->first, hoveredSplitter_->second);
+                    }
+                    hoveredSplitter_ = newHover;
+                    if (hoveredSplitter_.has_value()) {
+                        InvalidateSplitterBand(hoveredSplitter_->first, hoveredSplitter_->second);
+                    }
+                }
+                return 0;
+            }
+
             RECT clientRect;
             GetClientRect(hwnd, &clientRect);
             const std::vector<RECT> tabRects = ComputeTabRects(clientRect);
-            const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
 
             if (draggingIndex_.has_value()) {
                 for (size_t i = 0; i < tabRects.size(); ++i) {
@@ -242,6 +322,10 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                     onTabHovered_(std::nullopt, RECT{});
                 }
             }
+            if (hoveredSplitter_.has_value()) {
+                InvalidateSplitterBand(hoveredSplitter_->first, hoveredSplitter_->second);
+                hoveredSplitter_.reset();
+            }
             return 0;
 
         case WM_TIMER:
@@ -260,7 +344,32 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             }
             return 0;
 
+        case WM_LBUTTONDBLCLK: {
+            if (mode_ == GroupMode::Tile) {
+                const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                auto hit = HitTestSplitter(pt);
+                if (hit.has_value() && onTileSplitterDoubleClicked_) {
+                    onTileSplitterDoubleClicked_(hit->first, hit->second);
+                }
+                return 0;
+            }
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+        }
+
         case WM_LBUTTONUP: {
+            if (draggingSplitter_.has_value()) {
+                ReleaseCapture();
+                draggingSplitter_.reset();
+                // One final full self-redraw once the drag actually
+                // ends -- cheap here (once per drag, not once per
+                // mouse-move like the reflows during the drag itself),
+                // and guarantees a fully clean frame on both sides of
+                // the splitter regardless of any transient repaint
+                // race during the drag (confirmed real: visible update
+                // artifacts lingering after release).
+                RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE);
+                return 0;
+            }
             if (draggingIndex_.has_value()) {
                 // Captured before ReleaseCapture(), not after --
                 // ReleaseCapture() synchronously re-enters this window
@@ -280,9 +389,10 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         case WM_CAPTURECHANGED:
             // Mouse capture was taken by something else mid-drag (e.g.
             // another window stole focus) -- abandon the drag rather
-            // than leaving draggingIndex_ stuck set, which would make
-            // the next unrelated WM_MOUSEMOVE misbehave.
+            // than leaving draggingIndex_/draggingSplitter_ stuck set,
+            // which would make the next unrelated WM_MOUSEMOVE misbehave.
             draggingIndex_.reset();
+            draggingSplitter_.reset();
             return 0;
 
         case WM_CONTEXTMENU: {
@@ -415,8 +525,65 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     const COLORREF kInactiveTextColor = dark ? RGB(0xE0, 0xE0, 0xE0) : RGB(0x00, 0x00, 0x00);
 
     const UINT dpi = GetDpiForWindow(window_);
-    const int tabHeight = Scale(kTabStripHeight, dpi);
     const int cornerRadius = Scale(kTabCornerRadius, dpi);
+
+    if (mode_ == GroupMode::Tile) {
+        // No custom header at all in Tile mode -- there are no tabs to
+        // render, and the native OS title bar already shows the
+        // group's name (Name(), set via SetWindowTextW), so the plain
+        // "Group (N window(s), tiled)" label this used to draw was
+        // pure duplication. Removing it hands that space back to the
+        // tiled members instead (see HeaderHeight, which returns 0 for
+        // this mode).
+        HBRUSH contentBrush = CreateSolidBrush(kContentColor);
+        FillRect(hdc, &clientRect, contentBrush);
+        DeleteObject(contentBrush);
+
+        if (!tileColumnBoundaries_.empty() || !tileRowBoundaries_.empty()) {
+            // Resting state matches the thin-hairline convention used by
+            // Windows Terminal/VS Code/the Settings app -- the full
+            // kSplitterWidth is still reserved as real gap space (layout
+            // math and hit-testing are unchanged) and content already
+            // fills the whole client rect including that gap, so a
+            // resting splitter can draw as a much thinner line without
+            // leaving a hole. Hovered (or actively being dragged) grows
+            // to the full reserved width and switches to the OS's own
+            // accent color -- the same visual cue Windows itself uses for
+            // "this is draggable".
+            const COLORREF accentColor = GetAccentColor();
+            const int splitterWidth = Scale(kSplitterWidth, dpi);
+            const int restWidth = Scale(kSplitterRestWidth, dpi);
+            for (size_t i = 0; i < tileColumnBoundaries_.size(); ++i) {
+                const bool highlighted = (draggingSplitter_.has_value() && draggingSplitter_->first &&
+                                           draggingSplitter_->second == i) ||
+                                          (hoveredSplitter_.has_value() && hoveredSplitter_->first &&
+                                           hoveredSplitter_->second == i);
+                const int width = highlighted ? splitterWidth : restWidth;
+                const int boundary = tileColumnBoundaries_[i];
+                RECT bar{clientRect.left + boundary - width / 2, clientRect.top,
+                         clientRect.left + boundary + (width - width / 2), clientRect.bottom};
+                HBRUSH splitterBrush = CreateSolidBrush(highlighted ? accentColor : kActiveBorderColor);
+                FillRect(hdc, &bar, splitterBrush);
+                DeleteObject(splitterBrush);
+            }
+            for (size_t i = 0; i < tileRowBoundaries_.size(); ++i) {
+                const bool highlighted = (draggingSplitter_.has_value() && !draggingSplitter_->first &&
+                                           draggingSplitter_->second == i) ||
+                                          (hoveredSplitter_.has_value() && !hoveredSplitter_->first &&
+                                           hoveredSplitter_->second == i);
+                const int width = highlighted ? splitterWidth : restWidth;
+                const int boundary = tileRowBoundaries_[i];
+                RECT bar{clientRect.left, clientRect.top + boundary - width / 2, clientRect.right,
+                         clientRect.top + boundary + (width - width / 2)};
+                HBRUSH splitterBrush = CreateSolidBrush(highlighted ? accentColor : kActiveBorderColor);
+                FillRect(hdc, &bar, splitterBrush);
+                DeleteObject(splitterBrush);
+            }
+        }
+        return;
+    }
+
+    const int tabHeight = Scale(kTabStripHeight, dpi);
 
     // The strip's own base fill is the inactive-tab color, not a
     // separate "strip background" color -- so the left padding before
@@ -454,20 +621,6 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
     HGDIOBJ oldFont = SelectObject(hdc, font);
     SetBkMode(hdc, TRANSPARENT);
-
-    if (mode_ == GroupMode::Tile) {
-        // No individual tabs to draw/click in tile mode -- every member
-        // is simultaneously visible in its own grid slot (GroupManager's
-        // job), so the header is just a plain label.
-        RECT labelRect = stripRect;
-        InflateRect(&labelRect, -Scale(8, dpi), 0);
-        SetTextColor(hdc, kActiveTextColor);
-        const std::wstring label =
-            L"Group (" + std::to_wstring(memberTitles_.size()) + L" window(s), tiled)";
-        DrawTextW(hdc, label.c_str(), -1, &labelRect, DT_SINGLELINE | DT_VCENTER);
-        SelectObject(hdc, oldFont);
-        return;
-    }
 
     const std::vector<RECT> tabRects = ComputeTabRects(clientRect);
     if (tabRects.empty()) {
@@ -550,11 +703,13 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
 }
 
 int GroupChromeWindow::HeaderHeight(UINT dpi) const {
-    int height = Scale(kTabStripHeight, dpi);
-    if (mode_ == GroupMode::Tab) {
-        height += Scale(kTabConnectorHeight, dpi);
+    if (mode_ != GroupMode::Tab) {
+        // Tile mode has no custom header at all -- see PaintTabStrip's
+        // own comment (the native title bar already shows the group's
+        // name, and there are no tabs to render).
+        return 0;
     }
-    return height;
+    return Scale(kTabStripHeight, dpi) + Scale(kTabConnectorHeight, dpi);
 }
 
 RECT GroupChromeWindow::ContentRectInScreenCoords() const {
@@ -591,6 +746,128 @@ void GroupChromeWindow::InvalidateTabStrip() {
     const UINT dpi = GetDpiForWindow(window_);
     RECT headerRect{client.left, client.top, client.right, client.top + HeaderHeight(dpi)};
     InvalidateRect(window_, &headerRect, TRUE);
+}
+
+void GroupChromeWindow::SetTileSplitters(std::vector<int> columnBoundaries, std::vector<int> rowBoundaries) {
+    if (window_ != nullptr) {
+        // A band around every OLD and NEW boundary position -- not the
+        // whole window, which also repaints the content-area fill
+        // behind the members and visibly overwrites them (the same
+        // class of bug already fixed for the tab strip's own hover
+        // highlight; see InvalidateTabStrip's comment).
+        const RECT contentRect = ContentRectInClientCoords();
+        const UINT dpi = GetDpiForWindow(window_);
+        const int band = Scale(kSplitterWidth + kSplitterHitSlop, dpi);
+        for (const std::vector<int>* boundaries : {&tileColumnBoundaries_, &columnBoundaries}) {
+            for (int x : *boundaries) {
+                RECT bar{contentRect.left + x - band, contentRect.top, contentRect.left + x + band,
+                         contentRect.bottom};
+                InvalidateRect(window_, &bar, FALSE);
+            }
+        }
+        for (const std::vector<int>* boundaries : {&tileRowBoundaries_, &rowBoundaries}) {
+            for (int y : *boundaries) {
+                RECT bar{contentRect.left, contentRect.top + y - band, contentRect.right,
+                         contentRect.top + y + band};
+                InvalidateRect(window_, &bar, FALSE);
+            }
+        }
+    }
+    tileColumnBoundaries_ = std::move(columnBoundaries);
+    tileRowBoundaries_ = std::move(rowBoundaries);
+}
+
+int GroupChromeWindow::TileSplitterWidthPx() const {
+    if (window_ == nullptr) {
+        return 0;
+    }
+    return Scale(kSplitterWidth, GetDpiForWindow(window_));
+}
+
+std::optional<std::pair<bool, size_t>> GroupChromeWindow::HitTestSplitter(POINT clientPt) const {
+    if (mode_ != GroupMode::Tile || window_ == nullptr) {
+        return std::nullopt;
+    }
+    const RECT contentRect = ContentRectInClientCoords();
+    const UINT dpi = GetDpiForWindow(window_);
+    const int slop = Scale(kSplitterHitSlop, dpi);
+
+    for (size_t i = 0; i < tileColumnBoundaries_.size(); ++i) {
+        const int x = contentRect.left + tileColumnBoundaries_[i];
+        if (clientPt.x >= x - slop && clientPt.x <= x + slop && clientPt.y >= contentRect.top &&
+            clientPt.y <= contentRect.bottom) {
+            return std::make_pair(true, i);
+        }
+    }
+    for (size_t i = 0; i < tileRowBoundaries_.size(); ++i) {
+        const int y = contentRect.top + tileRowBoundaries_[i];
+        if (clientPt.y >= y - slop && clientPt.y <= y + slop && clientPt.x >= contentRect.left &&
+            clientPt.x <= contentRect.right) {
+            return std::make_pair(false, i);
+        }
+    }
+    return std::nullopt;
+}
+
+void GroupChromeWindow::DragSplitter(POINT clientPt) {
+    if (!draggingSplitter_.has_value() || window_ == nullptr) {
+        return;
+    }
+    const auto [isColumn, index] = *draggingSplitter_;
+    const std::vector<int>& boundaries = isColumn ? tileColumnBoundaries_ : tileRowBoundaries_;
+    if (index >= boundaries.size()) {
+        return;
+    }
+    const RECT contentRect = ContentRectInClientCoords();
+    const UINT dpi = GetDpiForWindow(window_);
+    const int minSize = Scale(kMinTileSize, dpi);
+    const int splitterWidth = Scale(kSplitterWidth, dpi);
+    const int totalSize = isColumn ? (contentRect.right - contentRect.left) : (contentRect.bottom - contentRect.top);
+
+    // Only this boundary's own two neighbors bound how far it can
+    // move -- everything past them belongs to a different pair and
+    // stays fixed (matches GroupManager::SetTileBoundary's own
+    // "only the adjacent pair changes" contract).
+    const int prevBoundary = (index == 0) ? 0 : boundaries[index - 1];
+    const int nextBoundary = (index + 1 < boundaries.size()) ? boundaries[index + 1] : totalSize;
+
+    // Each side must leave room for both the *neighboring* splitter's
+    // own reserved gap and this tile's minimum content size -- minSize
+    // alone would let a tile shrink below the floor by up to one
+    // splitter's width.
+    const int lo = prevBoundary + splitterWidth + minSize;
+    const int hi = nextBoundary - splitterWidth - minSize;
+    if (lo >= hi) {
+        return;  // no room left to move this splitter without violating the floor
+    }
+    const int rawPosition = isColumn ? (clientPt.x - contentRect.left) : (clientPt.y - contentRect.top);
+    const int clamped = std::clamp(rawPosition, lo, hi);
+
+    if (onTileSplitterDragged_) {
+        onTileSplitterDragged_(isColumn, index, clamped);
+    }
+}
+
+void GroupChromeWindow::InvalidateSplitterBand(bool column, size_t index) {
+    if (window_ == nullptr) {
+        return;
+    }
+    const std::vector<int>& boundaries = column ? tileColumnBoundaries_ : tileRowBoundaries_;
+    if (index >= boundaries.size()) {
+        return;
+    }
+    const RECT contentRect = ContentRectInClientCoords();
+    const UINT dpi = GetDpiForWindow(window_);
+    const int band = Scale(kSplitterWidth + kSplitterHitSlop, dpi);
+    if (column) {
+        const int x = contentRect.left + boundaries[index];
+        RECT bar{x - band, contentRect.top, x + band, contentRect.bottom};
+        InvalidateRect(window_, &bar, FALSE);
+    } else {
+        const int y = contentRect.top + boundaries[index];
+        RECT bar{contentRect.left, y - band, contentRect.right, y + band};
+        InvalidateRect(window_, &bar, FALSE);
+    }
 }
 
 void GroupChromeWindow::GrowContentAreaTo(SIZE minContentSize) {
