@@ -593,8 +593,11 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
     const int x = monitorRect.left + ((monitorRect.right - monitorRect.left) - width) / 2;
     const int y = monitorRect.top + ((monitorRect.bottom - monitorRect.top) - height) / 2;
 
-    window_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClassName,
-                               editing_ ? L"Edit Group — manage windows" : L"New Group — manage windows",
+    // Same title whether creating or editing -- both are the same
+    // underlying action (choose which windows belong to the group), so
+    // one consistent name is used everywhere it's referenced (the
+    // taskbar menu, this title, the chrome's own context menu item).
+    window_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClassName, L"Edit Group Windows",
                                WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, width, height, owner, nullptr, instance_,
                                this);
     if (window_ == nullptr) {

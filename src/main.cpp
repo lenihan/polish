@@ -1253,7 +1253,7 @@ void PopulateTrayMenu(HMENU menu) {
                 L"Alt+Tab (skip minimized)");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuIdNewGroup,
-                (L"New Group\t" + FormatHotkey(g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey))
+                (L"New Group...\t" + FormatHotkey(g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey))
                     .c_str());
     AppendMenuW(menu, MF_STRING, kMenuIdChangeGroupHotkey, L"Change Group Hotkey...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);

@@ -697,7 +697,7 @@ void GroupChromeWindow::ShowContextMenu(int screenX, int screenY) {
     HMENU menu = CreatePopupMenu();
     AppendMenuW(menu, MF_STRING, kContextMenuSwitchMode,
                 mode_ == GroupMode::Tab ? L"Switch to Tile" : L"Switch to Tab");
-    AppendMenuW(menu, MF_STRING, kContextMenuEditWindows, L"Edit windows...");
+    AppendMenuW(menu, MF_STRING, kContextMenuEditWindows, L"Edit Group Windows...");
 
     // The SetForegroundWindow/PostMessage(WM_NULL) pairing around
     // TrackPopupMenu is a documented Win32 requirement (MSDN), not
