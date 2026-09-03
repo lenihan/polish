@@ -947,6 +947,10 @@ void ActivateGroupTab(polish::GroupId id, size_t index) {
     if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
         return;
     }
+    // Clicking a tab commits to switching -- the hover preview (if
+    // still showing, e.g. the click landed before the mouse settled
+    // elsewhere) has nothing left to preview.
+    HideGroupTabThumbnail(id);
     group->SetActiveIndex(index);
     chromeIt->second->SetActiveIndex(index);
     ReflowGroupTo(id);
