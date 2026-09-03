@@ -74,6 +74,8 @@ private:
     void UpdateDrag(POINT screenPt);
     void EndDrag();
     void Commit();
+    void ApplyDarkMode();
+    void DrawOwnerButton(const DRAWITEMSTRUCT& item);
 
     HINSTANCE instance_;
     HWND window_ = nullptr;
@@ -105,6 +107,18 @@ private:
     // insert-mark indicator.
     bool dragging_ = false;
     int dragItemIndex_ = -1;
+
+    // Back WM_CTLCOLORSTATIC/WM_CTLCOLOREDIT/WM_ERASEBKGND -- created
+    // once per ShowModal (matching window_'s own lifecycle) in
+    // ApplyDarkMode, freed alongside the rest of window_'s state when
+    // it's destroyed. A brush returned from those messages must stay
+    // valid for the system to paint with; recreating one per message
+    // without ever freeing it would leak a GDI object per repaint.
+    // editBackgroundBrush_ is a slightly lighter shade than
+    // backgroundBrush_ so the name field still reads as an editable
+    // control rather than blending completely into the dialog.
+    HBRUSH backgroundBrush_ = nullptr;
+    HBRUSH editBackgroundBrush_ = nullptr;
 };
 
 }  // namespace polish

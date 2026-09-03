@@ -30,6 +30,7 @@ add_library(polish_core STATIC
     src/hook/GroupHotkeyDialog.cpp
     src/hook/GroupTabThumbnail.cpp
     src/settings/Settings.cpp
+    src/util/DarkMode.cpp
 )
 
 target_include_directories(polish_core PUBLIC src resources)
@@ -49,6 +50,7 @@ target_link_libraries(polish_core PUBLIC
     comctl32
     gdi32
     gdiplus
+    uxtheme
 )
 
 if(MSVC)

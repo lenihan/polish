@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "resource.h"
+#include "util/DarkMode.h"
 
 namespace polish {
 
@@ -40,44 +41,7 @@ constexpr UINT kHoverDelayMs = 400;
 constexpr UINT kContextMenuSwitchMode = 1;
 constexpr UINT kContextMenuEditWindows = 2;
 
-// Some SDK headers don't yet define this (added Windows 10 20H1) --
-// the numeric value is stable/documented, safe to fall back to.
-#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
-constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
-#endif
-
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
-
-// The user's actual chosen app theme (Settings > Personalization >
-// Colors > "Choose your mode"), not just assumed light -- confirmed
-// necessary: a hardcoded light palette looked jarringly out of place
-// sitting in an otherwise all-dark desktop. Same registry value every
-// dark-mode-aware Win32 app reads; no public API for it.
-bool IsDarkModeEnabled() {
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                       L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ,
-                       &key) != ERROR_SUCCESS) {
-        return false;
-    }
-    DWORD value = 1;
-    DWORD size = sizeof(value);
-    DWORD type = 0;
-    const bool ok = RegQueryValueExW(key, L"AppsUseLightTheme", nullptr, &type, reinterpret_cast<BYTE*>(&value),
-                                      &size) == ERROR_SUCCESS &&
-                     type == REG_DWORD;
-    RegCloseKey(key);
-    return ok && value == 0;
-}
-
-// Applies (or removes) the dark native title bar/frame to match --
-// otherwise the chrome's own OS-drawn title bar stays light even when
-// everything this app paints itself, and every other app on screen, is
-// dark.
-void ApplyDarkTitleBar(HWND hwnd, bool dark) {
-    BOOL enabled = dark ? TRUE : FALSE;
-    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &enabled, sizeof(enabled));
-}
 
 // Draws the concave quarter-circle join where a narrower element (the
 // active tab) meets a wider surface below it (the full-width connector
@@ -698,6 +662,8 @@ void GroupChromeWindow::ShowContextMenu(int screenX, int screenY) {
     AppendMenuW(menu, MF_STRING, kContextMenuSwitchMode,
                 mode_ == GroupMode::Tab ? L"Switch to Tile" : L"Switch to Tab");
     AppendMenuW(menu, MF_STRING, kContextMenuEditWindows, L"Edit Group Windows...");
+
+    ApplyDarkModeToMenu(window_);
 
     // The SetForegroundWindow/PostMessage(WM_NULL) pairing around
     // TrackPopupMenu is a documented Win32 requirement (MSDN), not

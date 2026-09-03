@@ -1,11 +1,13 @@
 #include "hook/GroupPickerWindow.h"
 
 #include <commctrl.h>
+#include <uxtheme.h>
 #include <windowsx.h>
 
 #include <algorithm>
 #include <format>
 
+#include "util/DarkMode.h"
 #include "util/Logging.h"
 #include "windowtracking/WindowFilters.h"
 
@@ -173,6 +175,52 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             dragItemIndex_ = -1;
             return 0;
 
+        case WM_ERASEBKGND: {
+            HDC hdc = reinterpret_cast<HDC>(wParam);
+            RECT client{};
+            GetClientRect(hwnd, &client);
+            FillRect(hdc, &client,
+                      backgroundBrush_ != nullptr ? backgroundBrush_
+                                                   : reinterpret_cast<HBRUSH>(COLOR_3DFACE + 1));
+            return 1;
+        }
+
+        case WM_DRAWITEM: {
+            const auto* drawItem = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+            if (drawItem != nullptr && drawItem->CtlType == ODT_BUTTON) {
+                DrawOwnerButton(*drawItem);
+                return TRUE;
+            }
+            return FALSE;
+        }
+
+        case WM_CTLCOLORSTATIC: {
+            // The Name/list labels -- blend into the dialog's own
+            // background (no border/fill of their own) rather than
+            // keeping the light system STATIC background.
+            HDC hdcStatic = reinterpret_cast<HDC>(wParam);
+            const bool dark = IsDarkModeEnabled();
+            SetTextColor(hdcStatic, dark ? RGB(0xE8, 0xE8, 0xE8) : GetSysColor(COLOR_WINDOWTEXT));
+            SetBkMode(hdcStatic, TRANSPARENT);
+            return reinterpret_cast<LRESULT>(backgroundBrush_);
+        }
+
+        case WM_CTLCOLOREDIT: {
+            HDC hdcEdit = reinterpret_cast<HDC>(wParam);
+            const bool dark = IsDarkModeEnabled();
+            SetTextColor(hdcEdit, dark ? RGB(0xE8, 0xE8, 0xE8) : GetSysColor(COLOR_WINDOWTEXT));
+            SetBkColor(hdcEdit, dark ? RGB(0x2B, 0x2B, 0x2B) : GetSysColor(COLOR_WINDOW));
+            return reinterpret_cast<LRESULT>(editBackgroundBrush_);
+        }
+
+        case WM_SETTINGCHANGE:
+            // Re-applies everything (title bar, control theming, cached
+            // brushes, list-view colors) if the user flips Settings >
+            // Personalization > Colors while this dialog is already
+            // open, rather than only taking effect on next launch.
+            ApplyDarkMode();
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+
         case WM_CLOSE:
             result_.reset();
             done_ = true;
@@ -267,9 +315,14 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
     groupColumn.cx = Scale(200, dpi);
     ListView_InsertColumn(groupListView_, 0, &groupColumn);
 
-    addButton_ = CreateWindowExW(0, L"BUTTON", L"Add >", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, hwnd,
+    // BS_OWNERDRAW on every button (drawn in WM_DRAWITEM/DrawOwnerButton)
+    // -- confirmed live via a screenshot spike that SetWindowTheme
+    // alone (which does correctly theme the list views' and edit
+    // field's chrome) does not reliably darken BS_PUSHBUTTON on this
+    // Windows build; owner-drawing is the only guaranteed-correct path.
+    addButton_ = CreateWindowExW(0, L"BUTTON", L"Add >", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kAddButtonId)), instance_, nullptr);
-    removeButton_ = CreateWindowExW(0, L"BUTTON", L"< Remove", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0,
+    removeButton_ = CreateWindowExW(0, L"BUTTON", L"< Remove", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0,
                                      hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kRemoveButtonId)),
                                      instance_, nullptr);
 
@@ -277,18 +330,18 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
     // discoverable on its own -- these are the primary, always-visible
     // way to reorder (act on whatever's currently selected in the
     // Group list).
-    moveUpButton_ = CreateWindowExW(0, L"BUTTON", L"Move Up", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0,
+    moveUpButton_ = CreateWindowExW(0, L"BUTTON", L"Move Up", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0,
                                      hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kMoveUpButtonId)),
                                      instance_, nullptr);
-    moveDownButton_ = CreateWindowExW(0, L"BUTTON", L"Move Down", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0,
+    moveDownButton_ = CreateWindowExW(0, L"BUTTON", L"Move Down", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0,
                                        0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kMoveDownButtonId)),
                                        instance_, nullptr);
 
     createButton_ = CreateWindowExW(0, L"BUTTON", editing_ ? L"Update Group" : L"Create Group",
-                                     WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON, 0, 0, 0, 0, hwnd,
+                                     WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCreateButtonId)), instance_,
                                      nullptr);
-    cancelButton_ = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0,
+    cancelButton_ = CreateWindowExW(0, L"BUTTON", L"Cancel", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0,
                                      hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCancelButtonId)),
                                      instance_, nullptr);
 
@@ -306,6 +359,104 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
                           addButton_, removeButton_, moveUpButton_, moveDownButton_, createButton_,
                           cancelButton_}) {
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(dialogFont), TRUE);
+    }
+
+    ApplyDarkMode();
+}
+
+// Applies (or re-applies, on a live WM_SETTINGCHANGE) the current OS
+// theme to the whole dialog: the native title bar, cached background
+// brushes backing WM_ERASEBKGND/WM_CTLCOLORSTATIC/WM_CTLCOLOREDIT, and
+// every themeable child control (SetWindowTheme's "DarkMode_*" class
+// names -- undocumented, but the same ones Explorer's own dialogs use;
+// there's still no public API for this).
+void GroupPickerWindow::ApplyDarkMode() {
+    // window_ isn't assigned yet the first time this runs (called from
+    // CreateControls, itself called from WM_CREATE, which fires before
+    // CreateWindowExW returns) -- activeListView_'s parent is the same
+    // real window handle, already valid at this point (same fallback
+    // LayoutControls already relies on for the same reason).
+    HWND dialogHwnd = window_ != nullptr ? window_ : GetParent(activeListView_);
+    const bool dark = IsDarkModeEnabled();
+    ApplyDarkTitleBar(dialogHwnd, dark);
+
+    if (backgroundBrush_ != nullptr) {
+        DeleteObject(backgroundBrush_);
+    }
+    backgroundBrush_ = CreateSolidBrush(dark ? RGB(0x20, 0x20, 0x20) : GetSysColor(COLOR_3DFACE));
+    if (editBackgroundBrush_ != nullptr) {
+        DeleteObject(editBackgroundBrush_);
+    }
+    editBackgroundBrush_ = CreateSolidBrush(dark ? RGB(0x2B, 0x2B, 0x2B) : GetSysColor(COLOR_WINDOW));
+
+    // Buttons are owner-drawn (DrawOwnerButton), not themed via
+    // SetWindowTheme -- see their creation comment for why. Only the
+    // edit field needs it here, for its WS_EX_CLIENTEDGE sunken border.
+    if (nameEdit_ != nullptr) {
+        SetWindowTheme(nameEdit_, dark ? L"DarkMode_Explorer" : nullptr, nullptr);
+    }
+    for (HWND listView : {activeListView_, groupListView_}) {
+        if (listView == nullptr) {
+            continue;
+        }
+        SetWindowTheme(listView, dark ? L"DarkMode_ItemsView" : nullptr, nullptr);
+        ListView_SetBkColor(listView, dark ? RGB(0x20, 0x20, 0x20) : CLR_DEFAULT);
+        ListView_SetTextColor(listView, dark ? RGB(0xE8, 0xE8, 0xE8) : CLR_DEFAULT);
+        ListView_SetTextBkColor(listView, dark ? RGB(0x20, 0x20, 0x20) : CLR_DEFAULT);
+    }
+
+    // RDW_ALLCHILDREN, not a plain InvalidateRect -- invalidating just
+    // the dialog itself doesn't propagate to child windows (each has
+    // its own update region), which would leave the owner-drawn
+    // buttons stuck showing the old theme's colors after a live
+    // WM_SETTINGCHANGE until something else happened to repaint them.
+    RedrawWindow(dialogHwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE);
+}
+
+// WM_DRAWITEM handler for every button (all BS_OWNERDRAW -- see their
+// creation comment for why SetWindowTheme alone wasn't enough). Draws
+// a flat fill + 1px border + centered text, using ODS_SELECTED/
+// ODS_DISABLED/ODS_FOCUS from the item state for pressed/disabled/
+// focus-rect feedback, so those still read correctly despite being
+// hand-painted instead of theme-drawn.
+void GroupPickerWindow::DrawOwnerButton(const DRAWITEMSTRUCT& item) {
+    const bool dark = IsDarkModeEnabled();
+    const bool pressed = (item.itemState & ODS_SELECTED) != 0;
+    const bool disabled = (item.itemState & ODS_DISABLED) != 0;
+    const bool focused = (item.itemState & ODS_FOCUS) != 0;
+    const bool isDefault = item.hwndItem == createButton_;
+
+    const COLORREF fill = dark ? (pressed ? RGB(0x3A, 0x3A, 0x3A) : RGB(0x2B, 0x2B, 0x2B))
+                                : (pressed ? RGB(0xD0, 0xD0, 0xD0) : RGB(0xE1, 0xE1, 0xE1));
+    const COLORREF border = isDefault ? (dark ? RGB(0x6B, 0xA5, 0xE8) : RGB(0x00, 0x5F, 0xB8))
+                                       : (dark ? RGB(0x50, 0x50, 0x50) : RGB(0xAD, 0xAD, 0xAD));
+    const COLORREF text = dark ? (disabled ? RGB(0x70, 0x70, 0x70) : RGB(0xE8, 0xE8, 0xE8))
+                                : (disabled ? RGB(0x9E, 0x9E, 0x9E) : RGB(0x00, 0x00, 0x00));
+
+    HBRUSH fillBrush = CreateSolidBrush(fill);
+    FillRect(item.hDC, &item.rcItem, fillBrush);
+    DeleteObject(fillBrush);
+
+    HPEN borderPen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ oldPen = SelectObject(item.hDC, borderPen);
+    HGDIOBJ oldBrush = SelectObject(item.hDC, GetStockObject(NULL_BRUSH));
+    Rectangle(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom);
+    SelectObject(item.hDC, oldBrush);
+    SelectObject(item.hDC, oldPen);
+    DeleteObject(borderPen);
+
+    wchar_t buttonText[128] = L"";
+    GetWindowTextW(item.hwndItem, buttonText, static_cast<int>(sizeof(buttonText) / sizeof(buttonText[0])));
+    SetTextColor(item.hDC, text);
+    SetBkMode(item.hDC, TRANSPARENT);
+    RECT textRect = item.rcItem;
+    DrawTextW(item.hDC, buttonText, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+    if (focused) {
+        RECT focusRect = item.rcItem;
+        InflateRect(&focusRect, -3, -3);
+        SetTextColor(item.hDC, text);
+        DrawFocusRect(item.hDC, &focusRect);
     }
 }
 
@@ -639,6 +790,14 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
     nameEdit_ = nullptr;
     createButton_ = nullptr;
     cancelButton_ = nullptr;
+    if (backgroundBrush_ != nullptr) {
+        DeleteObject(backgroundBrush_);
+        backgroundBrush_ = nullptr;
+    }
+    if (editBackgroundBrush_ != nullptr) {
+        DeleteObject(editBackgroundBrush_);
+        editBackgroundBrush_ = nullptr;
+    }
     return result_;
 }
 

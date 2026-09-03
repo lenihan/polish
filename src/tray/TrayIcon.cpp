@@ -3,6 +3,7 @@
 #include <shellapi.h>
 
 #include "resource.h"
+#include "util/DarkMode.h"
 
 namespace polish {
 
@@ -65,6 +66,7 @@ void TrayIcon::ShowContextMenu() {
     if (populateMenu_) {
         populateMenu_(menu);
     }
+    ApplyDarkModeToMenu(messageWindow_);
 
     // Standard dance so the menu dismisses correctly on an outside click:
     // the window must be foreground before TrackPopupMenuEx, and a
