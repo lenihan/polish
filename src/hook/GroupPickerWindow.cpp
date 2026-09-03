@@ -399,7 +399,13 @@ void GroupPickerWindow::ApplyDarkMode() {
         if (listView == nullptr) {
             continue;
         }
-        SetWindowTheme(listView, dark ? L"DarkMode_ItemsView" : nullptr, nullptr);
+        // "DarkMode_Explorer", not "DarkMode_ItemsView" -- confirmed
+        // live: ItemsView left the scrollbar track/thumb light even
+        // though the list's own background/text/selection colors were
+        // already correctly dark (those come from the ListView_Set*
+        // calls below, not the theme name). Explorer is the class that
+        // actually darkens a common control's scrollbar.
+        SetWindowTheme(listView, dark ? L"DarkMode_Explorer" : nullptr, nullptr);
         ListView_SetBkColor(listView, dark ? RGB(0x20, 0x20, 0x20) : CLR_DEFAULT);
         ListView_SetTextColor(listView, dark ? RGB(0xE8, 0xE8, 0xE8) : CLR_DEFAULT);
         ListView_SetTextBkColor(listView, dark ? RGB(0x20, 0x20, 0x20) : CLR_DEFAULT);
