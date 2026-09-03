@@ -184,7 +184,13 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             }
             if (newHover != hoveredTabIndex_) {
                 hoveredTabIndex_ = newHover;
-                InvalidateRect(hwnd, nullptr, FALSE);  // reflect the new hover highlight
+                // Tab strip only, not the whole window -- InvalidateRect
+                // with a null rect also repaints the content-area band
+                // behind the active member, visibly overwriting it until
+                // something else forces it to repaint itself again (a
+                // real, confirmed bug: moving the mouse off a tab in any
+                // direction blanked File Explorer's content).
+                InvalidateTabStrip();
                 KillTimer(hwnd, kHoverTimerId);
                 if (newHover.has_value()) {
                     SetTimer(hwnd, kHoverTimerId, kHoverDelayMs, nullptr);
@@ -199,7 +205,7 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             trackingMouseLeave_ = false;
             if (hoveredTabIndex_.has_value()) {
                 hoveredTabIndex_.reset();
-                InvalidateRect(hwnd, nullptr, FALSE);
+                InvalidateTabStrip();
                 KillTimer(hwnd, kHoverTimerId);
                 if (onTabHovered_) {
                     onTabHovered_(std::nullopt, RECT{});
@@ -502,6 +508,18 @@ RECT GroupChromeWindow::ContentRectInClientCoords() const {
     const UINT dpi = GetDpiForWindow(window_);
     const int tabHeight = Scale(kTabStripHeight, dpi);
     return RECT{client.left, client.top + tabHeight, client.right, client.bottom};
+}
+
+void GroupChromeWindow::InvalidateTabStrip() {
+    if (window_ == nullptr) {
+        return;
+    }
+    RECT client{};
+    GetClientRect(window_, &client);
+    const UINT dpi = GetDpiForWindow(window_);
+    const int tabHeight = Scale(kTabStripHeight, dpi);
+    RECT stripRect{client.left, client.top, client.right, client.top + tabHeight};
+    InvalidateRect(window_, &stripRect, TRUE);
 }
 
 void GroupChromeWindow::GrowContentAreaTo(SIZE minContentSize) {

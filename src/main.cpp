@@ -875,11 +875,17 @@ void OnMemberTitleChanged(HWND hwnd) {
 }
 
 // Hides the tab hover-preview thumbnail (no-op if it isn't showing)
-// and forces the group's chrome to repaint. The thumbnail is a
-// WS_EX_TOPMOST popup sitting right below the tab strip -- hiding it
-// doesn't reliably trigger the chrome to repaint whatever sliver of
-// the tab-strip/content boundary it was covering (same class of
-// stale-composited-surface issue RedrawWindow already had to fix for
+// and refreshes just the tab strip -- not the whole chrome window (a
+// prior version of this fix used a plain InvalidateRect(..., nullptr,
+// ...), which also repaints the content-area band behind the active
+// member; that visibly overwrote it until something else forced it to
+// repaint itself again -- a real, confirmed regression: File Explorer's
+// content going blank after moving the mouse off a tab, until clicking
+// the tab again triggered ReflowGroupTo's own explicit redraw). The
+// thumbnail is a WS_EX_TOPMOST popup sitting right below the tab strip
+// -- hiding it doesn't reliably trigger the chrome to repaint whatever
+// sliver of the tab-strip/content boundary it was covering (same class
+// of stale-composited-surface issue RedrawWindow already had to fix for
 // member tab switches, see GroupManager's PositionMember), which left
 // the active tab's highlight looking stale until something unrelated
 // repainted it.
@@ -890,7 +896,7 @@ void HideGroupTabThumbnail(polish::GroupId id) {
     g_groupTabThumbnail->Hide();
     auto chromeIt = g_groupChromeWindows.find(id);
     if (chromeIt != g_groupChromeWindows.end()) {
-        InvalidateRect(chromeIt->second->Handle(), nullptr, TRUE);
+        chromeIt->second->InvalidateTabStrip();
     }
 }
 

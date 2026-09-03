@@ -84,6 +84,17 @@ public:
     // the screen.
     RECT ContentRectInClientCoords() const;
 
+    // Repaints just the tab strip band, not the whole client area --
+    // for callers that only need the tab strip's own look refreshed
+    // (e.g. the active tab's highlight after a hover-preview popup
+    // closes). Deliberately narrower than a plain InvalidateRect(...,
+    // nullptr, ...): invalidating the whole window also repaints the
+    // content-area band PaintTabStrip fills behind the active member,
+    // which visibly overwrites that member until it repaints itself
+    // again -- a real, confirmed regression (File Explorer's content
+    // going blank after moving the mouse off a tab).
+    void InvalidateTabStrip();
+
     // Resizes the chrome window (top-left held fixed) so its content
     // area is at least `minContentSize`, if it isn't already. Exists
     // for when GroupManager::ApplyLayout reports that some member
