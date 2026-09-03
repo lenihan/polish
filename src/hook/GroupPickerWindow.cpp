@@ -22,7 +22,7 @@ constexpr int kCancelButtonId = 1004;
 // Logical (96 DPI) layout constants -- scaled by the window's actual DPI
 // in LayoutControls/before CreateWindowExW.
 constexpr int kWindowWidth = 640;
-constexpr int kWindowHeight = 620;
+constexpr int kWindowHeight = 320;
 constexpr int kMargin = 12;
 constexpr int kButtonHeight = 28;
 constexpr int kButtonWidth = 110;
@@ -333,8 +333,9 @@ void GroupPickerWindow::LayoutControls() {
     MoveWindow(removeButton_, midLeft, midCenterY + midButtonGap, midColumnWidth, midButtonHeight, TRUE);
 
     MoveWindow(cancelButton_, client.right - margin - buttonWidth, buttonsTop, buttonWidth, buttonHeight, TRUE);
-    MoveWindow(createButton_, client.right - 2 * margin - 2 * buttonWidth, buttonsTop, buttonWidth, buttonHeight,
-               TRUE);
+    // Left edge aligned with the Group list, not flush against Cancel --
+    // ties it visually to the list it actually confirms.
+    MoveWindow(createButton_, rightListLeft, buttonsTop, buttonWidth, buttonHeight, TRUE);
 }
 
 void GroupPickerWindow::PopulateLists() {

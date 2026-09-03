@@ -421,6 +421,17 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
         return;
     }
 
+    // The leftover strip space to the right of the last tab (when tabs
+    // don't fill the full width) matches an inactive tab's own
+    // background, not the plain strip color -- reads as "more inactive
+    // tab" rather than a visually distinct empty band.
+    if (const RECT& lastTab = tabRects.back(); lastTab.right < clientRect.right) {
+        RECT trailingRect{lastTab.right, clientRect.top, clientRect.right, clientRect.top + tabHeight};
+        HBRUSH trailingBrush = CreateSolidBrush(kInactiveTabColor);
+        FillRect(hdc, &trailingRect, trailingBrush);
+        DeleteObject(trailingBrush);
+    }
+
     const int iconSize = Scale(16, dpi);
     const int iconTextGap = Scale(4, dpi);
     const int cornerRadius = Scale(8, dpi);
@@ -615,7 +626,7 @@ void GroupChromeWindow::Show(const std::vector<std::wstring>& memberTitles, Grou
 
     if (window_ == nullptr) {
         window_ = CreateWindowExW(0, kWindowClassName, L"Group", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
-                                   CW_USEDEFAULT, 800, 600, nullptr, nullptr, instance_, this);
+                                   CW_USEDEFAULT, 1200, 850, nullptr, nullptr, instance_, this);
         if (window_ != nullptr) {
             ApplyDarkTitleBar(window_, IsDarkModeEnabled());
         }
