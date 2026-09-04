@@ -911,6 +911,21 @@ void GroupChromeWindow::SetActiveIndex(size_t index) {
 }
 
 void GroupChromeWindow::SetMemberTitles(const std::vector<std::wstring>& titles) {
+    // A no-op when nothing actually changed -- confirmed real via
+    // diagnostic logging that a reparented member (a modern Notepad
+    // instance) fires EVENT_OBJECT_NAMECHANGE for its own title
+    // continuously (root OS cause unconfirmed, but real and repeatable:
+    // idObject/idChild are already filtered to the window's own title,
+    // not some noisier child control), even though the title string
+    // itself never changes. Each such event drove OnMemberTitleChanged
+    // -> here -> an unconditional full-window InvalidateRect, which is
+    // exactly the nonstop visible flashing a user reported and
+    // confirmed live. Comparing first turns a continuous stream of
+    // no-op events into a single real update whenever the title
+    // actually differs.
+    if (titles == memberTitles_) {
+        return;
+    }
     memberTitles_ = titles;
     if (window_ != nullptr) {
         InvalidateRect(window_, nullptr, TRUE);
@@ -918,6 +933,14 @@ void GroupChromeWindow::SetMemberTitles(const std::vector<std::wstring>& titles)
 }
 
 void GroupChromeWindow::SetMemberIcons(const std::vector<HICON>& icons) {
+    // Same no-op-when-unchanged guard as SetMemberTitles, and for the
+    // same confirmed reason -- GetWindowIconHandle returns a handle
+    // owned by the window/class (stable across calls for the same
+    // icon, not a fresh copy each time), so comparing HICON values
+    // directly is a valid change check, not just an approximation.
+    if (icons == memberIcons_) {
+        return;
+    }
     memberIcons_ = icons;
     if (window_ != nullptr) {
         InvalidateRect(window_, nullptr, TRUE);

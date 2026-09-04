@@ -306,6 +306,31 @@ void CheckSettledRectAndRecord() {
     CommitRectForTrackedWindow(*rect);
 }
 
+// True if hwnd is one of our own group chrome windows -- these pass
+// IsCandidateWindow's plain Win32-style checks (visible, WS_CAPTION,
+// no owner) just like any real application window, but their size and
+// position are fully owned by GroupManager/ReflowGroupTo, not the
+// user. Letting restore-sync track one anyway is a real, confirmed bug
+// (not hypothetical): a brand-new group's chrome naturally becomes the
+// foreground window right after creation, so it becomes g_trackedWindow
+// -- and if anything then reports even a spurious location-changed
+// event on it (a live spike confirmed a reparented member's own
+// content keeps repainting for a moment right after being reparented,
+// which is exactly the kind of activity that can trip this), restore-
+// sync's own SetWindowPlacement call on the chrome fights with
+// ReflowGroupTo's layout-owned resizing of that same window -- visibly
+// flashing, nonstop, since each side's correction can retrigger the
+// other. Confirmed by a single-Notepad group flashing continuously
+// with zero further calls into GroupManager after the initial layout.
+bool IsGroupChromeWindow(HWND hwnd) {
+    for (const auto& [id, chrome] : g_groupChromeWindows) {
+        if (chrome->Handle() == hwnd) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void OnForegroundChanged(HWND newForeground) {
     if (newForeground == g_trackedWindow) {
         return;
@@ -315,7 +340,11 @@ void OnForegroundChanged(HWND newForeground) {
     g_pendingSettleRect.reset();
     g_trackedWindow = nullptr;
 
-    const bool candidate = polish::IsCandidateWindow(newForeground);
+    // Still counted for MRU/Alt+Tab purposes below (a group chrome
+    // window belongs in Alt+Tab like any real window) -- only excluded
+    // from becoming g_trackedWindow/restore-sync's target, per
+    // IsGroupChromeWindow's own comment above.
+    const bool candidate = polish::IsCandidateWindow(newForeground) && !IsGroupChromeWindow(newForeground);
     wchar_t title[256] = L"";
     GetWindowTextW(newForeground, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
     polish::LogDebug(std::format(L"[Polish] foreground changed: hwnd={} title=\"{}\" candidate={}",
@@ -815,6 +844,37 @@ void ReflowGroupTo(polish::GroupId id) {
     if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
         return;
     }
+    // A member's position is fully owned by GroupManager now -- but
+    // nothing else proactively notices when a window that restore-sync
+    // was already tracking (g_trackedWindow, from before it joined a
+    // group) becomes a member, since reparenting doesn't fire
+    // EVENT_SYSTEM_FOREGROUND. Left alone, every position change
+    // GroupManager makes to that member keeps re-triggering restore-
+    // sync's own settle-and-SetWindowPlacement logic on it -- two
+    // systems fighting over the same window's position, which is
+    // exactly what a real, confirmed flashing report traced back to.
+    // Cleared here (same reset as EVENT_OBJECT_DESTROY's cleanup)
+    // rather than only in OnForegroundChanged, since that path is never
+    // reached for this transition at all.
+    //
+    // This must run *before* ApplyLayout below, not after: membership
+    // itself doesn't depend on ApplyLayout having run (CreateGroup/
+    // SetMembers already populate it), but ApplyLayout is what actually
+    // reparents/repositions a brand-new member for the first time --
+    // and if that member happened to be g_trackedWindow (e.g. it was
+    // the foreground window when "New Group" was triggered, a common
+    // real case), its own EnsureReparented/PositionMember calls could
+    // fire the very location-change events this clear is meant to
+    // guard against, in the gap where tracking was still live. Clearing
+    // first closes that race regardless of how those events end up
+    // getting delivered.
+    if (g_trackedWindow != nullptr && group->Contains(g_trackedWindow)) {
+        g_trackedWindow = nullptr;
+        g_inMoveSizeLoop = false;
+        g_pendingSettleRect.reset();
+        KillTimer(g_messageWindow, kSettleTimerId);
+    }
+
     const HWND chromeHandle = chromeIt->second->Handle();
     const RECT contentRect = chromeIt->second->ContentRectInClientCoords();
     const SIZE needed =
@@ -829,25 +889,6 @@ void ReflowGroupTo(polish::GroupId id) {
     // every reflow -- see kThumbnailRefreshTimerId's own comment for
     // why a single synchronous capture isn't always enough.
     SetTimer(g_messageWindow, kThumbnailRefreshTimerId, kThumbnailRefreshDelayMs, nullptr);
-
-    // A member's position is fully owned by GroupManager now -- but
-    // nothing else proactively notices when a window that restore-sync
-    // was already tracking (g_trackedWindow, from before it joined a
-    // group) becomes a member, since reparenting doesn't fire
-    // EVENT_SYSTEM_FOREGROUND. Left alone, every position change
-    // GroupManager makes to that member keeps re-triggering restore-
-    // sync's own settle-and-SetWindowPlacement logic on it -- two
-    // systems fighting over the same window's position, which is
-    // exactly what a real, confirmed flashing report traced back to.
-    // Cleared here (same reset as EVENT_OBJECT_DESTROY's cleanup)
-    // rather than only in OnForegroundChanged, since that path is never
-    // reached for this transition at all.
-    if (g_trackedWindow != nullptr && group->Contains(g_trackedWindow)) {
-        g_trackedWindow = nullptr;
-        g_inMoveSizeLoop = false;
-        g_pendingSettleRect.reset();
-        KillTimer(g_messageWindow, kSettleTimerId);
-    }
 
     const int requestedWidth = contentRect.right - contentRect.left;
     const int requestedHeight = contentRect.bottom - contentRect.top;
