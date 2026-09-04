@@ -1469,3 +1469,31 @@ scoped:
   selected-window highlight (`AltTabHighlightBorder`) to a thinner
   line, about the same size as the tile-mode resize splitter, and
   fully opaque (no transparency) instead of its current look.
+- **Taskbar icon click cycles windows**: clicking a taskbar icon that
+  has 2+ windows grouped under it should cycle through them (matching
+  a behavior some other taskbar tools/older Windows versions have),
+  rather than just showing the thumbnail preview strip or activating
+  whichever was last active.
+- **Reorder windows within a taskbar icon's group**: let the user
+  reorder the windows grouped under one taskbar icon (affects the
+  order they're cycled through and/or shown in the thumbnail strip).
+- **Alt+Tab as a full list, not just cycling**: show every open window
+  as a list so you can see how many there are and where you currently
+  are in the cycle, not just one highlighted window at a time. Support
+  clicking directly on a window in the list to jump straight to it,
+  and arrow-key navigation through the list (not just repeated Tab).
+- **Alt+Tab minimized-windows list**: show minimized windows in their
+  own list, reachable via click or cursor keys, but *not* mixed into
+  the main Alt+Tab cycle order itself (today `IsCandidateWindow`-based
+  cycling already excludes minimized windows from the cycle -- this
+  would add a separate, deliberately-reached view for them instead of
+  surfacing them unprompted).
+- **Consider switching to WinUI3** for a more modern/up-to-date GUI
+  look, instead of the current plain GDI-drawn chrome. Open question,
+  not a decision -- would touch essentially every custom-drawn window
+  in this codebase (`GroupChromeWindow`, `GroupPickerWindow`,
+  `GroupTabThumbnail`, `AltTabHighlightBorder`/`AltTabDimOverlay`,
+  `GroupHotkeyDialog`) and is a large enough shift (different
+  packaging/deployment model, XAML Islands or a full WinUI3 app host)
+  to warrant its own research/spike pass before committing, not
+  something to fold into an unrelated fix.

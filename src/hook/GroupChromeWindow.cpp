@@ -4,11 +4,9 @@
 #include <windowsx.h>
 
 #include <algorithm>
-#include <format>
 
 #include "resource.h"
 #include "util/DarkMode.h"
-#include "util/Logging.h"
 
 namespace polish {
 
@@ -765,8 +763,6 @@ void GroupChromeWindow::InvalidateTabStrip() {
     if (window_ == nullptr) {
         return;
     }
-    LogDebug(
-        std::format(L"[Polish][DIAG] chrome hwnd={} InvalidateTabStrip", reinterpret_cast<void*>(window_)));
     RECT client{};
     GetClientRect(window_, &client);
     const UINT dpi = GetDpiForWindow(window_);
@@ -932,8 +928,6 @@ void GroupChromeWindow::GrowContentAreaTo(SIZE minContentSize) {
 void GroupChromeWindow::SetActiveIndex(size_t index) {
     activeIndex_ = index;
     if (window_ != nullptr) {
-        LogDebug(std::format(L"[Polish][DIAG] chrome hwnd={} SetActiveIndex index={} -> full invalidate",
-                              reinterpret_cast<void*>(window_), index));
         InvalidateRect(window_, nullptr, TRUE);
     }
 }
@@ -956,8 +950,6 @@ void GroupChromeWindow::SetMemberTitles(const std::vector<std::wstring>& titles)
     }
     memberTitles_ = titles;
     if (window_ != nullptr) {
-        LogDebug(std::format(L"[Polish][DIAG] chrome hwnd={} SetMemberTitles (changed) -> full invalidate",
-                              reinterpret_cast<void*>(window_)));
         InvalidateRect(window_, nullptr, TRUE);
     }
 }

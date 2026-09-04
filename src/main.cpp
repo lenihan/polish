@@ -824,7 +824,6 @@ void RefreshAllHiddenThumbnails() {
 // correctly filling its (now larger) share of the group instead of
 // visibly spilling outside it.
 void ReflowGroupTo(polish::GroupId id) {
-    polish::LogDebug(std::format(L"[Polish][DIAG] ReflowGroupTo id={} reentrant={}", id, g_reflowGrowInProgress));
     if (g_reflowGrowInProgress) {
         // GrowContentAreaTo's own SetWindowPos call below fires WM_SIZE
         // synchronously, which re-enters here via GroupChromeWindow's
@@ -1170,7 +1169,6 @@ void ActivateGroupTab(polish::GroupId id, size_t index) {
     // Clicking a tab commits to switching -- the hover preview (if
     // still showing, e.g. the click landed before the mouse settled
     // elsewhere) has nothing left to preview.
-    polish::LogDebug(std::format(L"[Polish][DIAG] ActivateGroupTab id={} index={}", id, index));
     HideGroupTabThumbnail(id);
     group->SetActiveIndex(index);
     chromeIt->second->SetActiveIndex(index);

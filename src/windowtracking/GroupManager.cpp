@@ -2,9 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <format>
-
-#include "util/Logging.h"
 
 namespace polish {
 
@@ -119,7 +116,6 @@ void GroupManager::ReleaseMember(HWND hwnd) {
 }
 
 void GroupManager::CaptureThumbnail(HWND hwnd) {
-    LogDebug(std::format(L"[Polish][DIAG] CaptureThumbnail hwnd={}", reinterpret_cast<void*>(hwnd)));
     RestoreIfMaximized(hwnd);
 
     // A member captured immediately after EnsureReparented's SetParent/
@@ -138,13 +134,18 @@ void GroupManager::CaptureThumbnail(HWND hwnd) {
     //      this one, including the pending WM_NCCALCSIZE/WM_SIZE from
     //      the style/parent change.
     //   2. RedrawWindow(RDW_UPDATENOW) then forces a synchronous
-    //      repaint at whatever layout the window now has -- same
-    //      technique PositionMember already uses for a member being
-    //      shown (fixed "blank until redraw" there); this member never
-    //      goes through that path since it's about to be hidden, not
-    //      shown.
+    //      repaint at whatever layout the window now has. No RDW_ERASE
+    //      -- confirmed via diagnostic logging that RDW_ERASE here
+    //      visibly flashed a member's own header when it was captured
+    //      while still on-screen mid tab-switch; RDW_UPDATENOW alone
+    //      still forces the real fix, the synchronous WM_PAINT. hwnd is
+    //      never actually hidden by this call (a non-active member
+    //      stays WS_VISIBLE at all times now -- see ApplyTabLayout --
+    //      just covered by whichever member is on top of the Z-order),
+    //      so this redraw happens fully behind an opaque window and is
+    //      never itself visible to the user.
     SendMessageW(hwnd, WM_NULL, 0, 0);
-    RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE);
+    RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
 
     RECT client{};
     GetClientRect(hwnd, &client);
@@ -182,8 +183,18 @@ HBITMAP GroupManager::CachedThumbnail(HWND hwnd) const {
 }
 
 bool GroupManager::RefreshThumbnail(HWND hwnd) {
-    if (!IsWindow(hwnd) || IsWindowVisible(hwnd)) {
-        return false;  // active/visible members don't need a cached thumbnail
+    if (!IsWindow(hwnd)) {
+        return false;
+    }
+    // A Tab-mode member stays WS_VISIBLE at all times now (see
+    // ApplyTabLayout's Z-order-only tab switching) -- IsWindowVisible
+    // can no longer tell an active member apart from an inactive,
+    // merely-covered one, since both are visible. Only the active
+    // member (the one actually on top of the Z-order, doing double
+    // duty as its own "thumbnail") is skipped here now.
+    if (const GroupState* group = FindGroupContaining(hwnd);
+        group != nullptr && group->ActiveWindow().has_value() && *group->ActiveWindow() == hwnd) {
+        return false;
     }
 
     UINT32 oldFingerprint = 0;
@@ -223,8 +234,6 @@ namespace {
 // real user report) -- so a caller that only trusts the requested rect
 // would leave that member visibly overflowing the group.
 RECT PositionMember(HWND hwnd, const RECT& rect, bool visible) {
-    LogDebug(std::format(L"[Polish][DIAG] PositionMember hwnd={} visible={}", reinterpret_cast<void*>(hwnd),
-                          visible));
     RestoreIfMaximized(hwnd);
     SetWindowPos(hwnd, nullptr, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
                  SWP_NOZORDER | SWP_NOACTIVATE | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
@@ -236,7 +245,22 @@ RECT PositionMember(HWND hwnd, const RECT& rect, bool visible) {
         // on a stale/uncomposited DWM redirection surface until
         // something forces it to redraw; RDW_ALLCHILDREN covers apps
         // like Explorer that are themselves made of child panes.
-        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE);
+        //
+        // No RDW_ERASE, though -- confirmed via diagnostic logging that
+        // this exact call, on every single tab switch, correlates
+        // precisely with a visible flash of Explorer's own header/
+        // ribbon (not the rest of its content). RDW_ERASE forces
+        // WM_ERASEBKGND across every one of Explorer's own child panes
+        // before they repaint, and that erase-then-repaint step is what
+        // was visibly flashing -- the same class of bug already fixed
+        // twice this session for our own windows, just happening inside
+        // a different process's child controls here, where there's no
+        // WM_ERASEBKGND to override ourselves. RDW_UPDATENOW alone still
+        // forces a synchronous WM_PAINT across every child (via
+        // RDW_ALLCHILDREN), which is what actually resolves the stale-
+        // surface content the erase was originally added alongside --
+        // the erase itself was never the part fixing that.
+        RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
     }
     RECT actual{};
     GetWindowRect(hwnd, &actual);
@@ -263,47 +287,42 @@ SIZE GroupManager::ApplyTabLayout(const GroupState& group, HWND /*chromeWindow*/
     const int requestedHeight = contentRect.bottom - contentRect.top;
     int neededWidth = requestedWidth;
     int neededHeight = requestedHeight;
-
-    // Two passes, not one: every *inactive* member is hidden first,
-    // and the active member is shown (and redrawn -- see
-    // PositionMember) strictly last. In member-list order within a
-    // single pass, switching back to an earlier member in the list
-    // would show+redraw it before a later member's hide ran -- a real,
-    // confirmed case of that later hide visibly undoing the earlier
-    // member's redraw (switching to tab 2 worked; switching back to
-    // tab 1 showed blank). Doing every hide before the one show
-    // guarantees the show+redraw is never followed by anything else
-    // touching the group's content area.
     const std::optional<HWND> active = group.ActiveWindow();
+
+    // Every member stays WS_VISIBLE at all times -- switching tabs only
+    // restacks Z-order (the active member to the top among its
+    // siblings), never hides or shows anything. This replaced an
+    // earlier hide-inactive/show-active design after a real, confirmed
+    // report: switching tabs visibly flashed a member's own header
+    // (Explorer specifically) even after the redraw flags layered on
+    // top of the hide/show cycle were themselves ruled out one at a
+    // time (RDW_ERASE removed from both PositionMember's and
+    // CaptureThumbnail's redraw calls, thumbnail capture disabled
+    // entirely) and the flash persisted through all of it. The
+    // deciding test: switching between two *standalone* (non-grouped)
+    // Explorer windows via title-bar clicks -- Z-order only, nothing
+    // ever hidden -- never flashed, unlike this group's tab switch.
+    // Hiding and later re-showing a window is a materially heavier
+    // operation for DWM/the app than a plain Z-order restack, which is
+    // presumably why. Since a non-active member is only ever *covered*
+    // now, never actually hidden, RefreshThumbnail/CaptureThumbnail no
+    // longer key off IsWindowVisible to find capture candidates -- see
+    // their own comments.
     for (const GroupMember& member : group.Members()) {
         if (member.kind != GroupMemberKind::Window || member.window == nullptr || !IsWindow(member.window)) {
             continue;  // nested-group case -- v1 never populates this
         }
-        const bool isActive = active.has_value() && member.window == *active;
-        if (isActive) {
-            continue;  // handled after this loop, once every hide is done
-        }
-        if (IsWindowVisible(member.window)) {
-            // This is the exact transition from visible to hidden --
-            // the only reliable moment to capture a thumbnail. A *live*
-            // capture taken later, while hovering an already-hidden
-            // tab, returns blank content for composited apps (Settings,
-            // Outlook -- confirmed via a compiled spike, not assumed);
-            // capturing here, every reflow pass, would be wrong too
-            // (this loop also runs on plain resizes with no actual
-            // active-tab change, which would recapture an
-            // already-hidden -- and therefore already-blank -- member
-            // and clobber a previously-good cached snapshot).
-            CaptureThumbnail(member.window);
-        }
-        const RECT actualRect = PositionMember(member.window, contentRect, false);
-        neededWidth = std::max(neededWidth, static_cast<int>(actualRect.right - actualRect.left));
-        neededHeight = std::max(neededHeight, static_cast<int>(actualRect.bottom - actualRect.top));
+        RestoreIfMaximized(member.window);
+        SetWindowPos(member.window, nullptr, contentRect.left, contentRect.top,
+                     contentRect.right - contentRect.left, contentRect.bottom - contentRect.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        RECT actual{};
+        GetWindowRect(member.window, &actual);
+        neededWidth = std::max(neededWidth, static_cast<int>(actual.right - actual.left));
+        neededHeight = std::max(neededHeight, static_cast<int>(actual.bottom - actual.top));
     }
     if (active.has_value() && IsWindow(*active)) {
-        const RECT actualRect = PositionMember(*active, contentRect, true);
-        neededWidth = std::max(neededWidth, static_cast<int>(actualRect.right - actualRect.left));
-        neededHeight = std::max(neededHeight, static_cast<int>(actualRect.bottom - actualRect.top));
+        SetWindowPos(*active, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     return SIZE{neededWidth, neededHeight};
