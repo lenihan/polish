@@ -527,7 +527,14 @@ for hire.
 - Full `docs/LIMITATIONS.md` pass and manual test matrix once the above
   land.
 
-### 4. Window groups (tab and tile) — in progress, branch `containers`
+### 4. Window groups (tab and tile) — shipped, merged to `main` (2026-09-04)
+
+Was branch `containers`; merged into `main` via fast-forward on
+2026-09-04 (27 commits) and pushed to `origin/main`. The `containers`
+branch itself is stale now (fully contained in `main`, nothing left to
+land from it) — work from `main` going forward. Still-open items for
+this feature are captured below and in "Future ideas / backlog" near
+the end of this file, not on a separate branch.
 
 Replaces Windows' old "Cascade windows" taskbar option: a group brings
 multiple real windows together, switchable via tabs (like browser tabs)
