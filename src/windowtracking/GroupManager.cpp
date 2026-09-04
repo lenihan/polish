@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
+
+#include "util/Logging.h"
 
 namespace polish {
 
@@ -116,6 +119,7 @@ void GroupManager::ReleaseMember(HWND hwnd) {
 }
 
 void GroupManager::CaptureThumbnail(HWND hwnd) {
+    LogDebug(std::format(L"[Polish][DIAG] CaptureThumbnail hwnd={}", reinterpret_cast<void*>(hwnd)));
     RestoreIfMaximized(hwnd);
 
     // A member captured immediately after EnsureReparented's SetParent/
@@ -219,6 +223,8 @@ namespace {
 // real user report) -- so a caller that only trusts the requested rect
 // would leave that member visibly overflowing the group.
 RECT PositionMember(HWND hwnd, const RECT& rect, bool visible) {
+    LogDebug(std::format(L"[Polish][DIAG] PositionMember hwnd={} visible={}", reinterpret_cast<void*>(hwnd),
+                          visible));
     RestoreIfMaximized(hwnd);
     SetWindowPos(hwnd, nullptr, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
                  SWP_NOZORDER | SWP_NOACTIVATE | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));

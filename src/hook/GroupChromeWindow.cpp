@@ -4,9 +4,11 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <format>
 
 #include "resource.h"
 #include "util/DarkMode.h"
+#include "util/Logging.h"
 
 namespace polish {
 
@@ -180,7 +182,29 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             HDC hdc = BeginPaint(hwnd, &paint);
             RECT clientRect;
             GetClientRect(hwnd, &clientRect);
-            PaintTabStrip(hdc, clientRect);
+            // Double-buffered: PaintTabStrip issues many separate
+            // FillRect/DrawText/RoundRect calls (one active tab alone is
+            // several), and drawing those directly to the live screen
+            // HDC one at a time -- confirmed via diagnostic logging that
+            // a tab switch produces exactly one substantive WM_PAINT for
+            // the strip, not a repeated-invalidate storm -- is a classic
+            // source of visible flicker even from a single repaint, since
+            // DWM/the display can capture a partially-drawn frame.
+            // Rendering into an off-screen bitmap first and blitting the
+            // finished result in one BitBlt makes every repaint atomic
+            // from the screen's point of view.
+            const int width = clientRect.right - clientRect.left;
+            const int height = clientRect.bottom - clientRect.top;
+            if (width > 0 && height > 0) {
+                HDC memDC = CreateCompatibleDC(hdc);
+                HBITMAP memBitmap = CreateCompatibleBitmap(hdc, width, height);
+                HGDIOBJ oldBitmap = SelectObject(memDC, memBitmap);
+                PaintTabStrip(memDC, clientRect);
+                BitBlt(hdc, 0, 0, width, height, memDC, 0, 0, SRCCOPY);
+                SelectObject(memDC, oldBitmap);
+                DeleteObject(memBitmap);
+                DeleteDC(memDC);
+            }
             EndPaint(hwnd, &paint);
             return 0;
         }
@@ -741,6 +765,8 @@ void GroupChromeWindow::InvalidateTabStrip() {
     if (window_ == nullptr) {
         return;
     }
+    LogDebug(
+        std::format(L"[Polish][DIAG] chrome hwnd={} InvalidateTabStrip", reinterpret_cast<void*>(window_)));
     RECT client{};
     GetClientRect(window_, &client);
     const UINT dpi = GetDpiForWindow(window_);
@@ -906,6 +932,8 @@ void GroupChromeWindow::GrowContentAreaTo(SIZE minContentSize) {
 void GroupChromeWindow::SetActiveIndex(size_t index) {
     activeIndex_ = index;
     if (window_ != nullptr) {
+        LogDebug(std::format(L"[Polish][DIAG] chrome hwnd={} SetActiveIndex index={} -> full invalidate",
+                              reinterpret_cast<void*>(window_), index));
         InvalidateRect(window_, nullptr, TRUE);
     }
 }
@@ -928,6 +956,8 @@ void GroupChromeWindow::SetMemberTitles(const std::vector<std::wstring>& titles)
     }
     memberTitles_ = titles;
     if (window_ != nullptr) {
+        LogDebug(std::format(L"[Polish][DIAG] chrome hwnd={} SetMemberTitles (changed) -> full invalidate",
+                              reinterpret_cast<void*>(window_)));
         InvalidateRect(window_, nullptr, TRUE);
     }
 }
