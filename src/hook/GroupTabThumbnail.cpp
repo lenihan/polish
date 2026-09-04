@@ -18,6 +18,19 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lPara
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(createStruct->lpCreateParams));
         return DefWindowProcW(hwnd, message, wParam, lParam);
     }
+    if (message == WM_ERASEBKGND) {
+        // Same fix as GroupChromeWindow's own WM_ERASEBKGND override, for
+        // the same reason: the class's default background brush
+        // (COLOR_WINDOW, i.e. white) would otherwise paint on every
+        // erase -- visibly for a frame -- before WM_PAINT's StretchBlt
+        // draws the actual snapshot over it. WM_PAINT already fully
+        // repaints the client area on its own every time, so the
+        // default erase step here is pure overhead. A genuine
+        // improvement on its own, but not what a "flashes ~3 times on
+        // hover" user report traced back to -- that was the chrome
+        // window missing WS_CLIPCHILDREN (see GroupChromeWindow::Show).
+        return 1;
+    }
     if (message == WM_PAINT) {
         auto* snapshotPtr = reinterpret_cast<HBITMAP*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
         PAINTSTRUCT paint;

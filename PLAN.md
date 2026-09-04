@@ -1387,6 +1387,66 @@ after-release screenshots):
   position, matching the same "don't invalidate more than you need to"
   lesson already learned for the tab strip's own hover highlight.
 
+### Tile splitter polish: double-click-to-toggle, thinner resting look (2026-09-03)
+
+- **Double-click a splitter to snap to 50/50**, double-click again to
+  restore whatever custom split it had before. `GroupChromeWindow`
+  gained `CS_DBLCLKS` (off by default, required for
+  `WM_LBUTTONDBLCLK` to ever fire) and a `WM_LBUTTONDBLCLK` case that
+  hit-tests the splitter and fires a new
+  `onTileSplitterDoubleClicked_` callback. `main.cpp` owns the actual
+  toggle logic: `g_tileSplitterLastCustom`, keyed by
+  `(GroupId, column, index)`, remembers a pair's fractions right
+  before snapping to even, and clears once restored.
+- **Resting-state splitters now match the Windows 11 convention**
+  (Windows Terminal/VS Code/Settings-app style): a thin
+  `kSplitterRestWidth` (2px logical) hairline at rest, growing to the
+  full grabbable `kSplitterWidth` and switching to the accent color on
+  hover/drag — the reserved gap and hit-test target don't change size,
+  only what's painted at rest.
+
+### Real bug, fixed: reparented-member flashing (2026-09-03)
+
+User reported a group with even a single Notepad member flashing
+nonstop, and pushed back hard (correctly) after two guessed fixes in a
+row didn't hold up — a chrome-window-tracking exclusion for
+restore-sync, and a `g_trackedWindow`-clear reordering. Both were real,
+defensible issues (kept, since neither is wrong to have fixed) but
+neither was *the* cause. What actually found it: adding direct,
+per-call-site diagnostic logging (`LogDebug` calls tagging every
+`ReflowGroupTo` entry, every `SetWindowPos` in `PositionMember`, every
+chrome `WM_PAINT`/`WM_SIZE`, and — the one that mattered — every
+`InvalidateRect(window_, nullptr, ...)` call site individually) and
+reading back a live repro's log, rather than theorizing further.
+
+**Root cause**, confirmed directly in the log: a reparented member
+(a modern Notepad instance) fires `EVENT_OBJECT_NAMECHANGE` for its
+own title (`idObject`/`idChild` already correctly filtered to
+`OBJID_WINDOW`/`CHILDID_SELF`, so this isn't some noisier child
+control) continuously — many times per second — even though the title
+text itself never changes. Each event drove
+`OnMemberTitleChanged` → `SetMemberTitles`/`SetMemberIcons`, and both
+did an unconditional full-window `InvalidateRect`. That unconditional
+repaint, firing every few milliseconds, *was* the flashing. Root OS
+cause of the repeated `NAMECHANGE` itself is still unconfirmed (a
+reparented-into-another-process's-tree top-level window seems to
+provoke it) — not chased further since it didn't need to be.
+
+**Fix**: `SetMemberTitles`/`SetMemberIcons`
+(`GroupChromeWindow.cpp`) now compare against the currently-cached
+value first and skip the repaint entirely when nothing actually
+changed. Correct regardless of why the upstream event fires. User
+confirmed live: no longer flashes.
+
+**Lesson, worth keeping**: when a real, reproducible bug survives a
+plausible first fix, add targeted logging and get a live repro's log
+*before* proposing a second fix — don't chain guesses. The eventual
+fix here took two rounds of instrumentation (the first round proved
+the earlier fixes weren't it and pointed at full-window invalidates;
+the second round, tagging each invalidate call site individually,
+named the exact caller) and found the real cause in minutes once the
+log existed, after two guesses that didn't.
+
 ### Future ideas / backlog (not started, just captured)
 
 Requested in passing, worth remembering but not yet designed or

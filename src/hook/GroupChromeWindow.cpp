@@ -987,8 +987,20 @@ void GroupChromeWindow::Show(const std::vector<std::wstring>& memberTitles, Grou
     mode_ = mode;
 
     if (window_ == nullptr) {
-        window_ = CreateWindowExW(0, kWindowClassName, L"Group", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT,
-                                   CW_USEDEFAULT, 1200, 850, nullptr, nullptr, instance_, this);
+        // WS_CLIPCHILDREN -- confirmed real via diagnostic logging: a
+        // CaptureThumbnail call's own RedrawWindow(..., RDW_ERASE) on a
+        // *hidden* member (the tab being hovered, not the active one)
+        // was bubbling up into this window's own client area, forcing a
+        // full-client WM_PAINT that happened to cover the active
+        // member's rect too -- the parent never intentionally paints
+        // there (both Tab and Tile mode only ever draw in the header/
+        // gap space around members, never over them), so without this
+        // style there was nothing stopping that from visually
+        // interfering with the active member's own on-screen content.
+        // This is the standard Win32 fix for a parent with child
+        // windows it never means to paint over.
+        window_ = CreateWindowExW(0, kWindowClassName, L"Group", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+                                   CW_USEDEFAULT, CW_USEDEFAULT, 1200, 850, nullptr, nullptr, instance_, this);
         if (window_ != nullptr) {
             ApplyDarkTitleBar(window_, IsDarkModeEnabled());
         }
