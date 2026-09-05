@@ -464,37 +464,47 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         if (highlighted || hovered) {
             const RECT toggle = ComputeMinimizeToggleButtonRect(rowRect, dpi);
             const RECT close = ComputeCloseButtonRect(rowRect, dpi);
+            const COLORREF rowFillColor = highlighted ? accentColor : kHoverBackgroundColor;
             HPEN glyphPen = CreatePen(PS_SOLID, 1, kHighlightTextColor);
             HGDIOBJ oldPen = SelectObject(hdc, glyphPen);
             HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
 
             const int margin = Scale(kActionButtonGlyphMargin, dpi);
-            if (row.minimized) {
-                // Restore-from-minimized glyph: an upward chevron ("^") --
-                // deliberately not the same square-outline shape as the
-                // maximize glyph below, even though the two never appear
-                // on the same row, so a user scanning down the list never
-                // sees the same icon mean two different things.
-                const int midX = (toggle.left + toggle.right) / 2;
-                drawGlyphLine(toggle.left + margin, toggle.bottom - margin, midX, toggle.top + margin);
-                drawGlyphLine(midX, toggle.top + margin, toggle.right - margin, toggle.bottom - margin);
-            } else {
-                // Minimize glyph: a single horizontal line near the
-                // bottom of the box, matching the native title-bar
-                // minimize button's own glyph shape.
+            // Minimize/restore-toggle glyph: always the same single
+            // horizontal line near the bottom of the box (the native
+            // title-bar minimize glyph), on an active row and a minimized
+            // one alike -- rather than a second, unfamiliar glyph for
+            // "restore from minimized", the button just keeps reading as
+            // "the minimize control" in both of its states.
+            {
                 const int y = toggle.bottom - margin;
                 drawGlyphLine(toggle.left + margin, y, toggle.right - margin, y);
+            }
 
+            if (!row.minimized) {
                 // Maximize/restore-toggle, active rows only -- native
                 // Windows glyph shapes: a single square outline to
                 // maximize, two overlapping offset squares to restore.
                 const RECT maximizeToggle = ComputeMaximizeToggleButtonRect(rowRect, dpi);
                 if (IsZoomed(row.hwnd)) {
+                    // The native restore glyph's back square is only ever
+                    // partly visible -- its bottom-left portion sits
+                    // behind the front square. Filling the front square
+                    // with the row's own background color before
+                    // outlining it erases whatever of the back square's
+                    // outline would otherwise show through underneath,
+                    // the same opaque-front-face look the native glyph
+                    // has (plain NULL_BRUSH outlines would just show both
+                    // squares' lines crossing through each other instead).
                     const int offset = Scale(3, dpi);
                     Rectangle(hdc, maximizeToggle.left + margin + offset, maximizeToggle.top + margin,
                               maximizeToggle.right - margin, maximizeToggle.bottom - margin - offset);
+                    HBRUSH occludeBrush = CreateSolidBrush(rowFillColor);
+                    SelectObject(hdc, occludeBrush);
                     Rectangle(hdc, maximizeToggle.left + margin, maximizeToggle.top + margin + offset,
                               maximizeToggle.right - margin - offset, maximizeToggle.bottom - margin);
+                    SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                    DeleteObject(occludeBrush);
                 } else {
                     Rectangle(hdc, maximizeToggle.left + margin, maximizeToggle.top + margin,
                               maximizeToggle.right - margin, maximizeToggle.bottom - margin);
