@@ -30,6 +30,8 @@ current todo list.
   monitors are connected or disconnected.
 - Alt+Tab: fixed a bug where a hidden, title-less UWP host window could
   get selected instead of the real app (e.g. Settings).
+- Alt+Tab: a separate "Minimized" section (below an "Active" heading list)
+  reaches minimized windows via Up/Down without joining the Tab cycle.
 - Window groups (tab/tile mode): merged to main — combine multiple real
   windows into one taskbar entry, switchable via tabs or shown as tiles.
 - Groups: real window reparenting so members can't be dragged out
@@ -43,10 +45,11 @@ current todo list.
 
 ## Left to do
 
-- Alt+Tab: add a minimized-windows section to the list panel, separate
-  from the main cycle.
 - Alt+Tab: add per-row minimize/close action buttons on the highlighted
   row.
+- Alt+Tab: when a monitor's panel has more windows than fit on screen,
+  truncate with "..." and auto-scroll to keep the most important ones
+  (highlighted/MRU) visible.
 - Alt+Tab: diagnose a visual "shadow" left behind on a window after
   tabbing away from it.
 - Alt+Tab: confirm whether Settings still fails to come to front after

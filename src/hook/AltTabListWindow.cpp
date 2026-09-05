@@ -26,9 +26,17 @@ constexpr int kPanelCornerRadius = 10;
 constexpr int kRowCornerRadius = 6;
 // Extra vertical gap inserted once, between the last active row and the
 // first minimized row -- only present when both sections are non-empty
-// (see ComputeRowRects/Reposition, which must agree on this exactly, and
-// Paint, which draws the actual divider line centered in it).
-constexpr int kSectionGapHeight = 16;
+// (see ComputeLayout, the one place this and kHeaderHeight are turned
+// into actual rects).
+constexpr int kSectionGapHeight = 10;
+// Height of the "Active"/"Minimized" heading above each non-empty
+// section -- smaller than kRowHeight since it carries a single small
+// label, not an icon+title row.
+constexpr int kHeaderHeight = 22;
+// Section heading font is the same face as row text (see Paint), just
+// shrunk relative to it -- a second distinct system font would be
+// overkill for one label.
+constexpr double kHeaderFontScale = 0.85;
 
 // The whole window (background AND row content) is rendered at this one
 // constant alpha -- a "frosted, see-through-but-legible" panel doesn't
@@ -45,6 +53,7 @@ constexpr COLORREF kHighlightTextColor = RGB(255, 255, 255);
 // alpha is a single flat value across the whole window, see kPanelAlpha).
 constexpr COLORREF kMinimizedTextColor = RGB(165, 165, 165);
 constexpr COLORREF kSectionDividerColor = RGB(80, 80, 80);
+constexpr COLORREF kHeaderTextColor = RGB(150, 150, 150);
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
@@ -132,7 +141,7 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
         case WM_LBUTTONDOWN: {
             const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             const UINT dpi = GetDpiForWindow(hwnd);
-            const std::vector<RECT> rowRects = ComputeRowRects(dpi);
+            const std::vector<RECT> rowRects = ComputeLayout(dpi).rowRects;
             for (size_t i = 0; i < rowRects.size() && i < rows_.size(); ++i) {
                 RECT r = rowRects[i];  // PtInRect takes a non-const RECT*
                 if (PtInRect(&r, pt)) {
@@ -163,23 +172,40 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
     }
 }
 
-std::vector<RECT> AltTabListWindow::ComputeRowRects(UINT dpi) const {
-    std::vector<RECT> rects;
-    rects.reserve(rows_.size());
+AltTabListWindow::RowLayout AltTabListWindow::ComputeLayout(UINT dpi) const {
+    RowLayout layout;
+    layout.rowRects.reserve(rows_.size());
     const int paddingX = Scale(kPanelPaddingX, dpi);
     const int paddingY = Scale(kPanelPaddingY, dpi);
     const int rowHeight = Scale(kRowHeight, dpi);
+    const int headerHeight = Scale(kHeaderHeight, dpi);
     const int sectionGap = Scale(kSectionGapHeight, dpi);
     const int width = Scale(kPanelWidth, dpi) - 2 * paddingX;
+
+    const bool hasActiveRow = std::any_of(rows_.begin(), rows_.end(), [](const AltTabListRow& r) { return !r.minimized; });
+
     int top = paddingY;
+    if (hasActiveRow) {
+        layout.activeHeaderRect = RECT{paddingX, top, paddingX + width, top + headerHeight};
+        top += headerHeight;
+    }
     for (size_t i = 0; i < rows_.size(); ++i) {
-        if (i > 0 && rows_[i].minimized && !rows_[i - 1].minimized) {
-            top += sectionGap;
+        // First minimized row reached -- insert its section heading here.
+        // A gap only precedes it when active rows came before (i.e. this
+        // isn't the very first thing in the panel); a monitor panel with
+        // only minimized candidates needs no such gap.
+        if (rows_[i].minimized && !layout.minimizedHeaderRect.has_value()) {
+            if (i > 0) {
+                top += sectionGap;
+            }
+            layout.minimizedHeaderRect = RECT{paddingX, top, paddingX + width, top + headerHeight};
+            top += headerHeight;
         }
-        rects.push_back(RECT{paddingX, top, paddingX + width, top + rowHeight});
+        layout.rowRects.push_back(RECT{paddingX, top, paddingX + width, top + rowHeight});
         top += rowHeight;
     }
-    return rects;
+    layout.contentHeight = top + paddingY;
+    return layout;
 }
 
 void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
@@ -203,32 +229,56 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     metrics.cbSize = sizeof(metrics);
     SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi);
     HFONT textFont = CreateFontIndirectW(&metrics.lfMessageFont);
-    HGDIOBJ oldFont = SelectObject(hdc, textFont);
 
+    // Section headings reuse the row font's face, just shrunk -- see
+    // kHeaderFontScale. lfHeight stays negative (its usual "match this
+    // character height" convention) after scaling since it's just scaled
+    // in magnitude.
+    LOGFONTW headerLogFont = metrics.lfMessageFont;
+    headerLogFont.lfHeight = static_cast<LONG>(headerLogFont.lfHeight * kHeaderFontScale);
+    headerLogFont.lfWeight = FW_SEMIBOLD;
+    HFONT headerFont = CreateFontIndirectW(&headerLogFont);
+
+    HGDIOBJ oldFont = SelectObject(hdc, textFont);
     SetBkMode(hdc, TRANSPARENT);
-    const std::vector<RECT> rowRects = ComputeRowRects(dpi);
+    const RowLayout layout = ComputeLayout(dpi);
     const int iconSize = Scale(kIconSize, dpi);
     const int rowPaddingX = Scale(kRowPaddingX, dpi);
     const int iconTextGap = Scale(kIconTextGap, dpi);
     const int rowCornerRadius = Scale(kRowCornerRadius, dpi);
+    const int sectionGap = Scale(kSectionGapHeight, dpi);
     const COLORREF accentColor = GetAccentColor();
 
-    for (size_t i = 0; i < rowRects.size() && i < rows_.size(); ++i) {
-        const RECT& rowRect = rowRects[i];
-        const bool highlighted = (highlightIndex_.has_value() && *highlightIndex_ == i);
-
-        // Divider between the active and minimized sections -- drawn
-        // centered in the gap ComputeRowRects/Reposition already reserved,
-        // right before the first row where `minimized` flips true.
-        if (i > 0 && rows_[i].minimized && !rows_[i - 1].minimized) {
-            const int dividerY = (rowRects[i - 1].bottom + rowRect.top) / 2;
+    SelectObject(hdc, headerFont);
+    SetTextColor(hdc, kHeaderTextColor);
+    if (layout.activeHeaderRect) {
+        RECT r = *layout.activeHeaderRect;
+        r.left += rowPaddingX;
+        DrawTextW(hdc, L"Active", -1, &r, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    }
+    if (layout.minimizedHeaderRect) {
+        // A divider line above the heading, but only when it's not the
+        // very first thing in the panel (a monitor with only minimized
+        // candidates has nothing above it to divide from).
+        if (layout.activeHeaderRect) {
+            const int dividerY = layout.minimizedHeaderRect->top - sectionGap / 2;
             HPEN dividerPen = CreatePen(PS_SOLID, 1, kSectionDividerColor);
             HGDIOBJ oldPen = SelectObject(hdc, dividerPen);
-            MoveToEx(hdc, rowRect.left, dividerY, nullptr);
-            LineTo(hdc, rowRect.right, dividerY);
+            MoveToEx(hdc, layout.minimizedHeaderRect->left, dividerY, nullptr);
+            LineTo(hdc, layout.minimizedHeaderRect->right, dividerY);
             SelectObject(hdc, oldPen);
             DeleteObject(dividerPen);
         }
+        RECT r = *layout.minimizedHeaderRect;
+        r.left += rowPaddingX;
+        DrawTextW(hdc, L"Minimized", -1, &r, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    }
+    SelectObject(hdc, textFont);
+
+    const std::vector<RECT>& rowRects = layout.rowRects;
+    for (size_t i = 0; i < rowRects.size() && i < rows_.size(); ++i) {
+        const RECT& rowRect = rowRects[i];
+        const bool highlighted = (highlightIndex_.has_value() && *highlightIndex_ == i);
 
         if (highlighted) {
             HBRUSH accentBrush = CreateSolidBrush(accentColor);
@@ -257,23 +307,12 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
 
     SelectObject(hdc, oldFont);
     DeleteObject(textFont);
+    DeleteObject(headerFont);
 }
 
 void AltTabListWindow::Reposition(HMONITOR targetMonitor, UINT dpi) {
-    const int paddingY = Scale(kPanelPaddingY, dpi);
-    const int rowHeight = Scale(kRowHeight, dpi);
     const int width = Scale(kPanelWidth, dpi);
-    // Mirrors ComputeRowRects' own gap-insertion rule exactly (at most one
-    // gap, only when a minimized row directly follows an active one) --
-    // computed independently here rather than deriving from
-    // ComputeRowRects' last rect so this can run before rows_ has ever
-    // been laid out once at this DPI.
-    const bool hasSectionGap =
-        std::adjacent_find(rows_.begin(), rows_.end(), [](const AltTabListRow& a, const AltTabListRow& b) {
-            return !a.minimized && b.minimized;
-        }) != rows_.end();
-    const int height =
-        2 * paddingY + static_cast<int>(rows_.size()) * rowHeight + (hasSectionGap ? Scale(kSectionGapHeight, dpi) : 0);
+    const int height = ComputeLayout(dpi).contentHeight;
 
     MONITORINFO monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
@@ -333,7 +372,7 @@ void AltTabListWindow::SetHighlight(std::optional<size_t> index) {
         return;
     }
     const UINT dpi = GetDpiForWindow(window_);
-    const std::vector<RECT> rowRects = ComputeRowRects(dpi);
+    const std::vector<RECT> rowRects = ComputeLayout(dpi).rowRects;
     // Narrow invalidate -- just the row(s) that actually change look, not
     // the whole panel. This codebase has hit the "unconditional full
     // repaint causes visible flashing" bug shape more than once already

@@ -120,11 +120,29 @@ public:
     void SetOnRowActivated(std::function<void(HWND)> callback) { onRowActivated_ = std::move(callback); }
 
 private:
+    // "Active"/"Minimized" section headings sit above their respective
+    // rows -- computed alongside row layout, not as separate rows
+    // themselves, so they're never mistaken for a clickable/highlightable
+    // row by WM_LBUTTONDOWN or SetHighlight (both only ever look at
+    // rowRects). Either optional is unset when that section has no rows
+    // to head (e.g. a monitor whose panel only has minimized candidates
+    // has no activeHeaderRect).
+    struct RowLayout {
+        std::vector<RECT> rowRects;
+        std::optional<RECT> activeHeaderRect;
+        std::optional<RECT> minimizedHeaderRect;
+        int contentHeight = 0;
+    };
+
     static LRESULT CALLBACK WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
 
     void Paint(HDC hdc, const RECT& clientRect) const;
-    std::vector<RECT> ComputeRowRects(UINT dpi) const;
+    // Single source of truth for panel layout -- Reposition, Paint, and
+    // WM_LBUTTONDOWN/SetHighlight's row hit-testing all derive their rects
+    // from this one pass rather than each recomputing overlapping layout
+    // math that could quietly drift out of sync with each other.
+    RowLayout ComputeLayout(UINT dpi) const;
     // Resizes/repositions the panel (content-sized from the current row
     // count) centered on `targetMonitor`, at the given DPI.
     void Reposition(HMONITOR targetMonitor, UINT dpi);
