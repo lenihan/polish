@@ -17,15 +17,24 @@ struct AltTabListRow {
     HWND hwnd = nullptr;
     std::wstring title;
     HICON icon = nullptr;  // borrowed, may be nullptr (falls back to text-only)
+    // True for a row in the minimized section (see PLAN.md's Alt+Tab-
+    // improvements M4) -- drawn in a muted color, below a divider from
+    // the active-window rows above it. The caller (main.cpp) is
+    // responsible for keeping all minimized rows contiguous at the end
+    // of the vector passed to Show(); this class just draws a divider
+    // before the first row where this differs from the previous one.
+    bool minimized = false;
 };
 
 // A translucent panel shown alongside every Alt+Tab session, listing
 // active candidate windows (icon + title, one row each) with the
 // currently Tab-highlighted row visually marked -- so "where am I in the
 // cycle, and how many are there" is answered by looking at the list, not
-// just by which single on-screen window happens to be undimmed. See
-// PLAN.md's Alt+Tab-improvements plan (M3 lands the active-window list;
-// M4 adds a minimized section below it; M5 adds per-row action buttons).
+// just by which single on-screen window happens to be undimmed. A second
+// section below it (rows with AltTabListRow::minimized set, separated by
+// a divider) lists minimized windows -- reachable via Up/Down but never
+// part of the Tab/Shift+Tab cycle itself (see PLAN.md's Alt+Tab-
+// improvements M4; M5 -- per-row action buttons -- is still unbuilt).
 //
 // On a multi-monitor setup, per explicit user request, one instance of
 // this class exists *per connected monitor* (see main.cpp's

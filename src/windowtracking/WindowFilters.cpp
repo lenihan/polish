@@ -2,11 +2,11 @@
 
 namespace polish {
 
-bool IsCandidateWindow(HWND hwnd) {
+bool IsCandidateWindowShape(HWND hwnd) {
     if (hwnd == nullptr || !IsWindow(hwnd)) {
         return false;
     }
-    if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) {
+    if (!IsWindowVisible(hwnd)) {
         return false;
     }
     if (GetWindow(hwnd, GW_OWNER) != nullptr) {
@@ -39,6 +39,10 @@ bool IsCandidateWindow(HWND hwnd) {
     }
     return true;
 }
+
+bool IsCandidateWindow(HWND hwnd) { return IsCandidateWindowShape(hwnd) && !IsIconic(hwnd); }
+
+bool IsMinimizedCandidateWindow(HWND hwnd) { return IsCandidateWindowShape(hwnd) && IsIconic(hwnd); }
 
 bool IsElevatedWindow(HWND hwnd) {
     DWORD pid = 0;

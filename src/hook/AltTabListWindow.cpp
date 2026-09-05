@@ -24,6 +24,11 @@ constexpr int kIconSize = 24;
 constexpr int kIconTextGap = 10;
 constexpr int kPanelCornerRadius = 10;
 constexpr int kRowCornerRadius = 6;
+// Extra vertical gap inserted once, between the last active row and the
+// first minimized row -- only present when both sections are non-empty
+// (see ComputeRowRects/Reposition, which must agree on this exactly, and
+// Paint, which draws the actual divider line centered in it).
+constexpr int kSectionGapHeight = 16;
 
 // The whole window (background AND row content) is rendered at this one
 // constant alpha -- a "frosted, see-through-but-legible" panel doesn't
@@ -35,6 +40,11 @@ constexpr BYTE kPanelAlpha = 235;
 constexpr COLORREF kBackgroundColor = RGB(32, 32, 32);
 constexpr COLORREF kTextColor = RGB(240, 240, 240);
 constexpr COLORREF kHighlightTextColor = RGB(255, 255, 255);
+// Muted relative to kTextColor -- reads as "not currently on screen"
+// without needing a second font or per-pixel alpha (the panel's own
+// alpha is a single flat value across the whole window, see kPanelAlpha).
+constexpr COLORREF kMinimizedTextColor = RGB(165, 165, 165);
+constexpr COLORREF kSectionDividerColor = RGB(80, 80, 80);
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
@@ -159,10 +169,15 @@ std::vector<RECT> AltTabListWindow::ComputeRowRects(UINT dpi) const {
     const int paddingX = Scale(kPanelPaddingX, dpi);
     const int paddingY = Scale(kPanelPaddingY, dpi);
     const int rowHeight = Scale(kRowHeight, dpi);
+    const int sectionGap = Scale(kSectionGapHeight, dpi);
     const int width = Scale(kPanelWidth, dpi) - 2 * paddingX;
+    int top = paddingY;
     for (size_t i = 0; i < rows_.size(); ++i) {
-        const int top = paddingY + static_cast<int>(i) * rowHeight;
+        if (i > 0 && rows_[i].minimized && !rows_[i - 1].minimized) {
+            top += sectionGap;
+        }
         rects.push_back(RECT{paddingX, top, paddingX + width, top + rowHeight});
+        top += rowHeight;
     }
     return rects;
 }
@@ -201,6 +216,20 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     for (size_t i = 0; i < rowRects.size() && i < rows_.size(); ++i) {
         const RECT& rowRect = rowRects[i];
         const bool highlighted = (highlightIndex_.has_value() && *highlightIndex_ == i);
+
+        // Divider between the active and minimized sections -- drawn
+        // centered in the gap ComputeRowRects/Reposition already reserved,
+        // right before the first row where `minimized` flips true.
+        if (i > 0 && rows_[i].minimized && !rows_[i - 1].minimized) {
+            const int dividerY = (rowRects[i - 1].bottom + rowRect.top) / 2;
+            HPEN dividerPen = CreatePen(PS_SOLID, 1, kSectionDividerColor);
+            HGDIOBJ oldPen = SelectObject(hdc, dividerPen);
+            MoveToEx(hdc, rowRect.left, dividerY, nullptr);
+            LineTo(hdc, rowRect.right, dividerY);
+            SelectObject(hdc, oldPen);
+            DeleteObject(dividerPen);
+        }
+
         if (highlighted) {
             HBRUSH accentBrush = CreateSolidBrush(accentColor);
             HPEN nullPen = static_cast<HPEN>(GetStockObject(NULL_PEN));
@@ -222,7 +251,7 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         }
 
         RECT textRect{textLeft, rowRect.top, rowRect.right - rowPaddingX, rowRect.bottom};
-        SetTextColor(hdc, highlighted ? kHighlightTextColor : kTextColor);
+        SetTextColor(hdc, highlighted ? kHighlightTextColor : (row.minimized ? kMinimizedTextColor : kTextColor));
         DrawTextW(hdc, row.title.c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
 
@@ -234,7 +263,17 @@ void AltTabListWindow::Reposition(HMONITOR targetMonitor, UINT dpi) {
     const int paddingY = Scale(kPanelPaddingY, dpi);
     const int rowHeight = Scale(kRowHeight, dpi);
     const int width = Scale(kPanelWidth, dpi);
-    const int height = 2 * paddingY + static_cast<int>(rows_.size()) * rowHeight;
+    // Mirrors ComputeRowRects' own gap-insertion rule exactly (at most one
+    // gap, only when a minimized row directly follows an active one) --
+    // computed independently here rather than deriving from
+    // ComputeRowRects' last rect so this can run before rows_ has ever
+    // been laid out once at this DPI.
+    const bool hasSectionGap =
+        std::adjacent_find(rows_.begin(), rows_.end(), [](const AltTabListRow& a, const AltTabListRow& b) {
+            return !a.minimized && b.minimized;
+        }) != rows_.end();
+    const int height =
+        2 * paddingY + static_cast<int>(rows_.size()) * rowHeight + (hasSectionGap ? Scale(kSectionGapHeight, dpi) : 0);
 
     MONITORINFO monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
