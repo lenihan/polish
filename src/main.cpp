@@ -1249,6 +1249,16 @@ void OnAltTabRowMaximizeToggle(HWND hwnd) {
     g_altTabHighlightIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), it));
     g_altTabSelectionInMinimized = false;
     ApplyAltTabDimming();
+    // ApplyAltTabDimming's own panel-refresh only repaints when the
+    // candidate list or highlight index actually changed -- neither did
+    // here (hwnd stayed in the same slot), so without this the row's
+    // maximize/restore glyph would keep showing its pre-toggle state
+    // until some other, unrelated change happened to trigger a repaint.
+    // Confirmed as a real, human-reported bug: the icon didn't update
+    // immediately after clicking it.
+    for (auto& panel : g_altTabPanels) {
+        panel.window->RepaintRow(hwnd);
+    }
 }
 
 // Fired by AltTabListWindow's close ("X") button on the highlighted row

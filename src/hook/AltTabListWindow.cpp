@@ -637,6 +637,23 @@ void AltTabListWindow::SetHoveredIndex(std::optional<size_t> index) {
     }
 }
 
+void AltTabListWindow::RepaintRow(HWND hwnd) {
+    if (window_ == nullptr) {
+        return;
+    }
+    const auto it = std::find_if(rows_.begin(), rows_.end(), [hwnd](const AltTabListRow& r) { return r.hwnd == hwnd; });
+    if (it == rows_.end()) {
+        return;
+    }
+    const size_t index = static_cast<size_t>(std::distance(rows_.begin(), it));
+    const UINT dpi = GetDpiForWindow(window_);
+    const std::vector<RECT> rowRects = ComputeLayout(dpi).rowRects;
+    if (index < rowRects.size()) {
+        RECT r = rowRects[index];
+        InvalidateRect(window_, &r, FALSE);
+    }
+}
+
 void AltTabListWindow::Hide() {
     if (window_ != nullptr) {
         ShowWindow(window_, SW_HIDE);

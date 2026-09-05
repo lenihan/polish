@@ -115,6 +115,17 @@ public:
     // row set itself didn't change.
     void SetHighlight(std::optional<size_t> index);
 
+    // Forces a repaint of whatever row currently displays hwnd, without
+    // touching row content, layout, or the highlight/hover indices. For a
+    // change that alters how an existing row's own action-button glyph
+    // should look (e.g. the maximize/restore-toggle glyph, which reflects
+    // live IsZoomed(row.hwnd) state read fresh at paint time) without
+    // changing the candidate list or which row is highlighted/hovered --
+    // neither of which Show()/SetHighlight()'s own change-detection would
+    // otherwise catch, since by both of those measures nothing changed.
+    // No-op if hwnd isn't currently one of this panel's rows.
+    void RepaintRow(HWND hwnd);
+
     void Hide();
     bool IsVisible() const;
     HWND WindowHandle() const { return window_; }
