@@ -10,6 +10,20 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Statically link the MSVC CRT (/MT, /MTd) rather than the default DLL CRT
+# (/MD, /MDd) -- polish.exe otherwise depends on MSVCP140.dll/
+# VCRUNTIME140.dll at runtime, which aren't part of the OS itself (unlike
+# the api-ms-win-crt-*.dll forwarders) and require the separately-
+# installed VC++ Redistributable. Confirmed as a real, silent failure
+# mode: a bare Windows image without it (a fresh Windows Sandbox instance,
+# and by extension any end user who's never installed Visual Studio or a
+# redistributable) can't run the dynamically-linked build at all --
+# CreateProcess still returns a valid PID (the failure happens inside the
+# new process's own loader, moments later), which combined with PID reuse
+# can even look like "it started fine" to a script checking Get-Process
+# shortly after. Static linking removes the dependency entirely.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # Everything except main.cpp lives in this static library, so the same
 # code can be linked into both the polish.exe app and the test binary
 # (main.cpp's WinMain doesn't belong in a test binary).
@@ -25,6 +39,7 @@ add_library(polish_core STATIC
     src/hook/AltTabHook.cpp
     src/hook/AltTabDimOverlay.cpp
     src/hook/AltTabHighlightBorder.cpp
+    src/hook/AltTabListWindow.cpp
     src/hook/GroupChromeWindow.cpp
     src/hook/GroupPickerWindow.cpp
     src/hook/GroupHotkeyDialog.cpp

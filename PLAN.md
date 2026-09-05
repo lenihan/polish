@@ -33,6 +33,25 @@ learned along the way.
 - [x] **User-confirmed working in real day-to-day use (2026-08-29)** —
       the actual test that mattered, beyond build-verification and
       synthetic repros.
+- [x] **Static CRT linking (2026-09-05)**: `CMakeLists.txt` sets
+      `CMAKE_MSVC_RUNTIME_LIBRARY` to `/MT`/`/MTd` instead of the CMake
+      default `/MD`/`/MDd`, for both `polish_core` and `polish`. Found
+      while setting up Windows Sandbox as an isolated UI-test
+      environment: `polish.exe` couldn't run there at all, silently --
+      `Start-Process` still returned a valid PID (the real failure,
+      `STATUS_DLL_NOT_FOUND`, happens moments later inside the new
+      process's own loader), which combined with PID reuse could even
+      look like "it started fine" to a script checking `Get-Process` a
+      couple seconds later. Root cause, confirmed via `dumpbin
+      /dependents` and a minimal repro harness: the dynamically-linked
+      build depends on `MSVCP140.dll`/`VCRUNTIME140.dll` (the VC++
+      Redistributable -- unlike the `api-ms-win-crt-*.dll` forwarders,
+      *not* part of the OS itself), which a bare Windows image doesn't
+      have installed. This isn't just a Sandbox-testing workaround --
+      it's a real deployment gap for any real end user's machine that's
+      never installed Visual Studio or a redistributable, now closed.
+      Confirmed via `dumpbin /dependents` that both DLLs no longer
+      appear. Full clean rebuild, all 45 tests still pass.
 
 ## Next
 
@@ -553,6 +572,60 @@ the highlighted row.
     harness against a real maximized Explorer window: screenshot
     confirms a properly large, smooth rounded corner at the screen edge
     instead of a clipped one.
+- [x] **M3 done: combined list panel (active windows).** New
+  `src/hook/AltTabListWindow.h/.cpp` -- a translucent (flat constant-alpha,
+  `AltTabDimOverlay`'s technique, not the DIB+GDI+ pipeline), always-
+  on-top, `WS_EX_NOACTIVATE` popup listing every active candidate (icon +
+  title per row, reusing `GetWindowIconHandle`), the Tab-highlighted row
+  filled in the OS accent color (`GetAccentColor`). Same WndProc-thunk/
+  double-buffered-`WM_PAINT` pattern as `GroupChromeWindow`. Created once
+  at startup alongside the overlay pool/highlight border (never
+  destroyed/recreated), shown alongside every session's dim/border visuals
+  (not a separate toggle), centered on the foreground window's monitor.
+  `AltTabHook` gained `SetIsOwnUI`/`SetOnNavigate` (a second bounded
+  hook-thread exception alongside `hasEligibleCandidates`, and Up/Down
+  arrow-key handling strictly gated on a session already being active,
+  with the same physically-down debounce pattern as Tab) -- for now
+  (M3, before M4's minimized section exists) arrow keys just mirror
+  Tab/Shift+Tab. `ApplyAltTabDimming` only does a full row rebuild when
+  the candidate set actually changed since the last cycle (tracked via
+  `g_altTabListWindowLastCandidates`), otherwise the cheap `SetHighlight`
+  path (a narrow two-row invalidate) -- deliberately avoiding the
+  "unconditional full repaint causes flashing" bug shape this codebase
+  has hit three times already elsewhere. A row click routes through the
+  existing `OnAltTabCommit`. Rebuilt clean, all 45 tests pass.
+  **Live-verified**: screenshot confirms the panel renders correctly
+  (icons, titles, accent-highlighted row) and a `LogDebug` dump of the
+  panel's actual row order was cross-checked byte-for-byte against the
+  session-start candidate dump and the "cycle -> highlighting hwnd="
+  line from the same cycle -- all three agree on both content and order.
+  - [x] **Real bug, fixed: the list visibly reordered while cycling
+    through it, human-reported.** Root cause: M1's "rebuild every cycle"
+    used the same MRU-then-Z-order computation as session start, on
+    every single Tab press -- and `ApplyAltTabDimming`'s own
+    promote-then-demote Z-order pulse on the highlighted window changes
+    real Z-order every cycle, which (for any candidate not yet in
+    `g_activationHistory`'s MRU data) fed straight back into that
+    Z-order-fallback tail, visibly reshuffling survivors on the very
+    next cycle. Fixed with a new `UpdateAltTabCandidatesPreservingOrder`,
+    used for every cycle *after* session start (which still uses the
+    original fresh `RebuildAltTabCandidates`): keeps every still-open
+    candidate in its existing list position, only dropping closed ones
+    and appending newly-opened ones -- Tab now walks down a list that
+    holds still while Alt is held, while still catching real
+    opens/closes mid-session (M1's actual goal). Rebuilt clean, all 45
+    tests pass. **Live-verified**: held Alt through 6 consecutive Tab
+    presses across 11 real candidates -- the panel's row-order log fired
+    exactly once (at session start), never again for the rest of the
+    hold, and the highlighted window advanced through the *original*
+    dumped order one step at a time (confirmed index-by-index against
+    that first dump), with zero reshuffling.
+  - [x] **Re-verified inside Windows Sandbox** (see below) with 3 clean
+    candidates and 4 held Tab presses, once a real, separate deployment
+    bug (below) that was silently breaking `polish.exe` there got fixed:
+    the panel-rows log fired exactly once, all 4 cycles landed on the
+    original list's positions in order, and the eventual commit's
+    `actualForeground` matched the target exactly.
 
 **Superseded M3–M6 plan (DWM-thumbnail popup), kept for reference, not being built:**
 M3 — `AltTabSwitcherWindow` placeholder-chrome skeleton; M4 — real DWM

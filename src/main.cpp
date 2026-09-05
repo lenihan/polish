@@ -14,6 +14,7 @@
 #include "hook/AltTabDimOverlay.h"
 #include "hook/AltTabHighlightBorder.h"
 #include "hook/AltTabHook.h"
+#include "hook/AltTabListWindow.h"
 #include "hook/GroupChromeWindow.h"
 #include "hook/GroupHotkeyDialog.h"
 #include "hook/GroupPickerWindow.h"
@@ -83,10 +84,13 @@ std::unique_ptr<polish::TrayIcon> g_trayIcon;
 polish::Settings g_settings;
 std::unique_ptr<polish::AltTabHook> g_altTabHook;
 
-// Alt+Tab switcher session state. The candidate list is rebuilt on every
-// cycle (see OnAltTabCycle), not just once at session start, so a window
-// opening/closing/minimizing mid-session is reflected the next time Tab is
-// pressed. The overlay pool only ever grows (indices beyond the current
+// Alt+Tab switcher session state. The candidate list is refreshed on
+// every cycle (see OnAltTabCycle), not just once at session start, so a
+// window opening/closing/minimizing mid-session is reflected the next
+// time Tab is pressed -- order-preserving once a session is already open
+// (UpdateAltTabCandidatesPreservingOrder), so Tab walks down a list that
+// holds still, not one that reshuffles survivors around on every press.
+// The overlay pool only ever grows (indices beyond the current
 // candidate count just stay hidden, and are explicitly hidden again if the
 // count shrinks -- see OnAltTabCycle), so repeated sessions don't pay
 // window-creation cost more than once per "most windows ever open at once
@@ -99,6 +103,14 @@ std::vector<std::unique_ptr<polish::AltTabDimOverlay>> g_altTabOverlays;
 // (one per non-highlighted candidate), so this is a single instance, not
 // a pool.
 std::unique_ptr<polish::AltTabHighlightBorder> g_altTabHighlightBorder;
+// The always-shown active-window list panel (see PLAN.md's Alt+Tab-
+// improvements M3). Single instance, same pre-warmed-at-startup/shown-
+// per-session lifecycle as g_altTabHighlightBorder.
+std::unique_ptr<polish::AltTabListWindow> g_altTabListWindow;
+// The candidate list as of the panel's last full rebuild -- lets
+// ApplyAltTabDimming tell "the set changed, rebuild rows" apart from
+// "just the highlight moved, cheap path" (see ApplyAltTabDimming).
+std::vector<HWND> g_altTabListWindowLastCandidates;
 
 // Most-recently-used window activation order, for the in-progress
 // Alt+Tab replacement (see PLAN.md). Tracks *every* real window that
@@ -139,6 +151,11 @@ int g_thumbnailStabilizeAttemptsLeft = 0;
 // group's tab label until something else (a tab click, a
 // drag) happened to trigger a repaint.
 void OnMemberTitleChanged(HWND hwnd);
+
+// Defined further below (near the group-related icon helpers) -- forward
+// declared here so BuildAltTabListRows (Alt+Tab section) can reuse it
+// instead of duplicating the WM_GETICON/GCLP_HICONSM lookup.
+HICON GetWindowIconHandle(HWND hwnd);
 
 // The window currently being live-tracked for settle events -- i.e. the
 // foreground window, whenever it's a candidate window (see
@@ -493,12 +510,58 @@ void RebuildAltTabCandidates() {
     }
 }
 
+// Used mid-session instead of RebuildAltTabCandidates (which recomputes
+// order from scratch every time -- appropriate at session start, but not
+// mid-session): keeps every still-open candidate in its *existing*
+// g_altTabCandidates position, only dropping ones that closed and
+// appending ones that newly appeared. Tab should walk down a list that
+// holds still while you're holding Alt, not reshuffle out from under
+// you -- confirmed as a real, human-reported problem: RebuildAltTabCandidates'
+// MRU-then-Z-order ordering isn't actually stable across a session, since
+// ApplyAltTabDimming's own promote-then-demote Z-order pulse on whichever
+// window is currently highlighted changes real Z-order every cycle, which
+// (for any candidate not yet in g_activationHistory's MRU data) feeds
+// straight back into RebuildAltTabCandidates' own "anything else falls
+// back to Z-order" tail -- the previously-highlighted window's tail
+// position would visibly jump on the very next cycle. Still handles
+// windows genuinely opening/closing mid-session (M1's actual goal),
+// just without reordering survivors to do it.
+void UpdateAltTabCandidatesPreservingOrder() {
+    std::vector<HWND> allCandidates;
+    EnumWindows(EnumCandidateWindowsProc, reinterpret_cast<LPARAM>(&allCandidates));
+
+    std::vector<HWND> updated;
+    for (HWND hwnd : g_altTabCandidates) {
+        if (std::find(allCandidates.begin(), allCandidates.end(), hwnd) != allCandidates.end()) {
+            updated.push_back(hwnd);
+        }
+    }
+    // Newly-appeared candidates (opened since the last cycle) -- MRU
+    // order first, then Z-order, same append rule RebuildAltTabCandidates
+    // itself uses, just restricted to windows `updated` doesn't already
+    // have.
+    for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+        if (std::find(allCandidates.begin(), allCandidates.end(), hwnd) != allCandidates.end() &&
+            std::find(updated.begin(), updated.end(), hwnd) == updated.end()) {
+            updated.push_back(hwnd);
+        }
+    }
+    for (HWND hwnd : allCandidates) {
+        if (std::find(updated.begin(), updated.end(), hwnd) == updated.end()) {
+            updated.push_back(hwnd);
+        }
+    }
+    g_altTabCandidates = updated;
+}
+
 // Called synchronously from inside AltTabHook's low-level hook callback
 // (see its class comment for why that's safe here) to decide whether
 // Alt+Tab should be intercepted at all. Rebuilds the candidate list as a
 // side effect so a session's first Tab always starts from a fresh list;
-// OnAltTabCycle rebuilds again on every subsequent Tab too, so this is
-// just the session-start case, not the only rebuild point.
+// OnAltTabCycle refreshes it on every subsequent Tab too (order-
+// preserving once a session is already open -- see
+// UpdateAltTabCandidatesPreservingOrder), so this is just the
+// session-start case, not the only refresh point.
 bool AltTabHasEligibleCandidates() {
     if (!g_settings.altTabEnabled) {
         return false;  // native Alt+Tab runs untouched -- see AltTabHook
@@ -550,6 +613,21 @@ void EnsureAltTabHighlightBorder() {
 // force DWM to fully recompute z-order for a window that's never
 // actually activated. The promote-then-demote pulse sidesteps that
 // entirely instead of chasing it further.)
+// Row content is rebuilt fresh from g_altTabCandidates every cycle (titles
+// re-read via GetWindowTextW rather than cached) -- cheap for the small
+// candidate counts this feature deals with, and means a title change
+// mid-session shows up without any separate invalidation path.
+std::vector<polish::AltTabListRow> BuildAltTabListRows() {
+    std::vector<polish::AltTabListRow> rows;
+    rows.reserve(g_altTabCandidates.size());
+    for (HWND hwnd : g_altTabCandidates) {
+        wchar_t title[256] = L"";
+        GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+        rows.push_back(polish::AltTabListRow{hwnd, title, GetWindowIconHandle(hwnd)});
+    }
+    return rows;
+}
+
 void ApplyAltTabDimming() {
     const ULONGLONG t0 = GetTickCount64();
     for (size_t i = 0; i < g_altTabCandidates.size(); ++i) {
@@ -588,6 +666,40 @@ void ApplyAltTabDimming() {
     polish::LogDebug(std::format(
         L"[Polish] AltTab: dimming timing -- otherOverlays={}ms highlightPromote={}ms highlightBorder={}ms",
         t1 - t0, t2 - t1, t3 - t2));
+
+    // The list panel is shown alongside the dim/border visuals for every
+    // session (not a separately-toggled thing -- see PLAN.md's Alt+Tab-
+    // improvements plan). Anchored to the monitor of the *actual* current
+    // foreground window (unchanged throughout cycling -- only a commit
+    // ever calls SetForegroundWindow), matching this feature's existing
+    // monitor-placement decision.
+    //
+    // Full rebuild (Show) only when the candidate set itself actually
+    // changed since the last cycle; otherwise just move the highlight
+    // marker (SetHighlight, a narrow two-row invalidate). This codebase
+    // has hit the "unconditional full repaint causes visible flashing"
+    // bug shape three separate times already (the tab strip's hover
+    // highlight, a member-title-change repaint, this exact class's own
+    // clip-optimization for the highlight border) -- not repeating it in
+    // brand new code that already knows better.
+    if (g_altTabListWindow) {
+        if (g_altTabCandidates != g_altTabListWindowLastCandidates) {
+            const auto rows = BuildAltTabListRows();
+            std::wstring rowDump;
+            for (const auto& row : rows) {
+                if (!rowDump.empty()) {
+                    rowDump += L" | ";
+                }
+                rowDump += std::format(L"{}:\"{}\"", reinterpret_cast<void*>(row.hwnd), row.title);
+            }
+            polish::LogDebug(std::format(L"[Polish] AltTab: list panel rows (highlightIndex={}): {}",
+                                          g_altTabHighlightIndex, rowDump));
+            g_altTabListWindow->Show(rows, g_altTabHighlightIndex, GetForegroundWindow());
+            g_altTabListWindowLastCandidates = g_altTabCandidates;
+        } else {
+            g_altTabListWindow->SetHighlight(g_altTabHighlightIndex);
+        }
+    }
 }
 
 void EndAltTabSession() {
@@ -597,6 +709,16 @@ void EndAltTabSession() {
     if (g_altTabHighlightBorder) {
         g_altTabHighlightBorder->Hide();
     }
+    if (g_altTabListWindow) {
+        g_altTabListWindow->Hide();
+    }
+    // Forces the next session's first cycle to take ApplyAltTabDimming's
+    // full-rebuild (Show) path rather than the cheap SetHighlight-only
+    // path, even if the candidate set ends up identical -- SetHighlight
+    // never calls ShowWindow, so without this the panel would stay
+    // hidden (from the Hide() above) for a whole session that happened
+    // to see no candidate-set change since the last one.
+    g_altTabListWindowLastCandidates.clear();
     g_altTabSessionOpen = false;
 }
 
@@ -618,14 +740,27 @@ void OnAltTabCycle(bool backward) {
             : nullptr;
     const size_t previousCandidateCount = g_altTabCandidates.size();
 
-    // Rebuilt on every cycle, not just once at session start, so a window
-    // opening/closing/minimizing mid-session (via any means other than
-    // this app's own Alt+Tab) is reflected the next time Tab is pressed.
-    // Safe to do here: unlike AltTabHasEligibleCandidates, this runs off
-    // the hook thread already (dispatched via the PostMessageW hop), so
-    // EnumWindows' cost here carries none of the low-level-hook timeout
-    // risk that confines hook-thread work to bounded, no-UI calls.
-    RebuildAltTabCandidates();
+    // Refreshed on every cycle, not just once at session start, so a
+    // window opening/closing/minimizing mid-session (via any means other
+    // than this app's own Alt+Tab) is reflected the next time Tab is
+    // pressed. Safe to do here: unlike AltTabHasEligibleCandidates, this
+    // runs off the hook thread already (dispatched via the PostMessageW
+    // hop), so EnumWindows' cost here carries none of the low-level-hook
+    // timeout risk that confines hook-thread work to bounded, no-UI
+    // calls.
+    //
+    // Session start uses the full MRU-based RebuildAltTabCandidates (a
+    // fresh list is exactly right the first time). Every cycle *after*
+    // that uses UpdateAltTabCandidatesPreservingOrder instead -- Tab
+    // should walk down a list that holds still while Alt is held, not
+    // reshuffle survivors around just because the highlighted window's
+    // own Z-order changed (see that function's comment for the concrete
+    // mechanism that caused it to visibly reorder before this fix).
+    if (wasSessionOpen) {
+        UpdateAltTabCandidatesPreservingOrder();
+    } else {
+        RebuildAltTabCandidates();
+    }
 
     // The overlay pool only ever grows (EnsureAltTabOverlayPoolSize,
     // below); if the candidate count just shrank, hide every overlay at an
@@ -740,6 +875,27 @@ void OnAltTabCancel() {
     }
     EndAltTabSession();
     polish::LogDebug(L"[Polish] AltTab: cancel");
+}
+
+// Arrow-key navigation, fired only while a session is already active
+// (AltTabHook guarantees that -- see its class comment). For now (M3:
+// active-window list only, no minimized section yet -- see PLAN.md's
+// Alt+Tab-improvements M4) this moves through the exact same list
+// Tab/Shift+Tab do: Down mirrors Tab (forward), Up mirrors Shift+Tab
+// (backward). Once M4 adds a minimized section below the active list,
+// arrow-Down past the last active row will need to move into that
+// separate list instead of wrapping here -- this is the function that
+// changes then.
+void OnAltTabNavigate(bool downward) { OnAltTabCycle(/*backward=*/!downward); }
+
+// A row click in the list panel commits directly to that row's window,
+// regardless of whichever one Tab-cycling last landed the highlight on.
+void OnAltTabRowActivated(size_t index) {
+    if (!g_altTabSessionOpen || index >= g_altTabCandidates.size()) {
+        return;
+    }
+    g_altTabHighlightIndex = index;
+    OnAltTabCommit();
 }
 
 constexpr UINT kMenuIdRestoreSync = 1;
@@ -1655,19 +1811,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     } else {
         polish::LogDebug(L"[Polish] Alt+Tab keyboard hook installed successfully");
     }
+    g_altTabHook->SetOnNavigate(OnAltTabNavigate);
+    // Lets AltTabHook's mouse hook tell "a click on the list panel" apart
+    // from "a click anywhere else" (which commits the session) -- see
+    // AltTabHook's class comment on this second, deliberately-bounded
+    // hook-thread exception.
+    g_altTabHook->SetIsOwnUI(
+        [](POINT screenPt) { return g_altTabListWindow && g_altTabListWindow->ContainsPoint(screenPt); });
 
-    // Pre-create the dim overlays and highlight border now, at startup,
-    // rather than paying CreateWindowExW + first-paint latency in
-    // response to the user's actual first Tab press -- confirmed as a
-    // real, visible glitch (the previously-active window briefly still
-    // looked highlighted/undimmed before the real highlight caught up).
-    // EnsureAltTabOverlayPoolSize only ever grows the pool, so this is
-    // purely a head start for the common case, not a hard requirement --
-    // it still grows safely later if more windows open than were open
-    // right now.
+    // Pre-create the dim overlays, highlight border, and list panel now,
+    // at startup, rather than paying CreateWindowExW + first-paint
+    // latency in response to the user's actual first Tab press --
+    // confirmed as a real, visible glitch (the previously-active window
+    // briefly still looked highlighted/undimmed before the real
+    // highlight caught up). EnsureAltTabOverlayPoolSize only ever grows
+    // the pool, so this is purely a head start for the common case, not
+    // a hard requirement -- it still grows safely later if more windows
+    // open than were open right now.
     RebuildAltTabCandidates();
     EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
     EnsureAltTabHighlightBorder();
+    g_altTabListWindow = std::make_unique<polish::AltTabListWindow>(GetModuleHandleW(nullptr));
+    g_altTabListWindow->SetOnRowActivated(OnAltTabRowActivated);
 
     OnForegroundChanged(GetForegroundWindow());
 
