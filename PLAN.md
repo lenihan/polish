@@ -454,6 +454,60 @@ dedicated plan drafted for this feature (real files, branch `alt_tab`):
   can never get stuck true. Rebuilt clean, 9/9 tests pass; not yet
   re-verified live.
 
+### Alt+Tab improvements, round 2 (branch `alt_tab_improvements`, off `main`)
+
+Full plan at `C:\Users\david\.claude\plans\i-d-like-to-work-moonlit-flute.md`:
+live-updating the candidate list mid-session, a thinner/solid highlight
+border, a combined transparent list panel (active windows + a minimized
+section below), and per-row minimize/restore-toggle and close buttons on
+the highlighted row.
+
+- [x] **M1 done: candidate list now rebuilds on every cycle, not just once
+  at session start.** `OnAltTabCycle` calls `RebuildAltTabCandidates()`
+  unconditionally (previously only `AltTabHasEligibleCandidates` did, and
+  only on a session's first Tab) -- safe since this already runs off the
+  hook thread via the existing `PostMessageW` hop, same reasoning as that
+  call's own hook-thread exception. Handles three new hazards a live
+  rebuild introduces: re-locates the highlighted window by identity (not
+  index) after each rebuild, falling back to a clamped index if it closed;
+  hides any dim overlay whose index fell out of range on a shrink (the
+  pool only ever grows); ends the session cleanly if the count drops below
+  2 mid-session instead of dividing/modding by a degenerate count. Rebuilt
+  clean, all 45 tests pass (no existing test touches this path).
+  **Live-verified** via a scripted SendInput harness (real Explorer
+  windows, `WM_CLOSE`'d mid-session): closing a non-highlighted candidate
+  mid-session rebuilt and re-cycled correctly; closing the *currently
+  highlighted* candidate specifically (the harder case) correctly
+  triggered the clamped-fallback path with no crash, a sane next highlight
+  (confirmed against the log's index math by hand), and a clean commit
+  afterward. (Aside, not a Polish bug: the test harness's own first attempt
+  silently injected nothing at all -- a P/Invoke `INPUT` struct missing
+  the `MOUSEINPUT` union member undersized it below the OS's expected
+  `sizeof(INPUT)`, which makes `SendInput` fail its size check and return
+  0. `GetAsyncKeyState` confirmed Alt genuinely wasn't registering as held
+  before the struct fix -- worth remembering for any future scripted
+  input-injection test in this repo.)
+- [x] **M2 done: highlight border is now a thin, solid (fully opaque)
+  ring instead of a soft gradient glow.** `AltTabHighlightBorder.cpp` kept
+  the whole DIB + GDI+ + manual-premultiply + `UpdateLayeredWindow`
+  pipeline (still needed for antialiased rounded corners on a hollow
+  shape) but replaced `PathGradientBrush`/`SetInterpolationColors`/
+  `SetFocusScales` with a flat `Gdiplus::SolidBrush`, and turned the old
+  "clip out the interior" step from a pure perf optimization into the
+  actual mechanism that carves the ring: excludes an inner rounded-rect
+  path (via the same `BuildRoundedRectPath` helper, now parameterized with
+  an offset so it can build an inset copy of itself) rather than the old
+  plain axis-aligned `RectF`, which would have shown as a wrong-shaped
+  inner corner once the fill went opaque. `thickness` changed meaning from
+  a 128px fade zone to the ring's real visible width (3px logical,
+  DPI-scaled); added a clamp (`min(thickness, width/2, height/2)`) so a
+  target smaller than 2x the ring width never gets fully painted over.
+  Rebuilt clean, all 45 tests pass. **Live-verified**: a screenshot taken
+  mid-session shows a thin, solid accent-blue ring around the highlighted
+  window with no visible fade, and the existing `highlightBorder={}ms`
+  timing log dropped to 16ms (previously 31-125ms with the gradient),
+  confirming no perf regression.
+
 **Superseded M3–M6 plan (DWM-thumbnail popup), kept for reference, not being built:**
 M3 — `AltTabSwitcherWindow` placeholder-chrome skeleton; M4 — real DWM
 thumbnails replace the placeholders; M5 — commit/cancel wired to
@@ -1504,3 +1558,17 @@ scoped:
   packaging/deployment model, XAML Islands or a full WinUI3 app host)
   to warrant its own research/spike pass before committing, not
   something to fold into an unrelated fix.
+- **Improve Windows virtual desktops**: persist desktop layout to a file
+  and reload it on login (today's virtual desktops don't survive a
+  restart/sign-out); pin one app to show on all desktops
+  simultaneously (Windows supports this per-window today via right-click
+  on the taskbar icon -> "Show this window on all desktops", but the
+  idea here is a more discoverable/managed way to do it); and mark
+  which desktop you're currently on somewhere always visible (today
+  there's no persistent on-screen indicator, only the transient
+  Task View overlay). Not yet researched -- virtual desktop state isn't
+  exposed via a public documented Win32 API (the relevant `IVirtualDesktop*`
+  COM interfaces are undocumented/private, reverse-engineered by
+  third-party tools like VirtualDesktop11), so a spike into what's
+  actually readable/controllable would need to come before any real
+  design.

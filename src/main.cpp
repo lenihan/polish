@@ -83,14 +83,14 @@ std::unique_ptr<polish::TrayIcon> g_trayIcon;
 polish::Settings g_settings;
 std::unique_ptr<polish::AltTabHook> g_altTabHook;
 
-// Alt+Tab switcher session state. A snapshot of candidates is taken once
-// when a session starts (first Tab press) and used for the whole
-// session -- if a candidate closes mid-session its overlay just sits
-// over whatever's left there until the session ends; not handled more
-// gracefully than that yet. The overlay pool only ever grows (indices
-// beyond the current session's candidate count just stay hidden), so
-// repeated sessions don't pay window-creation cost more than once per
-// "most windows ever open at once this run."
+// Alt+Tab switcher session state. The candidate list is rebuilt on every
+// cycle (see OnAltTabCycle), not just once at session start, so a window
+// opening/closing/minimizing mid-session is reflected the next time Tab is
+// pressed. The overlay pool only ever grows (indices beyond the current
+// candidate count just stay hidden, and are explicitly hidden again if the
+// count shrinks -- see OnAltTabCycle), so repeated sessions don't pay
+// window-creation cost more than once per "most windows ever open at once
+// this run."
 bool g_altTabSessionOpen = false;
 std::vector<HWND> g_altTabCandidates;
 size_t g_altTabHighlightIndex = 0;
@@ -496,8 +496,9 @@ void RebuildAltTabCandidates() {
 // Called synchronously from inside AltTabHook's low-level hook callback
 // (see its class comment for why that's safe here) to decide whether
 // Alt+Tab should be intercepted at all. Rebuilds the candidate list as a
-// side effect -- by the time a real session starts, g_altTabCandidates
-// is already correct and OnAltTabCycle doesn't need to rebuild it again.
+// side effect so a session's first Tab always starts from a fresh list;
+// OnAltTabCycle rebuilds again on every subsequent Tab too, so this is
+// just the session-start case, not the only rebuild point.
 bool AltTabHasEligibleCandidates() {
     if (!g_settings.altTabEnabled) {
         return false;  // native Alt+Tab runs untouched -- see AltTabHook
@@ -605,16 +606,51 @@ void OnAltTabCycle(bool backward) {
         polish::LogDebug(
             std::format(L"[Polish] AltTab: message-queue delay since Tab detected: {}ms", queueDelayMs));
     }
-    if (g_altTabCandidates.empty()) {
-        // Defensive only -- shouldn't happen. AltTabHook's
-        // hasEligibleCandidates callback (AltTabHasEligibleCandidates,
-        // which rebuilds g_altTabCandidates as a side effect) already
-        // guarantees at least 2 entries before this ever fires for a new
-        // session, and both run on the same thread with nothing else
-        // able to run in between.
+
+    // Capture identity (not index) of the currently highlighted window,
+    // and the overlay-relevant size, before rebuilding -- both the
+    // candidate's position in the list and the list's own length can
+    // change once the rebuild below runs.
+    const bool wasSessionOpen = g_altTabSessionOpen;
+    const HWND previouslyHighlighted =
+        (wasSessionOpen && g_altTabHighlightIndex < g_altTabCandidates.size())
+            ? g_altTabCandidates[g_altTabHighlightIndex]
+            : nullptr;
+    const size_t previousCandidateCount = g_altTabCandidates.size();
+
+    // Rebuilt on every cycle, not just once at session start, so a window
+    // opening/closing/minimizing mid-session (via any means other than
+    // this app's own Alt+Tab) is reflected the next time Tab is pressed.
+    // Safe to do here: unlike AltTabHasEligibleCandidates, this runs off
+    // the hook thread already (dispatched via the PostMessageW hop), so
+    // EnumWindows' cost here carries none of the low-level-hook timeout
+    // risk that confines hook-thread work to bounded, no-UI calls.
+    RebuildAltTabCandidates();
+
+    // The overlay pool only ever grows (EnsureAltTabOverlayPoolSize,
+    // below); if the candidate count just shrank, hide every overlay at an
+    // index that no longer has a corresponding candidate, or it would sit
+    // stuck over whatever real window used to occupy that slot.
+    for (size_t i = g_altTabCandidates.size(); i < previousCandidateCount && i < g_altTabOverlays.size(); ++i) {
+        g_altTabOverlays[i]->Hide();
+    }
+
+    if (g_altTabCandidates.size() < 2) {
+        // A live rebuild can drop the count below the feature's minimum
+        // mid-session (candidates closing) in a way session start's own
+        // AltTabHasEligibleCandidates guard can't prevent. End cleanly
+        // rather than divide/mod by a degenerate count below.
+        if (wasSessionOpen) {
+            polish::LogDebug(L"[Polish] AltTab: candidate count dropped below 2 mid-session, ending session");
+            EndAltTabSession();
+        }
         return;
     }
-    if (!g_altTabSessionOpen) {
+
+    EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
+    const size_t count = g_altTabCandidates.size();
+
+    if (!wasSessionOpen) {
         std::wstring candidateDump;
         for (HWND hwnd : g_altTabCandidates) {
             wchar_t title[128] = L"";
@@ -635,16 +671,24 @@ void OnAltTabCycle(bool backward) {
         }
         polish::LogDebug(std::format(L"[Polish] AltTab: session starting, {} candidate(s): {}",
                                       g_altTabCandidates.size(), candidateDump));
-        EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
         // Index 0 is the current window itself (freshest in the MRU
         // order); the first Tab press should land on the previous
         // window, matching native Alt+Tab's single-tap-swap behavior.
-        g_altTabHighlightIndex = 1 % g_altTabCandidates.size();
+        g_altTabHighlightIndex = 1 % count;
         g_altTabSessionOpen = true;
     } else {
-        const size_t count = g_altTabCandidates.size();
-        g_altTabHighlightIndex =
-            backward ? (g_altTabHighlightIndex + count - 1) % count : (g_altTabHighlightIndex + 1) % count;
+        // Re-locate the previously highlighted window by identity -- the
+        // rebuild above may have changed its index, or removed it
+        // entirely if it closed mid-session (in which case fall back to
+        // a clamped index rather than stepping from a stale one).
+        size_t baseIndex = std::min(g_altTabHighlightIndex, count - 1);
+        if (previouslyHighlighted) {
+            const auto it = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), previouslyHighlighted);
+            if (it != g_altTabCandidates.end()) {
+                baseIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), it));
+            }
+        }
+        g_altTabHighlightIndex = backward ? (baseIndex + count - 1) % count : (baseIndex + 1) % count;
     }
     ApplyAltTabDimming();
     polish::LogDebug(std::format(L"[Polish] AltTab: cycle {} -> highlighting hwnd={}",

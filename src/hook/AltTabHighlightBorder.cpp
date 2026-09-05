@@ -15,9 +15,8 @@ namespace {
 constexpr wchar_t kClassName[] = L"PolishAltTabHighlightBorder";
 
 // Windows accent blue -- matches resources/polish.ico's sparkle color.
-// Gdiplus::Color's constructor isn't constexpr, so these are plain const.
-const Gdiplus::Color kBorderColorOpaque(255, 0, 120, 212);
-const Gdiplus::Color kBorderColorTransparent(0, 0, 120, 212);
+// Gdiplus::Color's constructor isn't constexpr, so this is plain const.
+const Gdiplus::Color kBorderColor(255, 0, 120, 212);
 
 // GDI+ requires one-time process startup; this app is tray-resident for
 // its whole lifetime and exits the process directly, so there's no
@@ -54,14 +53,20 @@ void EnsureClassRegistered(HINSTANCE instance) {
 
 // Builds directly into `path` (out-param) rather than returning by
 // value -- Gdiplus::GraphicsPath's copy constructor is protected.
-void BuildRoundedRectPath(Gdiplus::GraphicsPath& path, int width, int height, int radius) {
+// (offsetX, offsetY) shifts the whole shape -- used to build the inner
+// cutout path inset from the outer one, without a separate Matrix
+// transform.
+void BuildRoundedRectPath(Gdiplus::GraphicsPath& path, int width, int height, int radius, int offsetX = 0,
+                           int offsetY = 0) {
     radius = std::min(radius, std::min(width, height) / 2);
     const int d = radius * 2;
-    path.AddArc(0.0f, 0.0f, static_cast<float>(d), static_cast<float>(d), 180.0f, 90.0f);
-    path.AddArc(static_cast<float>(width - d), 0.0f, static_cast<float>(d), static_cast<float>(d), 270.0f, 90.0f);
-    path.AddArc(static_cast<float>(width - d), static_cast<float>(height - d), static_cast<float>(d),
+    const float x = static_cast<float>(offsetX);
+    const float y = static_cast<float>(offsetY);
+    path.AddArc(x, y, static_cast<float>(d), static_cast<float>(d), 180.0f, 90.0f);
+    path.AddArc(x + static_cast<float>(width - d), y, static_cast<float>(d), static_cast<float>(d), 270.0f, 90.0f);
+    path.AddArc(x + static_cast<float>(width - d), y + static_cast<float>(height - d), static_cast<float>(d),
                 static_cast<float>(d), 0.0f, 90.0f);
-    path.AddArc(0.0f, static_cast<float>(height - d), static_cast<float>(d), static_cast<float>(d), 90.0f, 90.0f);
+    path.AddArc(x, y + static_cast<float>(height - d), static_cast<float>(d), static_cast<float>(d), 90.0f, 90.0f);
     path.CloseFigure();
 }
 
@@ -104,20 +109,18 @@ void AltTabHighlightBorder::ShowAroundTarget(HWND target) {
     }
 
     const UINT dpi = GetDpiForWindow(target);
-    // The band the fade has room to dissipate across -- not the visible
-    // "width" of anything solid; see the interpolation stops below for
-    // why most of this stays imperceptible.
-    const int thickness = MulDiv(128, static_cast<int>(dpi), 96);
+    // The ring's actual visible width -- unlike the old fading-gradient
+    // version, this is now a real, solid dimension, not a fade zone.
+    const int thickness = MulDiv(3, static_cast<int>(dpi), 96);
     // Matches Windows 11's own default window-corner rounding (~8px at
     // 96 DPI -- what VS Code and most native apps use), not a bigger,
     // more obviously-rounded shape of its own.
     const int radius = MulDiv(8, static_cast<int>(dpi), 96);
 
-    // On the window's own rect, not inflated outward -- the glow fades
-    // inward from the target's own edge, into its own content, rather
-    // than projecting out into the desktop margin around it. Everywhere
-    // the fade has reached alpha 0 (i.e. everywhere more than roughly
-    // `thickness` in from the edge), the target's real content shows
+    // On the window's own rect, not inflated outward -- the ring sits
+    // inside the target's own edge, into its own content, rather than
+    // projecting out into the desktop margin around it. Everywhere more
+    // than `thickness` in from the edge, the target's real content shows
     // through completely untouched.
     const RECT outer = targetRect;
     const int width = outer.right - outer.left;
@@ -164,54 +167,33 @@ void AltTabHighlightBorder::ShowAroundTarget(HWND target) {
         Gdiplus::GraphicsPath path;
         BuildRoundedRectPath(path, width, height, radius);
 
-        // Clip to just the border band before filling -- confirmed via
-        // logged timing that filling the *entire* window-sized path
-        // (most of which the fast-falloff gradient below leaves fully
-        // transparent anyway) was the actual bottleneck behind a
-        // human-reported "flash" glitch, up to 125ms for a large/
-        // maximized target, dwarfing every other stage of the dimming
-        // pipeline (each under 16ms). GDI+ only rasterizes pixels inside
-        // the clip, so excluding the deep interior (using the full
-        // `thickness` inset as a safety margin beyond where the gradient
-        // actually finishes fading, not the tighter 45%-of-thickness
-        // point it reaches zero at) keeps render cost roughly constant
-        // regardless of how large the target window is.
+        // Clamp so a target smaller than 2x the ring thickness never gets
+        // fully painted over -- some interior always stays uncovered,
+        // however small the target. (With the old fading gradient this
+        // clamp wasn't needed: the fill was already transparent well
+        // before reaching the interior on any realistically-sized window,
+        // so painting the full path there was harmless. With a flat
+        // opaque fill it no longer is.)
+        const int effectiveThickness = std::min({thickness, width / 2, height / 2});
+
+        // Carve the hollow ring by excluding an inner rounded-rect path
+        // inset by the ring's own thickness -- not a plain axis-aligned
+        // rect, which would show as a wrong-shaped inner corner once the
+        // fill is fully opaque (harmless with the old gradient, since it
+        // had already faded to near-zero well before reaching the
+        // interior either way). This is also still a real perf win, same
+        // as before: GDI+ only rasterizes pixels inside the clip, so cost
+        // stays roughly constant regardless of target window size, which
+        // is what fixed a human-reported "flash" glitch (up to 125ms for
+        // a large/maximized target) once already in this class's history.
+        Gdiplus::GraphicsPath innerPath;
+        BuildRoundedRectPath(innerPath, width - 2 * effectiveThickness, height - 2 * effectiveThickness,
+                              std::max(0, radius - effectiveThickness), effectiveThickness, effectiveThickness);
         Gdiplus::Region clipRegion(&path);
-        if (width > 2 * thickness && height > 2 * thickness) {
-            Gdiplus::RectF innerRect(static_cast<float>(thickness), static_cast<float>(thickness),
-                                      static_cast<float>(width - 2 * thickness),
-                                      static_cast<float>(height - 2 * thickness));
-            clipRegion.Exclude(innerRect);
-        }
+        clipRegion.Exclude(&innerPath);
         graphics.SetClip(&clipRegion);
 
-        Gdiplus::PathGradientBrush brush(&path);
-
-        // A fast falloff, not a linear one -- solid right at the edge,
-        // already mostly gone by 10% of the way in, fully transparent by
-        // 45%, and flat (still transparent) the rest of the way. Reads
-        // as a soft glow that dissipates quickly, not a visible band
-        // with edges of its own.
-        Gdiplus::Color stops[] = {
-            kBorderColorOpaque,                        // 0.00 -- the outer edge itself
-            Gdiplus::Color(160, 0, 120, 212),           // 0.10
-            Gdiplus::Color(60, 0, 120, 212),            // 0.25
-            kBorderColorTransparent,                    // 0.45 -- fully gone
-            kBorderColorTransparent,                    // 1.00 -- stays gone
-        };
-        Gdiplus::REAL positions[] = {0.0f, 0.10f, 0.25f, 0.45f, 1.0f};
-        brush.SetInterpolationColors(stops, positions, 5);
-
-        // Governs where position 1.0 above actually falls: `thickness`
-        // pixels in from the outer edge (not the shape's geometric
-        // center, which SetInterpolationColors' positions are otherwise
-        // measured relative to) -- keeps the fade's real pixel extent
-        // fixed regardless of how large the target window itself is.
-        const float xScale = std::max(0.0f, static_cast<float>(width - 2 * thickness) / static_cast<float>(width));
-        const float yScale =
-            std::max(0.0f, static_cast<float>(height - 2 * thickness) / static_cast<float>(height));
-        brush.SetFocusScales(xScale, yScale);
-
+        Gdiplus::SolidBrush brush(kBorderColor);
         graphics.FillPath(&brush, &path);
     }
 

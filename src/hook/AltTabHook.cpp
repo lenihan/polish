@@ -10,7 +10,7 @@ namespace {
 // TitleBarMenuHook used).
 AltTabHook* g_instance = nullptr;
 
-enum class HookAction : WPARAM { CycleForward, CycleBackward, Commit, Cancel };
+enum class HookAction : WPARAM { CycleForward, CycleBackward, Commit, Cancel, NavigateDown, NavigateUp };
 
 bool IsDown(WPARAM wParam) { return wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN; }
 bool IsUp(WPARAM wParam) { return wParam == WM_KEYUP || wParam == WM_SYSKEYUP; }
@@ -88,18 +88,29 @@ LRESULT CALLBACK AltTabHook::LowLevelKeyboardProc(int code, WPARAM wParam, LPARA
 }
 
 LRESULT CALLBACK AltTabHook::LowLevelMouseProc(int code, WPARAM wParam, LPARAM lParam) {
-    if (code == HC_ACTION && g_instance != nullptr && g_instance->HandleMouseEvent(wParam)) {
-        return 1;  // swallow: this click is the commit trigger, not a real interaction
+    if (code == HC_ACTION && g_instance != nullptr) {
+        const auto* data = reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam);
+        if (g_instance->HandleMouseEvent(wParam, data->pt)) {
+            return 1;  // swallow: this click is the commit trigger, not a real interaction
+        }
     }
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
-bool AltTabHook::HandleMouseEvent(WPARAM wParam) {
+bool AltTabHook::HandleMouseEvent(WPARAM wParam, POINT screenPt) {
     if (!sessionActive_) {
         return false;
     }
     if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN || wParam == WM_MBUTTONDOWN ||
         wParam == WM_XBUTTONDOWN) {
+        if (isOwnUI_ && isOwnUI_(screenPt)) {
+            // Click landed on Polish's own list-panel UI -- leave it
+            // completely alone (not a generic commit trigger) so the
+            // panel's own row/button hit-testing handles it instead. See
+            // the class comment for why this check is safe to run
+            // synchronously here.
+            return false;
+        }
         // Commits (not cancels), and deliberately NOT swallowed (return
         // false) -- the click should reach whatever's actually under the
         // cursor completely normally (the dim overlays are already
@@ -197,6 +208,33 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         return false;
     }
 
+    if ((data.vkCode == VK_DOWN || data.vkCode == VK_UP) && sessionActive_) {
+        // Strictly gated on sessionActive_ already being true (checked
+        // above) -- unlike Tab, arrow keys are used constantly
+        // system-wide and must never be able to start a session on their
+        // own, nor have any effect when Alt+Tab isn't active. See class
+        // comment.
+        bool& physicallyDown = (data.vkCode == VK_DOWN) ? downPhysicallyDown_ : upPhysicallyDown_;
+        if (IsDown(wParam)) {
+            if (physicallyDown) {
+                return true;  // OS key-repeat, not a fresh press -- swallow, don't re-navigate
+            }
+            physicallyDown = true;
+            // Posted, not called directly -- same reason Tab's onCycle_
+            // is posted rather than invoked synchronously here: the hook
+            // callback must stay trivial (see class comment).
+            PostMessageW(messageWindow_, kHookMessage,
+                         static_cast<WPARAM>(data.vkCode == VK_DOWN ? HookAction::NavigateDown
+                                                                     : HookAction::NavigateUp),
+                         0);
+            return true;
+        }
+        if (IsUp(wParam)) {
+            physicallyDown = false;
+            return true;
+        }
+    }
+
     if (data.vkCode == VK_ESCAPE && IsDown(wParam) && sessionActive_) {
         // Ends the session outright (unlike Alt-up above, Escape is safe
         // to swallow -- it's not a modifier, so it carries none of the
@@ -232,6 +270,16 @@ void AltTabHook::HandleHookMessage(WPARAM wParam) {
         case HookAction::Cancel:
             if (onCancel_) {
                 onCancel_();
+            }
+            break;
+        case HookAction::NavigateDown:
+            if (onNavigate_) {
+                onNavigate_(/*downward=*/true);
+            }
+            break;
+        case HookAction::NavigateUp:
+            if (onNavigate_) {
+                onNavigate_(/*downward=*/false);
             }
             break;
     }
