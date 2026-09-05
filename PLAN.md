@@ -507,6 +507,52 @@ the highlighted row.
   window with no visible fade, and the existing `highlightBorder={}ms`
   timing log dropped to 16ms (previously 31-125ms with the gradient),
   confirming no perf regression.
+  - [x] **Real bug, fixed: the ring was invisible on a maximized/
+    full-screen window.** `GetWindowRect` includes the modern invisible
+    resize border, which Windows deliberately hangs a few px *off* the
+    monitor's edges for a maximized window (confirmed directly: a
+    maximized test window's `GetWindowRect` was `(-7,-7)-(1446,918)` on a
+    1440x900-ish work area) so the window's actually-visible edge lines up
+    with the screen edge -- drawing a 3px ring right at that raw rect's
+    edge put nearly all of it off-screen. Fixed with
+    `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` instead (falling
+    back to `GetWindowRect` if it fails), which gives the tighter,
+    actually-visible rect. Not a conflict with this app's other, unrelated
+    GetWindowRect/extended-frame-bounds gotcha (restore-position-sync
+    must never round-trip between the two) -- this is a single fresh
+    query for a one-off visual rect, never stored or mixed with a
+    GetWindowRect value from another code path. Verified via a compiled
+    spike harness (this project's established methodology) against a
+    real maximized Explorer window: screenshot confirms the ring now
+    renders exactly at the screen's visible edge. Rebuilt clean, all 45
+    tests pass.
+  - [x] **Follow-up, human-reported: the ring still visibly got chopped
+    off right at the screen's four corners on a maximized/full-screen
+    target.** Root cause: this device physically rounds the display
+    panel's own corners (some Surface models do this), with a
+    noticeably larger radius than the ~8px window-corner radius the ring
+    normally uses -- there's no documented API to query that hardware
+    radius, so a thin ring drawn with the small window radius gets
+    visibly clipped by it. Fixed by giving `BuildRoundedRectPath` (and
+    the outer/inner path calculations in `ShowAroundTarget`)
+    independent per-corner radii instead of one uniform value: for each
+    corner, `MonitorFromWindow`/`GetMonitorInfoW` determines whether
+    *both* of that corner's edges are flush (within a 2px tolerance)
+    against the monitor's own physical `rcMonitor` bounds -- if so, that
+    corner uses a larger, tuned `screenRadius` (28px logical @96dpi)
+    instead of the normal 8px. This correctly generalizes past simple
+    "maximized vs. not": a normal maximized window (taskbar at the
+    bottom) gets the screen radius on its top-left/top-right corners
+    only (flush against the screen there) while its bottom two corners
+    -- inset by the taskbar -- keep the normal small radius; a true
+    borderless-fullscreen window gets all four. `screenRadius` is a
+    tuned constant, not a queried value (flagged the same way as
+    `thickness`/the base `radius` already are in this class -- needs
+    live confirmation, may need adjusting per-device). Rebuilt clean,
+    all 45 tests pass. **Live-verified** via the same compiled spike
+    harness against a real maximized Explorer window: screenshot
+    confirms a properly large, smooth rounded corner at the screen edge
+    instead of a clipped one.
 
 **Superseded M3–M6 plan (DWM-thumbnail popup), kept for reference, not being built:**
 M3 — `AltTabSwitcherWindow` placeholder-chrome skeleton; M4 — real DWM
