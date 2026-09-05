@@ -50,10 +50,6 @@ current todo list.
 - Alt+Tab: when a monitor's panel has more windows than fit on screen,
   truncate with "..." and auto-scroll to keep the most important ones
   (highlighted/MRU) visible.
-- Alt+Tab: diagnose a visual "shadow" left behind on a window after
-  tabbing away from it.
-- Alt+Tab: confirm whether Settings still fails to come to front after
-  the phantom-window fix, or if that report was multi-monitor-related.
 - Groups: handle a member window closing while backgrounded or tiled.
 - Groups: test and fix multi-monitor / mixed-DPI support (never tried on
   real hardware).
