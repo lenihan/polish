@@ -34,7 +34,12 @@ struct AltTabListRow {
 // section below it (rows with AltTabListRow::minimized set, separated by
 // a divider) lists minimized windows -- reachable via Up/Down but never
 // part of the Tab/Shift+Tab cycle itself (see PLAN.md's Alt+Tab-
-// improvements M4; M5 -- per-row action buttons -- is still unbuilt).
+// improvements M4). The highlighted row alone also shows two small icon
+// buttons at its right edge -- minimize/restore toggle and close (M5) --
+// acting on that row's window without ending the session or moving
+// focus; every row (not just the highlighted one) reserves the same
+// icon-sized space at its right edge regardless, so row text doesn't
+// reflow width when highlight moves.
 //
 // On a multi-monitor setup, per explicit user request, one instance of
 // this class exists *per connected monitor* (see main.cpp's
@@ -119,6 +124,20 @@ public:
     // caller without knowing which monitor's panel/subset it came from).
     void SetOnRowActivated(std::function<void(HWND)> callback) { onRowActivated_ = std::move(callback); }
 
+    // Fired by a click on the highlighted row's minimize/restore-toggle
+    // icon button (see class comment) -- never on any other row, since
+    // only the highlighted row draws these at all. Does NOT end the
+    // session or call onRowActivated_; the caller is expected to act on
+    // hwnd (minimize if active, restore if minimized) and immediately
+    // refresh this panel's content in place.
+    void SetOnRowMinimizeToggle(std::function<void(HWND)> callback) { onRowMinimizeToggle_ = std::move(callback); }
+
+    // Fired by a click on the highlighted row's close ("X") icon button.
+    // Same non-committing contract as SetOnRowMinimizeToggle -- the
+    // caller posts a close request to hwnd and leaves ending/continuing
+    // the session up to whatever happens as a result.
+    void SetOnRowClose(std::function<void(HWND)> callback) { onRowClose_ = std::move(callback); }
+
 private:
     // "Active"/"Minimized" section headings sit above their respective
     // rows -- computed alongside row layout, not as separate rows
@@ -131,6 +150,12 @@ private:
         std::vector<RECT> rowRects;
         std::optional<RECT> activeHeaderRect;
         std::optional<RECT> minimizedHeaderRect;
+        // Set only when highlightIndex_ points at a real row -- the two
+        // action-button hit targets on that row, right-aligned within it
+        // (see class comment). Both unset together; there is no
+        // partial-buttons state.
+        std::optional<RECT> minimizeToggleRect;
+        std::optional<RECT> closeRect;
         int contentHeight = 0;
     };
 
@@ -152,6 +177,8 @@ private:
     std::vector<AltTabListRow> rows_;
     std::optional<size_t> highlightIndex_;
     std::function<void(HWND)> onRowActivated_;
+    std::function<void(HWND)> onRowMinimizeToggle_;
+    std::function<void(HWND)> onRowClose_;
 };
 
 }  // namespace polish

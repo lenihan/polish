@@ -1172,6 +1172,72 @@ void OnAltTabRowActivated(HWND hwnd) {
     }
 }
 
+// Fired by AltTabListWindow's minimize/restore-toggle button, which only
+// ever appears on the highlighted row (see PLAN.md's Alt+Tab-improvements
+// M5) -- hwnd is therefore always whatever's currently highlighted,
+// whichever section it's in. Acts on it directly without ending the
+// session or moving focus, then rebuilds both lists and re-locates the
+// highlight by identity, same shape as OnAltTabCycle's own mid-session
+// refresh -- toggling naturally moves hwnd to the other section, so this
+// is what makes the highlight visibly follow it there instead of landing
+// on whatever now occupies its old slot.
+void OnAltTabRowMinimizeToggle(HWND hwnd) {
+    if (!g_altTabSessionOpen || !IsWindow(hwnd)) {
+        return;
+    }
+    if (IsIconic(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    } else {
+        ShowWindow(hwnd, SW_MINIMIZE);
+    }
+
+    UpdateAltTabCandidatesPreservingOrder();
+    RebuildAltTabMinimizedCandidates();
+    if (g_altTabCandidates.size() < 2) {
+        // Same degenerate-count guard as OnAltTabCycle -- minimizing the
+        // second-to-last active window can drop the active list below
+        // the feature's minimum mid-session.
+        polish::LogDebug(L"[Polish] AltTab: candidate count dropped below 2 after row minimize toggle, ending session");
+        EndAltTabSession();
+        return;
+    }
+    EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
+
+    const auto activeIt = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd);
+    if (activeIt != g_altTabCandidates.end()) {
+        g_altTabHighlightIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), activeIt));
+        g_altTabSelectionInMinimized = false;
+    } else {
+        const auto minimizedIt = std::find(g_altTabMinimized.begin(), g_altTabMinimized.end(), hwnd);
+        if (minimizedIt != g_altTabMinimized.end()) {
+            g_altTabMinimizedHighlightIndex = static_cast<size_t>(std::distance(g_altTabMinimized.begin(), minimizedIt));
+            g_altTabSelectionInMinimized = true;
+        } else {
+            // hwnd vanished entirely (closed itself in response, or some
+            // other race) -- clamp rather than reference a stale index.
+            g_altTabHighlightIndex = std::min(g_altTabHighlightIndex, g_altTabCandidates.size() - 1);
+            g_altTabSelectionInMinimized = false;
+        }
+    }
+    ApplyAltTabDimming();
+}
+
+// Fired by AltTabListWindow's close ("X") button, same highlighted-row-
+// only contract as OnAltTabRowMinimizeToggle above. A graceful WM_CLOSE
+// the target app can still intercept (an unsaved-changes prompt, etc.),
+// deliberately not DestroyWindow. Session stays open. WM_CLOSE is
+// asynchronous -- this doesn't try to force the row out of the list
+// synchronously; the existing EVENT_OBJECT_DESTROY handler already
+// prunes g_activationHistory, and the next Tab/arrow-nav refresh
+// naturally reflects whatever's still actually open.
+void OnAltTabRowClose(HWND hwnd) {
+    if (!g_altTabSessionOpen || !IsWindow(hwnd)) {
+        return;
+    }
+    polish::LogDebug(std::format(L"[Polish] AltTab: row close -> hwnd={}", reinterpret_cast<void*>(hwnd)));
+    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+}
+
 // (Re)builds g_altTabPanels from the currently-connected monitors --
 // called once at startup, and again on WM_DISPLAYCHANGE (a monitor
 // connected/disconnected, or a resolution/topology change). Without the
@@ -1195,6 +1261,8 @@ void RefreshAltTabPanels() {
     for (HMONITOR monitor : GetMonitorsCurrentFirst()) {
         AltTabMonitorPanel panel{monitor, std::make_unique<polish::AltTabListWindow>(GetModuleHandleW(nullptr))};
         panel.window->SetOnRowActivated(OnAltTabRowActivated);
+        panel.window->SetOnRowMinimizeToggle(OnAltTabRowMinimizeToggle);
+        panel.window->SetOnRowClose(OnAltTabRowClose);
         g_altTabPanels.push_back(std::move(panel));
     }
     polish::LogDebug(std::format(L"[Polish] AltTab: panels rebuilt for {} monitor(s)", g_altTabPanels.size()));

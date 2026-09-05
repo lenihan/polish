@@ -50,6 +50,8 @@ current todo list.
 - Alt+Tab: when a monitor's panel has more windows than fit on screen,
   truncate with "..." and auto-scroll to keep the most important ones
   (highlighted/MRU) visible.
+- Add Alt+` to cycle a single app's own windows by most-recently-used
+  order (native Windows does this by Z-order, not MRU).
 - Groups: handle a member window closing while backgrounded or tiled.
 - Groups: test and fix multi-monitor / mixed-DPI support (never tried on
   real hardware).

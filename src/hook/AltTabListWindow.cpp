@@ -38,6 +38,15 @@ constexpr int kHeaderHeight = 22;
 // overkill for one label.
 constexpr double kHeaderFontScale = 0.85;
 
+// Per-row action-button hit target (square) -- reserved at the right
+// edge of *every* row (see class comment on why: keeps row text width
+// constant regardless of which row is currently highlighted), but only
+// ever drawn for the highlighted row. Glyphs are drawn a few px smaller
+// than the button box itself so they don't touch its edges.
+constexpr int kActionButtonSize = 20;
+constexpr int kActionButtonGap = 6;
+constexpr int kActionButtonGlyphMargin = 5;
+
 // The whole window (background AND row content) is rendered at this one
 // constant alpha -- a "frosted, see-through-but-legible" panel doesn't
 // need per-pixel alpha the way AltTabHighlightBorder's gradient ring
@@ -56,6 +65,12 @@ constexpr COLORREF kSectionDividerColor = RGB(80, 80, 80);
 constexpr COLORREF kHeaderTextColor = RGB(150, 150, 150);
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
+
+// Horizontal space reserved for the two action buttons at every row's
+// right edge (see kActionButtonSize's own comment) -- one shared formula
+// so ComputeLayout (button rects) and Paint (row text width) can never
+// drift apart on how much space is actually set aside.
+int ActionsReservedWidth(UINT dpi) { return 2 * Scale(kActionButtonSize, dpi) + Scale(kActionButtonGap, dpi); }
 
 }  // namespace
 
@@ -141,9 +156,36 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
         case WM_LBUTTONDOWN: {
             const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             const UINT dpi = GetDpiForWindow(hwnd);
-            const std::vector<RECT> rowRects = ComputeLayout(dpi).rowRects;
-            for (size_t i = 0; i < rowRects.size() && i < rows_.size(); ++i) {
-                RECT r = rowRects[i];  // PtInRect takes a non-const RECT*
+            const RowLayout layout = ComputeLayout(dpi);
+
+            // Action-button hit targets take priority over the row-body
+            // hit-test below -- both only ever exist on the highlighted
+            // row, and neither should also be treated as a row-body
+            // click (which would activate/commit instead of toggling
+            // minimize or closing).
+            if (highlightIndex_.has_value() && *highlightIndex_ < rows_.size()) {
+                if (layout.closeRect) {
+                    RECT r = *layout.closeRect;
+                    if (PtInRect(&r, pt)) {
+                        if (onRowClose_) {
+                            onRowClose_(rows_[*highlightIndex_].hwnd);
+                        }
+                        return 0;
+                    }
+                }
+                if (layout.minimizeToggleRect) {
+                    RECT r = *layout.minimizeToggleRect;
+                    if (PtInRect(&r, pt)) {
+                        if (onRowMinimizeToggle_) {
+                            onRowMinimizeToggle_(rows_[*highlightIndex_].hwnd);
+                        }
+                        return 0;
+                    }
+                }
+            }
+
+            for (size_t i = 0; i < layout.rowRects.size() && i < rows_.size(); ++i) {
+                RECT r = layout.rowRects[i];  // PtInRect takes a non-const RECT*
                 if (PtInRect(&r, pt)) {
                     if (onRowActivated_) {
                         onRowActivated_(rows_[i].hwnd);
@@ -205,6 +247,21 @@ AltTabListWindow::RowLayout AltTabListWindow::ComputeLayout(UINT dpi) const {
         top += rowHeight;
     }
     layout.contentHeight = top + paddingY;
+
+    // Action-button hit targets, right-aligned within the highlighted
+    // row only (see class comment -- every row reserves the space, but
+    // only the highlighted one ever draws or hit-tests buttons there).
+    if (highlightIndex_.has_value() && *highlightIndex_ < layout.rowRects.size()) {
+        const RECT& row = layout.rowRects[*highlightIndex_];
+        const int buttonSize = Scale(kActionButtonSize, dpi);
+        const int gap = Scale(kActionButtonGap, dpi);
+        const int rowPaddingX = Scale(kRowPaddingX, dpi);
+        const int buttonTop = row.top + (rowHeight - buttonSize) / 2;
+        const int closeLeft = row.right - rowPaddingX - buttonSize;
+        const int toggleLeft = closeLeft - gap - buttonSize;
+        layout.closeRect = RECT{closeLeft, buttonTop, closeLeft + buttonSize, buttonTop + buttonSize};
+        layout.minimizeToggleRect = RECT{toggleLeft, buttonTop, toggleLeft + buttonSize, buttonTop + buttonSize};
+    }
     return layout;
 }
 
@@ -275,6 +332,17 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     }
     SelectObject(hdc, textFont);
 
+    // Glyphs are drawn with plain 1px lines in kHighlightTextColor --
+    // buttons only ever appear on the highlighted row, whose background
+    // is always the solid accent color, so that's the one color
+    // guaranteed to contrast with it (same color the row's own title
+    // text uses while highlighted).
+    auto drawGlyphLine = [hdc](int x1, int y1, int x2, int y2) {
+        MoveToEx(hdc, x1, y1, nullptr);
+        LineTo(hdc, x2, y2);
+    };
+
+    const int actionsReservedWidth = ActionsReservedWidth(dpi);
     const std::vector<RECT>& rowRects = layout.rowRects;
     for (size_t i = 0; i < rowRects.size() && i < rows_.size(); ++i) {
         const RECT& rowRect = rowRects[i];
@@ -300,9 +368,37 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
             textLeft += iconSize + iconTextGap;
         }
 
-        RECT textRect{textLeft, rowRect.top, rowRect.right - rowPaddingX, rowRect.bottom};
+        RECT textRect{textLeft, rowRect.top, rowRect.right - rowPaddingX - actionsReservedWidth, rowRect.bottom};
         SetTextColor(hdc, highlighted ? kHighlightTextColor : (row.minimized ? kMinimizedTextColor : kTextColor));
         DrawTextW(hdc, row.title.c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+        if (highlighted && layout.minimizeToggleRect && layout.closeRect) {
+            HPEN glyphPen = CreatePen(PS_SOLID, 1, kHighlightTextColor);
+            HGDIOBJ oldPen = SelectObject(hdc, glyphPen);
+            HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+
+            const RECT& toggle = *layout.minimizeToggleRect;
+            const int margin = Scale(kActionButtonGlyphMargin, dpi);
+            if (row.minimized) {
+                // Restore glyph: a small square outline.
+                Rectangle(hdc, toggle.left + margin, toggle.top + margin, toggle.right - margin,
+                          toggle.bottom - margin);
+            } else {
+                // Minimize glyph: a single horizontal line near the
+                // bottom of the box, matching the native title-bar
+                // minimize button's own glyph shape.
+                const int y = toggle.bottom - margin;
+                drawGlyphLine(toggle.left + margin, y, toggle.right - margin, y);
+            }
+
+            const RECT& close = *layout.closeRect;
+            drawGlyphLine(close.left + margin, close.top + margin, close.right - margin, close.bottom - margin);
+            drawGlyphLine(close.right - margin, close.top + margin, close.left + margin, close.bottom - margin);
+
+            SelectObject(hdc, oldBrush);
+            SelectObject(hdc, oldPen);
+            DeleteObject(glyphPen);
+        }
     }
 
     SelectObject(hdc, oldFont);
