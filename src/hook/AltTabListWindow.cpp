@@ -174,6 +174,22 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     FillRect(hdc, &clientRect, backgroundBrush);
     DeleteObject(backgroundBrush);
 
+    // A plain memory DC (see WM_PAINT) has no font selected of its own,
+    // so it falls back to whatever stock font GDI defaults to -- a tiny,
+    // pre-DPI-awareness bitmap font, nowhere near the size real Windows
+    // UI text renders at. NONCLIENTMETRICS' lfMessageFont is the actual
+    // font Windows itself uses for dialog body text, read via the
+    // DPI-aware overload so it's already the correct size for this
+    // window's current monitor -- not GetStockObject(DEFAULT_GUI_FONT),
+    // which is the same era of fixed, non-DPI-scaled stock font as the
+    // implicit default and would look just as undersized on a modern
+    // display.
+    NONCLIENTMETRICSW metrics{};
+    metrics.cbSize = sizeof(metrics);
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi);
+    HFONT textFont = CreateFontIndirectW(&metrics.lfMessageFont);
+    HGDIOBJ oldFont = SelectObject(hdc, textFont);
+
     SetBkMode(hdc, TRANSPARENT);
     const std::vector<RECT> rowRects = ComputeRowRects(dpi);
     const int iconSize = Scale(kIconSize, dpi);
@@ -209,6 +225,9 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         SetTextColor(hdc, highlighted ? kHighlightTextColor : kTextColor);
         DrawTextW(hdc, row.title.c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
     }
+
+    SelectObject(hdc, oldFont);
+    DeleteObject(textFont);
 }
 
 void AltTabListWindow::Reposition(HMONITOR targetMonitor, UINT dpi) {
