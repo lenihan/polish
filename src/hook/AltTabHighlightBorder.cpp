@@ -172,7 +172,7 @@ void AltTabHighlightBorder::ShowAroundTarget(HWND target) {
     // per-window style), so this is a tuned constant -- like every other
     // thickness/radius value in this class, confirm/adjust after seeing it
     // live rather than trusting the number in isolation.
-    const int screenRadius = MulDiv(28, static_cast<int>(dpi), 96);
+    const int screenRadius = MulDiv(20, static_cast<int>(dpi), 96);
 
     // On the window's own rect, not inflated outward -- the ring sits
     // inside the target's own edge, into its own content, rather than

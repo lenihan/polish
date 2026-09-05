@@ -554,7 +554,8 @@ the highlighted row.
     corner, `MonitorFromWindow`/`GetMonitorInfoW` determines whether
     *both* of that corner's edges are flush (within a 2px tolerance)
     against the monitor's own physical `rcMonitor` bounds -- if so, that
-    corner uses a larger, tuned `screenRadius` (28px logical @96dpi)
+    corner uses a larger, tuned `screenRadius` (20px logical @96dpi,
+    tuned down from an initial 28px guess after live confirmation)
     instead of the normal 8px. This correctly generalizes past simple
     "maximized vs. not": a normal maximized window (taskbar at the
     bottom) gets the screen radius on its top-left/top-right corners
