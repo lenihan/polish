@@ -243,7 +243,23 @@ void AltTabListWindow::Show(const std::vector<AltTabListRow>& rows, size_t highl
 }
 
 void AltTabListWindow::SetHighlight(size_t index) {
-    if (window_ == nullptr || rows_.empty() || index >= rows_.size() || index == highlightIndex_) {
+    if (window_ == nullptr) {
+        return;
+    }
+    // Re-assert topmost on every call, even if the index itself didn't
+    // change -- among windows marked HWND_TOPMOST, whichever gets that
+    // status *most recently* ends up frontmost (same rule this app's own
+    // dim-overlay/highlight-border promotion already has to account for).
+    // AltTabHighlightBorder::ShowAroundTarget re-asserts its own topmost
+    // status every single cycle; this is the cheap path Show() itself
+    // doesn't run through (Show already reasserts via Reposition), so
+    // without this the border would visibly jump in front of the panel
+    // on every cycle that takes this path -- confirmed as a real,
+    // human-reported bug ("the highlight was sometimes on top of the
+    // panel"), and this cheap path is the *common* case once the
+    // candidate list holds a stable order across a session.
+    SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (rows_.empty() || index >= rows_.size() || index == highlightIndex_) {
         return;
     }
     const UINT dpi = GetDpiForWindow(window_);

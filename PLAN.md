@@ -446,18 +446,14 @@ dedicated plan drafted for this feature (real files, branch `alt_tab`):
     then immediately jumps to the next one." Once repeat-cycling stopped,
     that illusion likely went away. Not chasing the render-time number
     further since there's no user-visible problem left to fix.
-- [ ] **Open, not yet diagnosed: user reports the Windows Settings app
-  sometimes appears to launch mid Alt+Tab, when it wasn't running
-  before.** No repro steps yet, happened "several times." Leading
-  hypothesis: a hidden/suspended UWP host window (Settings and other
-  first-party UWP apps often stay resident even when the user believes
-  they're closed) is passing `IsCandidateWindow`'s filter and getting
-  committed to like any other candidate — `SetForegroundWindow` on it
-  would make it visibly pop up, looking exactly like "it just launched."
-  Added class names (not just titles) to the candidate-list dump
-  specifically to catch this (watch for `ApplicationFrameHost`,
-  `Windows.UI.Core.CoreWindow`, or similar in the log) — not yet
-  confirmed either way.
+- [x] **Confirmed and fixed (2026-09-05), see the Alt+Tab-improvements
+  section further down: user reports the Windows Settings app sometimes
+  appears to launch mid Alt+Tab, when it wasn't running before.** The
+  leading hypothesis below was correct: a live Windows Sandbox repro
+  caught a hidden/suspended UWP host window (a second, title-less
+  `ApplicationFrameWindow`) passing `IsCandidateWindow`'s filter
+  alongside the real, titled Settings window. `IsCandidateWindow` now
+  requires a non-empty title, which excludes it.
 - [x] **UX fix: holding Tab down was rapidly cycling through candidates
   via OS key-repeat, instead of staying on the current highlight until a
   genuine fresh press** (native Alt+Tab doesn't auto-cycle on repeat
@@ -626,6 +622,45 @@ the highlighted row.
     the panel-rows log fired exactly once, all 4 cycles landed on the
     original list's positions in order, and the eventual commit's
     `actualForeground` matched the target exactly.
+- [x] **Real bug, fixed: the highlight border sometimes rendered in
+  front of the list panel instead of behind it, human-reported.** Root
+  cause: `AltTabListWindow::SetHighlight` (the cheap path
+  `ApplyAltTabDimming` takes whenever the candidate set hasn't changed
+  since the last cycle -- the *common* case now that list order is
+  stable, see the fix above) never re-asserted `HWND_TOPMOST`, while
+  `AltTabHighlightBorder::ShowAroundTarget` re-asserts it every single
+  cycle -- among windows marked topmost, whichever gets that status
+  *most recently* wins the front position (the same rule this app's
+  z-order code already documents elsewhere), so the border would win on
+  every cheap-path cycle. Fixed by having `SetHighlight` re-assert
+  `HWND_TOPMOST` on every call too (cheap -- `SWP_NOMOVE | SWP_NOSIZE`),
+  unconditionally, before its early-return-if-index-unchanged check.
+  Rebuilt clean, all 45 tests pass.
+- [x] **Real bug, fixed: a candidate window (reported: Settings)
+  sometimes stayed hidden behind another window even while highlighted.**
+  Root-caused live in Windows Sandbox (not guessed) with a scripted
+  repro: opening Settings surfaced *two* `ApplicationFrameWindow`
+  candidates in the same session -- the real, titled `"Settings"` one,
+  and a second, completely title-less one sitting right next to it in
+  the dump (`0x...:""[ApplicationFrameWindow]`) -- confirming a
+  hypothesis this file already carried unconfirmed (see the
+  Settings-appears-to-launch entry further up): a hidden/suspended UWP
+  host window passes every existing `IsCandidateWindow` check. Landing
+  the highlight on that phantom instead of the real window promotes/
+  borders/commits to something with no visible content of its own --
+  indistinguishable from "the real window never came to front" from the
+  user's side. (A `GW_HWNDPREV` z-order check during this investigation
+  briefly looked like a *second*, separate z-order bug -- turned out to
+  be Settings' own invisible IME helper window, owned by and belonging
+  to the same real frame window, with zero visual effect; confirmed via
+  `GetClassName`/`GetWindowThreadProcessId`/`IsWindowVisible` before
+  ruling it out, not assumed.) Fixed in `IsCandidateWindow`
+  (`WindowFilters.cpp`): requires `GetWindowTextLengthW(hwnd) > 0` --
+  a real, user-facing window always has some title text, so nothing
+  legitimate is excluded. Rebuilt clean, all 45 tests pass.
+  **Live-verified inside Windows Sandbox**: opening Settings alongside
+  one other window now produces exactly the 2 expected real candidates
+  (the phantom title-less entry is gone from the dump entirely).
 
 **Superseded M3–M6 plan (DWM-thumbnail popup), kept for reference, not being built:**
 M3 — `AltTabSwitcherWindow` placeholder-chrome skeleton; M4 — real DWM

@@ -20,6 +20,23 @@ bool IsCandidateWindow(HWND hwnd) {
     if ((style & WS_CAPTION) == 0) {
         return false;
     }
+    // Excludes a real, confirmed case: a hidden/suspended UWP host process
+    // (ApplicationFrameHost.exe -- Settings and other first-party UWP
+    // apps often stay resident even when the user believes they're
+    // closed) can leave a second, title-less ApplicationFrameWindow
+    // sitting right alongside the real, titled one, otherwise passing
+    // every check above -- confirmed live via `hwnd:"title"[class]`
+    // candidate-dump logging, which caught it as a bare
+    // `0x...:""[ApplicationFrameWindow]` entry next to the real
+    // `"Settings"` one. Alt+Tab landing on that phantom instead of the
+    // real window promotes/borders/commits to something with no visible
+    // content of its own -- indistinguishable from "the real window
+    // stayed hidden behind whatever was in front" from the user's point
+    // of view. A real, user-facing window always has some title text;
+    // nothing legitimate is excluded by requiring one.
+    if (GetWindowTextLengthW(hwnd) == 0) {
+        return false;
+    }
     return true;
 }
 
