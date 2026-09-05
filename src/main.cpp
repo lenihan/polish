@@ -90,6 +90,12 @@ std::unique_ptr<polish::AltTabHook> g_altTabHook;
 // time Tab is pressed -- order-preserving once a session is already open
 // (UpdateAltTabCandidatesPreservingOrder), so Tab walks down a list that
 // holds still, not one that reshuffles survivors around on every press.
+// On a multi-monitor setup, grouped by monitor (see
+// GetMonitorsCurrentFirst) -- current monitor's windows first, then each
+// other monitor's in turn -- per explicit user request: every window
+// stays reachable, but Tab finishes the current monitor before
+// continuing onto the next one, and each monitor gets its own list
+// panel (g_altTabPanels) showing only its own windows.
 // The overlay pool only ever grows (indices beyond the current
 // candidate count just stay hidden, and are explicitly hidden again if the
 // count shrinks -- see OnAltTabCycle), so repeated sessions don't pay
@@ -103,11 +109,20 @@ std::vector<std::unique_ptr<polish::AltTabDimOverlay>> g_altTabOverlays;
 // (one per non-highlighted candidate), so this is a single instance, not
 // a pool.
 std::unique_ptr<polish::AltTabHighlightBorder> g_altTabHighlightBorder;
-// The always-shown active-window list panel (see PLAN.md's Alt+Tab-
-// improvements M3). Single instance, same pre-warmed-at-startup/shown-
-// per-session lifecycle as g_altTabHighlightBorder.
-std::unique_ptr<polish::AltTabListWindow> g_altTabListWindow;
-// The candidate list as of the panel's last full rebuild -- lets
+// One always-shown active-window list panel *per connected monitor* (see
+// PLAN.md's Alt+Tab-improvements plan) -- each showing only its own
+// monitor's subset of g_altTabCandidates, with a highlighted row only on
+// whichever monitor's subset actually contains the globally-highlighted
+// window. Enumerated and created once at startup (pre-warmed, same
+// lifecycle as g_altTabHighlightBorder) -- a monitor connected/
+// disconnected while the app is already running isn't picked up until
+// restart, an accepted v1 simplification.
+struct AltTabMonitorPanel {
+    HMONITOR monitor;
+    std::unique_ptr<polish::AltTabListWindow> window;
+};
+std::vector<AltTabMonitorPanel> g_altTabPanels;
+// The candidate list as of the panels' last full rebuild -- lets
 // ApplyAltTabDimming tell "the set changed, rebuild rows" apart from
 // "just the highlight moved, cheap path" (see ApplyAltTabDimming).
 std::vector<HWND> g_altTabListWindowLastCandidates;
@@ -475,6 +490,37 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
     }
 }
 
+// The monitor a session's list panel/dim overlays initially orient
+// around -- the one containing the current foreground window, matching
+// this feature's existing monitor-placement decision. Computed fresh
+// every rebuild (not cached), but stable for the life of a session in
+// practice: the foreground window itself never changes mid-session (only
+// a commit changes it), so this returns the same monitor on every cycle
+// of the same Alt-hold.
+HMONITOR GetForegroundMonitor() { return MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST); }
+
+BOOL CALLBACK EnumMonitorsProc(HMONITOR monitor, HDC /*hdc*/, LPRECT /*rect*/, LPARAM lParam) {
+    reinterpret_cast<std::vector<HMONITOR>*>(lParam)->push_back(monitor);
+    return TRUE;
+}
+
+// Every connected monitor, current-monitor-first then the rest in their
+// original (stable) EnumDisplayMonitors order -- the order
+// RebuildAltTabCandidates/UpdateAltTabCandidatesPreservingOrder group
+// candidates by, so that a flat Tab/Shift+Tab walk over the resulting
+// list finishes the current monitor's windows before continuing onto the
+// next one. std::stable_partition (not a full sort) is exactly "move the
+// current monitor to the front, leave everyone else's relative order
+// alone" -- there's no other meaningful ordering to impose between
+// monitors this app has no other opinion about.
+std::vector<HMONITOR> GetMonitorsCurrentFirst() {
+    std::vector<HMONITOR> monitors;
+    EnumDisplayMonitors(nullptr, nullptr, EnumMonitorsProc, reinterpret_cast<LPARAM>(&monitors));
+    const HMONITOR current = GetForegroundMonitor();
+    std::stable_partition(monitors.begin(), monitors.end(), [current](HMONITOR m) { return m == current; });
+    return monitors;
+}
+
 BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
     if (polish::IsCandidateWindow(hwnd) && !IsIconic(hwnd)) {
         reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
@@ -492,20 +538,39 @@ BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
 // showed up. Windows Polish *does* have recency data for are still
 // ordered by true MRU first; anything else falls back to EnumWindows'
 // own Z-order (topmost first), appended after.
+//
+// On a multi-monitor setup, the resulting MRU-then-Z-order list is then
+// *grouped* by monitor -- current monitor's windows first (in their
+// relative order from that list), then each other monitor's windows in
+// turn (see GetMonitorsCurrentFirst) -- per explicit user request: every
+// window should still be reachable via Alt+Tab (nothing is excluded),
+// but Tab should finish cycling through the current monitor before
+// continuing onto the next one, rather than interleaving monitors
+// arbitrarily. (An earlier version of this excluded other monitors'
+// windows entirely -- reversed after the user clarified they want
+// everything reachable, just ordered by monitor.)
 void RebuildAltTabCandidates() {
     std::vector<HWND> allCandidates;
     EnumWindows(EnumCandidateWindowsProc, reinterpret_cast<LPARAM>(&allCandidates));
 
-    g_altTabCandidates.clear();
+    std::vector<HWND> globalOrdered;
     for (HWND hwnd : g_activationHistory.OrderedWindows()) {
         if (std::find(allCandidates.begin(), allCandidates.end(), hwnd) != allCandidates.end()) {
-            g_altTabCandidates.push_back(hwnd);
+            globalOrdered.push_back(hwnd);
         }
     }
     for (HWND hwnd : allCandidates) {
-        if (std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd) ==
-            g_altTabCandidates.end()) {
-            g_altTabCandidates.push_back(hwnd);
+        if (std::find(globalOrdered.begin(), globalOrdered.end(), hwnd) == globalOrdered.end()) {
+            globalOrdered.push_back(hwnd);
+        }
+    }
+
+    g_altTabCandidates.clear();
+    for (HMONITOR monitor : GetMonitorsCurrentFirst()) {
+        for (HWND hwnd : globalOrdered) {
+            if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) == monitor) {
+                g_altTabCandidates.push_back(hwnd);
+            }
         }
     }
 }
@@ -525,7 +590,12 @@ void RebuildAltTabCandidates() {
 // back to Z-order" tail -- the previously-highlighted window's tail
 // position would visibly jump on the very next cycle. Still handles
 // windows genuinely opening/closing mid-session (M1's actual goal),
-// just without reordering survivors to do it.
+// just without reordering survivors to do it. A brand-new candidate that
+// opens mid-session is appended at the very end of the whole list
+// (regardless of which monitor it's on) rather than being inserted into
+// its "correct" monitor group -- a known, accepted simplification (new
+// mid-session candidates are rare, and the existing snapshot's monitor
+// grouping is otherwise left completely undisturbed).
 void UpdateAltTabCandidatesPreservingOrder() {
     std::vector<HWND> allCandidates;
     EnumWindows(EnumCandidateWindowsProc, reinterpret_cast<LPARAM>(&allCandidates));
@@ -613,19 +683,34 @@ void EnsureAltTabHighlightBorder() {
 // force DWM to fully recompute z-order for a window that's never
 // actually activated. The promote-then-demote pulse sidesteps that
 // entirely instead of chasing it further.)
-// Row content is rebuilt fresh from g_altTabCandidates every cycle (titles
-// re-read via GetWindowTextW rather than cached) -- cheap for the small
-// candidate counts this feature deals with, and means a title change
-// mid-session shows up without any separate invalidation path.
-std::vector<polish::AltTabListRow> BuildAltTabListRows() {
+// One monitor's own rows -- the subset of g_altTabCandidates on
+// `monitor`, in their existing relative order, plus which local row (if
+// any) is the globally-highlighted window (nullopt if the highlighted
+// window is on a different monitor's panel instead). Titles/icons are
+// re-read fresh from each hwnd every call (not cached) -- cheap for the
+// small per-monitor candidate counts this feature deals with, and means
+// a title change mid-session shows up without any separate invalidation
+// path.
+struct MonitorRowsResult {
     std::vector<polish::AltTabListRow> rows;
-    rows.reserve(g_altTabCandidates.size());
+    std::optional<size_t> highlightIndex;
+};
+
+MonitorRowsResult BuildAltTabListRowsForMonitor(HMONITOR monitor) {
+    MonitorRowsResult result;
+    const HWND highlighted = g_altTabCandidates[g_altTabHighlightIndex];
     for (HWND hwnd : g_altTabCandidates) {
+        if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != monitor) {
+            continue;
+        }
+        if (hwnd == highlighted) {
+            result.highlightIndex = result.rows.size();
+        }
         wchar_t title[256] = L"";
         GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
-        rows.push_back(polish::AltTabListRow{hwnd, title, GetWindowIconHandle(hwnd)});
+        result.rows.push_back(polish::AltTabListRow{hwnd, title, GetWindowIconHandle(hwnd)});
     }
-    return rows;
+    return result;
 }
 
 void ApplyAltTabDimming() {
@@ -667,37 +752,50 @@ void ApplyAltTabDimming() {
         L"[Polish] AltTab: dimming timing -- otherOverlays={}ms highlightPromote={}ms highlightBorder={}ms",
         t1 - t0, t2 - t1, t3 - t2));
 
-    // The list panel is shown alongside the dim/border visuals for every
-    // session (not a separately-toggled thing -- see PLAN.md's Alt+Tab-
-    // improvements plan). Anchored to the monitor of the *actual* current
-    // foreground window (unchanged throughout cycling -- only a commit
-    // ever calls SetForegroundWindow), matching this feature's existing
-    // monitor-placement decision.
+    // One list panel per connected monitor, shown alongside the dim/
+    // border visuals for every session (not a separately-toggled thing --
+    // see PLAN.md's Alt+Tab-improvements plan). Each panel shows only its
+    // own monitor's subset of g_altTabCandidates; only the one monitor
+    // whose subset actually contains the globally-highlighted window
+    // shows a highlighted row.
     //
     // Full rebuild (Show) only when the candidate set itself actually
     // changed since the last cycle; otherwise just move the highlight
-    // marker (SetHighlight, a narrow two-row invalidate). This codebase
-    // has hit the "unconditional full repaint causes visible flashing"
-    // bug shape three separate times already (the tab strip's hover
+    // marker (SetHighlight, a narrow row invalidate). This codebase has
+    // hit the "unconditional full repaint causes visible flashing" bug
+    // shape three separate times already (the tab strip's hover
     // highlight, a member-title-change repaint, this exact class's own
     // clip-optimization for the highlight border) -- not repeating it in
     // brand new code that already knows better.
-    if (g_altTabListWindow) {
-        if (g_altTabCandidates != g_altTabListWindowLastCandidates) {
-            const auto rows = BuildAltTabListRows();
+    if (!g_altTabPanels.empty()) {
+        const bool candidatesChanged = (g_altTabCandidates != g_altTabListWindowLastCandidates);
+        if (candidatesChanged) {
             std::wstring rowDump;
-            for (const auto& row : rows) {
+            for (HWND hwnd : g_altTabCandidates) {
+                wchar_t title[128] = L"";
+                GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
                 if (!rowDump.empty()) {
                     rowDump += L" | ";
                 }
-                rowDump += std::format(L"{}:\"{}\"", reinterpret_cast<void*>(row.hwnd), row.title);
+                rowDump += std::format(L"{}:\"{}\"", reinterpret_cast<void*>(hwnd), title);
             }
             polish::LogDebug(std::format(L"[Polish] AltTab: list panel rows (highlightIndex={}): {}",
                                           g_altTabHighlightIndex, rowDump));
-            g_altTabListWindow->Show(rows, g_altTabHighlightIndex, GetForegroundWindow());
+        }
+        for (auto& panel : g_altTabPanels) {
+            MonitorRowsResult monitorResult = BuildAltTabListRowsForMonitor(panel.monitor);
+            if (monitorResult.rows.empty()) {
+                panel.window->Hide();
+                continue;
+            }
+            if (candidatesChanged) {
+                panel.window->Show(monitorResult.rows, monitorResult.highlightIndex, panel.monitor);
+            } else {
+                panel.window->SetHighlight(monitorResult.highlightIndex);
+            }
+        }
+        if (candidatesChanged) {
             g_altTabListWindowLastCandidates = g_altTabCandidates;
-        } else {
-            g_altTabListWindow->SetHighlight(g_altTabHighlightIndex);
         }
     }
 }
@@ -709,8 +807,8 @@ void EndAltTabSession() {
     if (g_altTabHighlightBorder) {
         g_altTabHighlightBorder->Hide();
     }
-    if (g_altTabListWindow) {
-        g_altTabListWindow->Hide();
+    for (auto& panel : g_altTabPanels) {
+        panel.window->Hide();
     }
     // Forces the next session's first cycle to take ApplyAltTabDimming's
     // full-rebuild (Show) path rather than the cheap SetHighlight-only
@@ -890,12 +988,49 @@ void OnAltTabNavigate(bool downward) { OnAltTabCycle(/*backward=*/!downward); }
 
 // A row click in the list panel commits directly to that row's window,
 // regardless of whichever one Tab-cycling last landed the highlight on.
-void OnAltTabRowActivated(size_t index) {
-    if (!g_altTabSessionOpen || index >= g_altTabCandidates.size()) {
+// Takes the clicked row's own HWND (not an index) -- each monitor's panel
+// only knows its own local subset, so a plain index would be ambiguous
+// without knowing which panel it came from; looking the HWND up here
+// resolves it to the right position in the one shared g_altTabCandidates
+// list.
+void OnAltTabRowActivated(HWND hwnd) {
+    if (!g_altTabSessionOpen) {
         return;
     }
-    g_altTabHighlightIndex = index;
+    const auto it = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd);
+    if (it == g_altTabCandidates.end()) {
+        return;
+    }
+    g_altTabHighlightIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), it));
     OnAltTabCommit();
+}
+
+// (Re)builds g_altTabPanels from the currently-connected monitors --
+// called once at startup, and again on WM_DISPLAYCHANGE (a monitor
+// connected/disconnected, or a resolution/topology change). Without the
+// WM_DISPLAYCHANGE call, the panels created at startup would keep
+// referencing whichever monitors were connected *then*: confirmed as a
+// real bug, human-reported -- disconnecting a second monitor without
+// restarting Polish left every panel silently showing nothing at all,
+// since none of the (now stale/nonexistent) cached HMONITOR handles
+// matched any current window's real monitor anymore, and
+// BuildAltTabListRowsForMonitor's per-panel row list came back empty for
+// every panel. Destroying and recreating the whole set (rather than
+// trying to diff old vs. new monitors) keeps this simple -- monitor
+// topology changes are rare and never happen mid-Alt+Tab-session in
+// practice (ends any open session first regardless, to be safe if one
+// somehow is).
+void RefreshAltTabPanels() {
+    if (g_altTabSessionOpen) {
+        EndAltTabSession();
+    }
+    g_altTabPanels.clear();
+    for (HMONITOR monitor : GetMonitorsCurrentFirst()) {
+        AltTabMonitorPanel panel{monitor, std::make_unique<polish::AltTabListWindow>(GetModuleHandleW(nullptr))};
+        panel.window->SetOnRowActivated(OnAltTabRowActivated);
+        g_altTabPanels.push_back(std::move(panel));
+    }
+    polish::LogDebug(std::format(L"[Polish] AltTab: panels rebuilt for {} monitor(s)", g_altTabPanels.size()));
 }
 
 constexpr UINT kMenuIdRestoreSync = 1;
@@ -1675,6 +1810,14 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             }
             return 0;
 
+        case WM_DISPLAYCHANGE:
+            // Monitor connected/disconnected, or a resolution/topology
+            // change -- rebuild Alt+Tab's per-monitor panels against the
+            // new reality. See RefreshAltTabPanels' own comment for the
+            // real, human-reported bug this fixes.
+            RefreshAltTabPanels();
+            return 0;
+
         case kCloseGroupMessage:
             // Deferred from CloseGroup -- see its own comment for why
             // this can't safely happen synchronously from within the
@@ -1812,27 +1955,28 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         polish::LogDebug(L"[Polish] Alt+Tab keyboard hook installed successfully");
     }
     g_altTabHook->SetOnNavigate(OnAltTabNavigate);
-    // Lets AltTabHook's mouse hook tell "a click on the list panel" apart
-    // from "a click anywhere else" (which commits the session) -- see
-    // AltTabHook's class comment on this second, deliberately-bounded
-    // hook-thread exception.
-    g_altTabHook->SetIsOwnUI(
-        [](POINT screenPt) { return g_altTabListWindow && g_altTabListWindow->ContainsPoint(screenPt); });
+    // Lets AltTabHook's mouse hook tell "a click on one of the list
+    // panels" apart from "a click anywhere else" (which commits the
+    // session) -- see AltTabHook's class comment on this second,
+    // deliberately-bounded hook-thread exception.
+    g_altTabHook->SetIsOwnUI([](POINT screenPt) {
+        return std::any_of(g_altTabPanels.begin(), g_altTabPanels.end(),
+                            [screenPt](const AltTabMonitorPanel& panel) { return panel.window->ContainsPoint(screenPt); });
+    });
 
-    // Pre-create the dim overlays, highlight border, and list panel now,
-    // at startup, rather than paying CreateWindowExW + first-paint
-    // latency in response to the user's actual first Tab press --
-    // confirmed as a real, visible glitch (the previously-active window
-    // briefly still looked highlighted/undimmed before the real
-    // highlight caught up). EnsureAltTabOverlayPoolSize only ever grows
-    // the pool, so this is purely a head start for the common case, not
-    // a hard requirement -- it still grows safely later if more windows
-    // open than were open right now.
+    // Pre-create the dim overlays, highlight border, and one list panel
+    // per connected monitor now, at startup, rather than paying
+    // CreateWindowExW + first-paint latency in response to the user's
+    // actual first Tab press -- confirmed as a real, visible glitch (the
+    // previously-active window briefly still looked highlighted/undimmed
+    // before the real highlight caught up). EnsureAltTabOverlayPoolSize
+    // only ever grows the pool, so this is purely a head start for the
+    // common case, not a hard requirement -- it still grows safely later
+    // if more windows open than were open right now.
     RebuildAltTabCandidates();
     EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
     EnsureAltTabHighlightBorder();
-    g_altTabListWindow = std::make_unique<polish::AltTabListWindow>(GetModuleHandleW(nullptr));
-    g_altTabListWindow->SetOnRowActivated(OnAltTabRowActivated);
+    RefreshAltTabPanels();
 
     OnForegroundChanged(GetForegroundWindow());
 

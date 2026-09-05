@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -19,12 +20,27 @@ struct AltTabListRow {
 };
 
 // A translucent panel shown alongside every Alt+Tab session, listing
-// every active candidate window (icon + title, one row each) with the
+// active candidate windows (icon + title, one row each) with the
 // currently Tab-highlighted row visually marked -- so "where am I in the
 // cycle, and how many are there" is answered by looking at the list, not
 // just by which single on-screen window happens to be undimmed. See
 // PLAN.md's Alt+Tab-improvements plan (M3 lands the active-window list;
 // M4 adds a minimized section below it; M5 adds per-row action buttons).
+//
+// On a multi-monitor setup, per explicit user request, one instance of
+// this class exists *per connected monitor* (see main.cpp's
+// g_altTabPanels) rather than a single panel following the cursor/
+// foreground window around: every monitor shows its own subset of the
+// full candidate list (which windows land in a given monitor's subset is
+// decided by the caller, not this class), and only the one monitor whose
+// subset actually contains the globally-highlighted window shows a
+// highlighted row -- the rest show `std::nullopt` (no highlight). The
+// underlying candidate order groups the current monitor's windows first,
+// then each other monitor's in turn (see GetMonitorsCurrentFirst in
+// main.cpp), so a plain Tab/Shift+Tab walking that single flat list
+// naturally finishes the current monitor before continuing onto the
+// next one -- this class has no monitor-crossing logic of its own to
+// worry about, it only ever renders whatever subset+highlight it's told.
 //
 // Created once (e.g. at startup, alongside AltTabDimOverlay's pool and
 // AltTabHighlightBorder) and only shown/hidden/repopulated per session,
@@ -61,18 +77,22 @@ public:
     AltTabListWindow& operator=(const AltTabListWindow&) = delete;
 
     // Full repopulate: replaces the row list, positions the panel
-    // centered on the monitor containing `monitorAnchor`, marks
-    // `highlightIndex` as highlighted, and shows it. Callers should
-    // prefer SetHighlight (below) when the row content itself hasn't
-    // changed since the last Show -- this rebuilds row layout from
-    // scratch and is comparatively more work.
-    void Show(const std::vector<AltTabListRow>& rows, size_t highlightIndex, HWND monitorAnchor);
+    // centered on `targetMonitor`, marks `highlightIndex` as highlighted
+    // (nullopt if none of this panel's own rows are the globally-
+    // highlighted window), and shows it. Callers should prefer
+    // SetHighlight (below) when the row content itself hasn't changed
+    // since the last Show -- this rebuilds row layout from scratch and
+    // is comparatively more work. A caller with zero rows for this
+    // monitor this cycle should call Hide() instead of Show with an
+    // empty vector.
+    void Show(const std::vector<AltTabListRow>& rows, std::optional<size_t> highlightIndex, HMONITOR targetMonitor);
 
-    // Moves the highlighted-row marker and repaints, without touching row
-    // content or repositioning the panel -- the cheap path for a cycle
-    // where the row set itself didn't change. No-op if index is out of
-    // range for the current row list.
-    void SetHighlight(size_t index);
+    // Moves the highlighted-row marker (or clears it, if nullopt -- this
+    // monitor's subset no longer contains the globally-highlighted
+    // window) and repaints, without touching row content or
+    // repositioning the panel -- the cheap path for a cycle where the
+    // row set itself didn't change.
+    void SetHighlight(std::optional<size_t> index);
 
     void Hide();
     bool IsVisible() const;
@@ -85,9 +105,10 @@ public:
     bool ContainsPoint(POINT screenPt) const;
 
     // Fired when a row is activated: a left-click on it, landing inside
-    // this window (see ContainsPoint) -- with that row's index into the
-    // vector most recently passed to Show.
-    void SetOnRowActivated(std::function<void(size_t index)> callback) { onRowActivated_ = std::move(callback); }
+    // this window (see ContainsPoint) -- with that row's own HWND
+    // (rather than a local index, which would be meaningless to the
+    // caller without knowing which monitor's panel/subset it came from).
+    void SetOnRowActivated(std::function<void(HWND)> callback) { onRowActivated_ = std::move(callback); }
 
 private:
     static LRESULT CALLBACK WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -96,15 +117,14 @@ private:
     void Paint(HDC hdc, const RECT& clientRect) const;
     std::vector<RECT> ComputeRowRects(UINT dpi) const;
     // Resizes/repositions the panel (content-sized from the current row
-    // count) centered on the monitor containing `monitorAnchor`, at the
-    // given DPI.
-    void Reposition(HWND monitorAnchor, UINT dpi);
+    // count) centered on `targetMonitor`, at the given DPI.
+    void Reposition(HMONITOR targetMonitor, UINT dpi);
 
     HINSTANCE instance_;
     HWND window_ = nullptr;
     std::vector<AltTabListRow> rows_;
-    size_t highlightIndex_ = 0;
-    std::function<void(size_t)> onRowActivated_;
+    std::optional<size_t> highlightIndex_;
+    std::function<void(HWND)> onRowActivated_;
 };
 
 }  // namespace polish

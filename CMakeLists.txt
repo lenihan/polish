@@ -66,6 +66,7 @@ target_link_libraries(polish_core PUBLIC
     gdi32
     gdiplus
     uxtheme
+    shcore
 )
 
 if(MSVC)

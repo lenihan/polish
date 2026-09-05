@@ -661,6 +661,92 @@ the highlighted row.
   **Live-verified inside Windows Sandbox**: opening Settings alongside
   one other window now produces exactly the 2 expected real candidates
   (the phantom title-less entry is gone from the dump entirely).
+  - [ ] **Follow-up, not yet confirmed either way**: human-reported
+    "Settings still not coming to front" even after the phantom-window
+    fix above. A properly-set-up repro in Windows Sandbox (force-
+    foregrounding a covering window via the same harmless-keystroke
+    workaround this app itself uses, then verifying via a real pairwise
+    z-order walk -- not just a screenshot -- both while highlighted and
+    after commit) showed Settings correctly promoted in front every
+    time. User has two monitors; the Sandbox environment only has one,
+    so this may be monitor-related (see the very next entry) rather
+    than still-broken promotion -- not chased further as its own bug
+    until it's confirmed to still reproduce after that fix, or a
+    `%TEMP%\polish.log` excerpt from an actual repro is available.
+- [x] **Multi-monitor, first pass (superseded same day, see below):**
+  Alt+Tab candidates scoped to only the monitor it was invoked from,
+  excluding every other monitor's windows entirely. Live-verified
+  working on the real dual-monitor setup, but reversed almost
+  immediately: the user reconsidered and clarified every window should
+  stay reachable, just organized by monitor rather than hidden.
+- [x] **Multi-monitor, actual design: every monitor gets its own list
+  panel; Tab finishes the current monitor's windows, then continues
+  onto the next monitor** -- per explicit user request after using the
+  first pass above. Two parts:
+  - **Candidate order is monitor-*grouped*, not monitor-*filtered*.**
+    `RebuildAltTabCandidates` builds the usual full MRU-then-Z-order list
+    (unchanged, nothing excluded), then regroups it: current monitor's
+    windows first (in their relative order from that list), then each
+    other monitor's windows in turn. New `GetMonitorsCurrentFirst()`
+    (`EnumDisplayMonitors` + `std::stable_partition` on `== GetForegroundMonitor()`)
+    supplies the monitor traversal order. `UpdateAltTabCandidatesPreservingOrder`
+    needed no monitor-awareness changes at all -- it already preserves
+    whatever order a session started with, which now happens to be
+    monitor-grouped from the start. Tab/Shift+Tab's own advance-by-one
+    logic is completely unchanged; walking a flat, monitor-grouped list
+    with ±1 steps *is* "finish this monitor, continue to the next" --
+    no monitor-crossing logic needed anywhere in the cycle path itself.
+  - **One `AltTabListWindow` per connected monitor** (new `main.cpp`
+    `g_altTabPanels`, enumerated and pre-warmed once at startup -- a
+    monitor added/removed while the app is already running isn't picked
+    up until restart, an accepted v1 gap), each showing only its own
+    monitor's subset of the shared candidate list, with a highlighted
+    row only on whichever monitor's subset actually contains the
+    globally-highlighted window (`AltTabListWindow::Show`/`SetHighlight`
+    now take `std::optional<size_t>` instead of a bare index, and
+    `Reposition` takes an `HMONITOR` directly plus `GetDpiForMonitor`
+    -- new `shcore` link dependency -- instead of deriving both from an
+    anchor window). Row activation now reports the clicked row's own
+    `HWND` instead of a local index (`SetOnRowActivated`), since a
+    per-monitor local index would be ambiguous without knowing which
+    panel it came from; `main.cpp`'s `OnAltTabRowActivated` resolves the
+    `HWND` back to its position in the one shared candidate list.
+  Rebuilt clean, all 45 tests pass. **Live-verified on the real
+  dual-monitor setup**: a session started from the primary monitor
+  showed both monitors' panels simultaneously, with the primary
+  monitor's windows grouped first in the shared list (confirmed via the
+  exact row-order log line) and the highlight starting there; continuing
+  to cycle past the primary monitor's last window correctly moved the
+  highlight (and the visibly-undimmed/promoted real window) onto the
+  secondary monitor's panel, with the primary panel simultaneously
+  dropping to no-highlight and its real windows dimming -- confirmed via
+  screenshot, not just the log.
+  - [x] **Real bug, fixed same day: disconnecting a monitor without
+    restarting Polish left every Alt+Tab panel silently showing
+    nothing at all, human-reported.** Root cause: `g_altTabPanels` was
+    only ever built once, at startup, from whichever monitors were
+    connected *then* -- going from 2 monitors down to 1 left every
+    cached `HMONITOR` stale, so `BuildAltTabListRowsForMonitor`'s
+    per-panel filter matched zero real windows for every panel, and
+    each one correctly (per its own "hide if empty" logic) just stayed
+    hidden -- not a crash, just silent, total absence. Fixed with a new
+    `RefreshAltTabPanels()` (destroys and recreates the whole panel set
+    from a fresh monitor enumeration) called both at startup and on
+    `WM_DISPLAYCHANGE` (monitor connected/disconnected, or a resolution/
+    topology change) -- the message window is a real top-level window
+    (not `HWND_MESSAGE`-parented, already true for tray-menu reasons),
+    so it receives that broadcast for free. Ends any open session first
+    as a defensive measure, though a topology change mid-session is not
+    expected in practice. Rebuilt clean, all 45 tests pass.
+    **Live-verified**: confirmed the exact real-world sequence (Polish
+    started with 2 monitors connected, one physically disconnected,
+    Alt+Tab produced no panel at all until restart) matches this root
+    cause; then confirmed the fix two ways -- a normal restart on the
+    now-single-monitor setup correctly builds exactly 1 panel, and a
+    synthetic `WM_DISPLAYCHANGE` sent to the already-running process
+    (no restart) correctly rebuilds the panel set live and Alt+Tab keeps
+    working immediately afterward, both confirmed via the log rather
+    than assumed.
 
 **Superseded M3–M6 plan (DWM-thumbnail popup), kept for reference, not being built:**
 M3 — `AltTabSwitcherWindow` placeholder-chrome skeleton; M4 — real DWM

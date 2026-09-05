@@ -1,5 +1,6 @@
 #include "hook/AltTabListWindow.h"
 
+#include <shellscalingapi.h>
 #include <windowsx.h>
 
 #include <algorithm>
@@ -122,11 +123,11 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             const UINT dpi = GetDpiForWindow(hwnd);
             const std::vector<RECT> rowRects = ComputeRowRects(dpi);
-            for (size_t i = 0; i < rowRects.size(); ++i) {
+            for (size_t i = 0; i < rowRects.size() && i < rows_.size(); ++i) {
                 RECT r = rowRects[i];  // PtInRect takes a non-const RECT*
                 if (PtInRect(&r, pt)) {
                     if (onRowActivated_) {
-                        onRowActivated_(i);
+                        onRowActivated_(rows_[i].hwnd);
                     }
                     break;
                 }
@@ -183,7 +184,7 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
 
     for (size_t i = 0; i < rowRects.size() && i < rows_.size(); ++i) {
         const RECT& rowRect = rowRects[i];
-        const bool highlighted = (i == highlightIndex_);
+        const bool highlighted = (highlightIndex_.has_value() && *highlightIndex_ == i);
         if (highlighted) {
             HBRUSH accentBrush = CreateSolidBrush(accentColor);
             HPEN nullPen = static_cast<HPEN>(GetStockObject(NULL_PEN));
@@ -210,17 +211,16 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     }
 }
 
-void AltTabListWindow::Reposition(HWND monitorAnchor, UINT dpi) {
+void AltTabListWindow::Reposition(HMONITOR targetMonitor, UINT dpi) {
     const int paddingY = Scale(kPanelPaddingY, dpi);
     const int rowHeight = Scale(kRowHeight, dpi);
     const int width = Scale(kPanelWidth, dpi);
     const int height = 2 * paddingY + static_cast<int>(rows_.size()) * rowHeight;
 
-    HMONITOR monitor = MonitorFromWindow(monitorAnchor, MONITOR_DEFAULTTOPRIMARY);
     MONITORINFO monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
     RECT workArea{0, 0, width, height};
-    if (GetMonitorInfoW(monitor, &monitorInfo)) {
+    if (GetMonitorInfoW(targetMonitor, &monitorInfo)) {
         workArea = monitorInfo.rcWork;
     }
     const int x = workArea.left + (workArea.right - workArea.left - width) / 2;
@@ -229,20 +229,29 @@ void AltTabListWindow::Reposition(HWND monitorAnchor, UINT dpi) {
     SetWindowPos(window_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
 }
 
-void AltTabListWindow::Show(const std::vector<AltTabListRow>& rows, size_t highlightIndex, HWND monitorAnchor) {
+void AltTabListWindow::Show(const std::vector<AltTabListRow>& rows, std::optional<size_t> highlightIndex,
+                             HMONITOR targetMonitor) {
     if (window_ == nullptr) {
         return;
     }
     rows_ = rows;
-    highlightIndex_ = rows_.empty() ? 0 : std::min(highlightIndex, rows_.size() - 1);
+    highlightIndex_ = (highlightIndex.has_value() && *highlightIndex < rows_.size()) ? highlightIndex : std::nullopt;
 
-    const UINT dpi = GetDpiForWindow(monitorAnchor);
-    Reposition(monitorAnchor, dpi);
+    // GetDpiForMonitor rather than GetDpiForWindow(window_) -- this panel
+    // is about to move to targetMonitor, which may not be the monitor
+    // window_ currently sits on (its previous session could have shown
+    // it somewhere else, or it could still be at its startup pre-warm
+    // position), so window_'s own current DPI isn't necessarily correct
+    // for the monitor it's about to be sized for.
+    UINT dpiX = USER_DEFAULT_SCREEN_DPI;
+    UINT dpiY = USER_DEFAULT_SCREEN_DPI;
+    GetDpiForMonitor(targetMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
+    Reposition(targetMonitor, dpiX);
     ShowWindow(window_, SW_SHOWNOACTIVATE);
     InvalidateRect(window_, nullptr, FALSE);
 }
 
-void AltTabListWindow::SetHighlight(size_t index) {
+void AltTabListWindow::SetHighlight(std::optional<size_t> index) {
     if (window_ == nullptr) {
         return;
     }
@@ -259,24 +268,27 @@ void AltTabListWindow::SetHighlight(size_t index) {
     // panel"), and this cheap path is the *common* case once the
     // candidate list holds a stable order across a session.
     SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    if (rows_.empty() || index >= rows_.size() || index == highlightIndex_) {
+    if (index.has_value() && *index >= rows_.size()) {
+        index = std::nullopt;
+    }
+    if (index == highlightIndex_) {
         return;
     }
     const UINT dpi = GetDpiForWindow(window_);
     const std::vector<RECT> rowRects = ComputeRowRects(dpi);
-    // Narrow invalidate -- just the two rows that actually change look,
-    // not the whole panel. This codebase has hit the "unconditional full
+    // Narrow invalidate -- just the row(s) that actually change look, not
+    // the whole panel. This codebase has hit the "unconditional full
     // repaint causes visible flashing" bug shape more than once already
     // (the tab strip's own hover highlight, a member-title-change
     // repaint); no reason to reintroduce it here.
-    const size_t oldIndex = highlightIndex_;
+    const std::optional<size_t> oldIndex = highlightIndex_;
     highlightIndex_ = index;
-    if (oldIndex < rowRects.size()) {
-        RECT r = rowRects[oldIndex];
+    if (oldIndex.has_value() && *oldIndex < rowRects.size()) {
+        RECT r = rowRects[*oldIndex];
         InvalidateRect(window_, &r, FALSE);
     }
-    if (index < rowRects.size()) {
-        RECT r = rowRects[index];
+    if (index.has_value() && *index < rowRects.size()) {
+        RECT r = rowRects[*index];
         InvalidateRect(window_, &r, FALSE);
     }
 }
