@@ -10,7 +10,11 @@ namespace {
 // TitleBarMenuHook used).
 AltTabHook* g_instance = nullptr;
 
-enum class HookAction : WPARAM { CycleForward, CycleBackward, Commit, Cancel, NavigateDown, NavigateUp };
+// RowKeyAction (not "RowAction" -- that name is already
+// AltTabHook::RowAction, the *kind* of row action a RowKeyAction message
+// carries in its lParam) is the one HookAction value that isn't fully
+// self-describing from its tag alone.
+enum class HookAction : WPARAM { CycleForward, CycleBackward, Commit, Cancel, NavigateDown, NavigateUp, RowKeyAction };
 
 bool IsDown(WPARAM wParam) { return wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN; }
 bool IsUp(WPARAM wParam) { return wParam == WM_KEYUP || wParam == WM_SYSKEYUP; }
@@ -235,6 +239,30 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         }
     }
 
+    if (sessionActive_ && (data.vkCode == VK_DELETE || data.vkCode == VK_OEM_MINUS || data.vkCode == VK_OEM_PLUS)) {
+        // Same "must already be in a session, never able to start one"
+        // gating and per-key debounce shape as the arrow-key block above.
+        bool& physicallyDown = (data.vkCode == VK_DELETE)       ? deletePhysicallyDown_
+                                : (data.vkCode == VK_OEM_MINUS) ? minusPhysicallyDown_
+                                                                 : plusPhysicallyDown_;
+        if (IsDown(wParam)) {
+            if (physicallyDown) {
+                return true;  // OS key-repeat, not a fresh press -- swallow, don't re-fire
+            }
+            physicallyDown = true;
+            const RowAction action = (data.vkCode == VK_DELETE)       ? RowAction::Close
+                                      : (data.vkCode == VK_OEM_MINUS) ? RowAction::MinimizeToggle
+                                                                       : RowAction::MaximizeToggle;
+            PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::RowKeyAction),
+                         static_cast<LPARAM>(action));
+            return true;
+        }
+        if (IsUp(wParam)) {
+            physicallyDown = false;
+            return true;
+        }
+    }
+
     if (data.vkCode == VK_ESCAPE && IsDown(wParam) && sessionActive_) {
         // Ends the session outright (unlike Alt-up above, Escape is safe
         // to swallow -- it's not a modifier, so it carries none of the
@@ -250,7 +278,7 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
     return false;
 }
 
-void AltTabHook::HandleHookMessage(WPARAM wParam) {
+void AltTabHook::HandleHookMessage(WPARAM wParam, LPARAM lParam) {
     switch (static_cast<HookAction>(wParam)) {
         case HookAction::CycleForward:
             if (onCycle_) {
@@ -280,6 +308,11 @@ void AltTabHook::HandleHookMessage(WPARAM wParam) {
         case HookAction::NavigateUp:
             if (onNavigate_) {
                 onNavigate_(/*downward=*/false);
+            }
+            break;
+        case HookAction::RowKeyAction:
+            if (onRowAction_) {
+                onRowAction_(static_cast<RowAction>(lParam));
             }
             break;
     }

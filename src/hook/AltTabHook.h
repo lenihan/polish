@@ -89,6 +89,10 @@ namespace polish {
 // per-key here too, so OS auto-repeat on a held arrow doesn't rapid-cycle
 // through the list -- the identical bug shape already found and fixed
 // once for Tab itself.
+//
+// Delete/-/+ (see SetOnRowAction), once a session is already active, are
+// recognized and debounced the exact same way -- close/minimize-toggle/
+// maximize-toggle the currently Tab-highlighted row without a mouse.
 class AltTabHook {
 public:
     // hasEligibleCandidates(): called synchronously, only when a session
@@ -129,14 +133,26 @@ public:
     // Never fires unless sessionActive_ is already true.
     void SetOnNavigate(std::function<void(bool downward)> onNavigate) { onNavigate_ = std::move(onNavigate); }
 
+    // Del/-/+ pressed while a session is already active -- keyboard
+    // equivalents of clicking a row's close/minimize-toggle/maximize-
+    // toggle action button (see AltTabListWindow), but with no keyboard
+    // equivalent of "hover" these always mean whichever row is currently
+    // Tab-highlighted; the callback itself is expected to resolve that.
+    // Never fires unless sessionActive_ is already true, same gating as
+    // arrow-key navigation.
+    enum class RowAction { Close, MinimizeToggle, MaximizeToggle };
+    void SetOnRowAction(std::function<void(RowAction action)> onRowAction) { onRowAction_ = std::move(onRowAction); }
+
     // Routes the hook's private message. The hook callback runs on this
     // thread already (low-level hooks are called on the installing
     // thread), so this posts via PostMessage to messageWindow rather
     // than calling back directly -- keeps the hook callback itself down
     // to just recognizing keys and posting, per the timeout risk above.
     // Callers must route WM messages with message id == kHookMessage
-    // here from their WindowProc.
-    void HandleHookMessage(WPARAM wParam);
+    // here from their WindowProc, passing both wParam and lParam through
+    // unchanged (lParam carries the RowAction payload for that action;
+    // every other message ignores it).
+    void HandleHookMessage(WPARAM wParam, LPARAM lParam);
 
     // GetTickCount64() at the moment the first Tab-while-Alt of the
     // current/most recent session was detected in the hook -- a cheap,
@@ -170,6 +186,7 @@ private:
     std::function<void()> onCancel_;
     std::function<bool(POINT screenPt)> isOwnUI_;
     std::function<void(bool downward)> onNavigate_;
+    std::function<void(RowAction action)> onRowAction_;
     HHOOK hook_ = nullptr;
     HHOOK mouseHook_ = nullptr;
 
@@ -194,6 +211,13 @@ private:
     // apart if both happened to be down, however unlikely).
     bool upPhysicallyDown_ = false;
     bool downPhysicallyDown_ = false;
+
+    // Same debounce shape again, one per row-action key -- holding
+    // Minus/Plus down shouldn't rapidly toggle minimize/maximize via OS
+    // key-repeat any more than holding Tab should rapidly cycle.
+    bool deletePhysicallyDown_ = false;
+    bool minusPhysicallyDown_ = false;
+    bool plusPhysicallyDown_ = false;
 
     // True for the rest of the current Alt-hold once Ctrl+Alt+Tab (the
     // deliberate escape hatch to native Alt+Tab -- see HandleKeyEvent)

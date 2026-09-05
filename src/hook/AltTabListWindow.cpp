@@ -38,15 +38,29 @@ constexpr int kHeaderHeight = 22;
 // overkill for one label.
 constexpr double kHeaderFontScale = 0.85;
 
+// Keyboard-shortcut legend below the last row -- always present, in the
+// same small muted style as the section headings (see kHeaderFontScale/
+// kHeaderTextColor, both reused rather than a fourth font/color pair for
+// one more small label).
+constexpr int kFooterHeight = 22;
+constexpr int kFooterTopGap = 6;
+constexpr wchar_t kFooterLegendText[] = L"Del: Close    -: Minimize    +: Maximize";
+
 // Per-row action-button hit target (square) -- reserved at the right
 // edge of *every* row (see class comment on why: keeps row text width
-// constant regardless of which row is currently highlighted/hovered),
-// but only ever drawn for the highlighted row or whichever row the mouse
-// is currently over. Glyphs are drawn a few px smaller than the button
-// box itself so they don't touch its edges.
+// constant regardless of which row is currently highlighted/hovered, or
+// how many buttons a given row actually shows), but only ever drawn for
+// the highlighted row or whichever row the mouse is currently over.
+// Reserved width always accounts for all three buttons (see
+// ActionsReservedWidth) even on a minimized row, which only ever draws
+// two -- keeping every row's text right edge aligned matters more here
+// than reclaiming a few px of text width on minimized rows specifically.
+// Glyphs are drawn a few px smaller than the button box itself so they
+// don't touch its edges.
 constexpr int kActionButtonSize = 20;
 constexpr int kActionButtonGap = 6;
 constexpr int kActionButtonGlyphMargin = 5;
+constexpr int kActionButtonCount = 3;
 
 // The whole window (background AND row content) is rendered at this one
 // constant alpha -- a "frosted, see-through-but-legible" panel doesn't
@@ -71,11 +85,13 @@ constexpr COLORREF kHoverBackgroundColor = RGB(55, 55, 55);
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
-// Horizontal space reserved for the two action buttons at every row's
+// Horizontal space reserved for the three action buttons at every row's
 // right edge (see kActionButtonSize's own comment) -- one shared formula
-// so the button-rect helpers below (row text width) can never drift
-// apart on how much space is actually set aside.
-int ActionsReservedWidth(UINT dpi) { return 2 * Scale(kActionButtonSize, dpi) + Scale(kActionButtonGap, dpi); }
+// so the button-rect helpers below and Paint's row text width can never
+// drift apart on how much space is actually set aside.
+int ActionsReservedWidth(UINT dpi) {
+    return kActionButtonCount * Scale(kActionButtonSize, dpi) + (kActionButtonCount - 1) * Scale(kActionButtonGap, dpi);
+}
 
 // Pure functions of a row's own rect (plus dpi) -- deliberately not
 // dependent on which row is highlighted/hovered, so both Paint and
@@ -98,6 +114,17 @@ RECT ComputeMinimizeToggleButtonRect(const RECT& rowRect, UINT dpi) {
     const int gap = Scale(kActionButtonGap, dpi);
     const int toggleLeft = close.left - gap - buttonSize;
     return RECT{toggleLeft, close.top, toggleLeft + buttonSize, close.bottom};
+}
+
+// Leftmost of the three -- only ever drawn/hit-tested on an
+// active-section row (see class comment: maximize/restore doesn't apply
+// to a minimized row).
+RECT ComputeMaximizeToggleButtonRect(const RECT& rowRect, UINT dpi) {
+    const RECT minimizeToggle = ComputeMinimizeToggleButtonRect(rowRect, dpi);
+    const int buttonSize = Scale(kActionButtonSize, dpi);
+    const int gap = Scale(kActionButtonGap, dpi);
+    const int left = minimizeToggle.left - gap - buttonSize;
+    return RECT{left, minimizeToggle.top, left + buttonSize, minimizeToggle.bottom};
 }
 
 }  // namespace
@@ -212,6 +239,17 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
                     }
                     return 0;
                 }
+                // Maximize/restore-toggle only exists on an active-section
+                // row -- see class comment.
+                if (!rows_[*rowIndex].minimized) {
+                    RECT maximizeRect = ComputeMaximizeToggleButtonRect(rowRect, dpi);
+                    if (PtInRect(&maximizeRect, pt)) {
+                        if (onRowMaximizeToggle_) {
+                            onRowMaximizeToggle_(rows_[*rowIndex].hwnd);
+                        }
+                        return 0;
+                    }
+                }
             }
 
             for (size_t i = 0; i < layout.rowRects.size() && i < rows_.size(); ++i) {
@@ -303,6 +341,13 @@ AltTabListWindow::RowLayout AltTabListWindow::ComputeLayout(UINT dpi) const {
         }
         layout.rowRects.push_back(RECT{paddingX, top, paddingX + width, top + rowHeight});
         top += rowHeight;
+    }
+
+    if (!rows_.empty()) {
+        top += Scale(kFooterTopGap, dpi);
+        const int footerHeight = Scale(kFooterHeight, dpi);
+        layout.footerRect = RECT{paddingX, top, paddingX + width, top + footerHeight};
+        top += footerHeight;
     }
     layout.contentHeight = top + paddingY;
     return layout;
@@ -425,15 +470,35 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
 
             const int margin = Scale(kActionButtonGlyphMargin, dpi);
             if (row.minimized) {
-                // Restore glyph: a small square outline.
-                Rectangle(hdc, toggle.left + margin, toggle.top + margin, toggle.right - margin,
-                          toggle.bottom - margin);
+                // Restore-from-minimized glyph: an upward chevron ("^") --
+                // deliberately not the same square-outline shape as the
+                // maximize glyph below, even though the two never appear
+                // on the same row, so a user scanning down the list never
+                // sees the same icon mean two different things.
+                const int midX = (toggle.left + toggle.right) / 2;
+                drawGlyphLine(toggle.left + margin, toggle.bottom - margin, midX, toggle.top + margin);
+                drawGlyphLine(midX, toggle.top + margin, toggle.right - margin, toggle.bottom - margin);
             } else {
                 // Minimize glyph: a single horizontal line near the
                 // bottom of the box, matching the native title-bar
                 // minimize button's own glyph shape.
                 const int y = toggle.bottom - margin;
                 drawGlyphLine(toggle.left + margin, y, toggle.right - margin, y);
+
+                // Maximize/restore-toggle, active rows only -- native
+                // Windows glyph shapes: a single square outline to
+                // maximize, two overlapping offset squares to restore.
+                const RECT maximizeToggle = ComputeMaximizeToggleButtonRect(rowRect, dpi);
+                if (IsZoomed(row.hwnd)) {
+                    const int offset = Scale(3, dpi);
+                    Rectangle(hdc, maximizeToggle.left + margin + offset, maximizeToggle.top + margin,
+                              maximizeToggle.right - margin, maximizeToggle.bottom - margin - offset);
+                    Rectangle(hdc, maximizeToggle.left + margin, maximizeToggle.top + margin + offset,
+                              maximizeToggle.right - margin - offset, maximizeToggle.bottom - margin);
+                } else {
+                    Rectangle(hdc, maximizeToggle.left + margin, maximizeToggle.top + margin,
+                              maximizeToggle.right - margin, maximizeToggle.bottom - margin);
+                }
             }
 
             drawGlyphLine(close.left + margin, close.top + margin, close.right - margin, close.bottom - margin);
@@ -443,6 +508,13 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
             SelectObject(hdc, oldPen);
             DeleteObject(glyphPen);
         }
+    }
+
+    if (layout.footerRect) {
+        SelectObject(hdc, headerFont);
+        SetTextColor(hdc, kHeaderTextColor);
+        RECT r = *layout.footerRect;
+        DrawTextW(hdc, kFooterLegendText, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
     }
 
     SelectObject(hdc, oldFont);

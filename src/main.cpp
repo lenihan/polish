@@ -1223,6 +1223,34 @@ void OnAltTabRowMinimizeToggle(HWND hwnd) {
     ApplyAltTabDimming();
 }
 
+// Fired by AltTabListWindow's maximize/restore-toggle button, which only
+// ever appears on an active-section row (see PLAN.md's Alt+Tab-
+// improvements M5 follow-up) -- unlike minimize/close, maximize/restore
+// never moves hwnd between sections, so this doesn't need to relocate
+// anything, just refresh so the highlight border immediately matches the
+// window's new (restored/maximized) bounds instead of waiting for the
+// next Tab press. Deliberately a no-op for a minimized-section hwnd
+// (including one reached via the Plus keyboard shortcut while browsing
+// that section) -- maximizing only ever applied to "active windows" per
+// the feature request, not as a side-channel way to un-minimize.
+void OnAltTabRowMaximizeToggle(HWND hwnd) {
+    if (!g_altTabSessionOpen || hwnd == nullptr || !IsWindow(hwnd)) {
+        return;
+    }
+    const auto it = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd);
+    if (it == g_altTabCandidates.end()) {
+        return;
+    }
+    if (IsZoomed(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    } else {
+        ShowWindow(hwnd, SW_MAXIMIZE);
+    }
+    g_altTabHighlightIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), it));
+    g_altTabSelectionInMinimized = false;
+    ApplyAltTabDimming();
+}
+
 // Fired by AltTabListWindow's close ("X") button on the highlighted row
 // or, per explicit user request, any merely-hovered row too. Posts a
 // graceful WM_CLOSE the target app can still intercept (an unsaved-
@@ -1304,6 +1332,7 @@ void RefreshAltTabPanels() {
         AltTabMonitorPanel panel{monitor, std::make_unique<polish::AltTabListWindow>(GetModuleHandleW(nullptr))};
         panel.window->SetOnRowActivated(OnAltTabRowActivated);
         panel.window->SetOnRowMinimizeToggle(OnAltTabRowMinimizeToggle);
+        panel.window->SetOnRowMaximizeToggle(OnAltTabRowMaximizeToggle);
         panel.window->SetOnRowClose(OnAltTabRowClose);
         g_altTabPanels.push_back(std::move(panel));
     }
@@ -2071,7 +2100,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 
         case polish::AltTabHook::kHookMessage:
             if (g_altTabHook) {
-                g_altTabHook->HandleHookMessage(wParam);
+                g_altTabHook->HandleHookMessage(wParam, lParam);
             }
             return 0;
 
@@ -2232,6 +2261,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         polish::LogDebug(L"[Polish] Alt+Tab keyboard hook installed successfully");
     }
     g_altTabHook->SetOnNavigate(OnAltTabNavigate);
+    // Del/-/+ act on whichever row Tab-cycling currently has highlighted
+    // -- there's no keyboard equivalent of a mouse hover, so this is
+    // always CurrentAltTabHighlightedWindow(), unlike the panel's own
+    // mouse-driven callbacks (SetOnRowClose etc.), which can also fire
+    // for a merely-hovered, non-highlighted row.
+    g_altTabHook->SetOnRowAction([](polish::AltTabHook::RowAction action) {
+        const HWND hwnd = CurrentAltTabHighlightedWindow();
+        switch (action) {
+            case polish::AltTabHook::RowAction::Close:
+                OnAltTabRowClose(hwnd);
+                break;
+            case polish::AltTabHook::RowAction::MinimizeToggle:
+                OnAltTabRowMinimizeToggle(hwnd);
+                break;
+            case polish::AltTabHook::RowAction::MaximizeToggle:
+                OnAltTabRowMaximizeToggle(hwnd);
+                break;
+        }
+    });
     // Lets AltTabHook's mouse hook tell "a click on one of the list
     // panels" apart from "a click anywhere else" (which commits the
     // session) -- see AltTabHook's class comment on this second,

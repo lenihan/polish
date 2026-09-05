@@ -32,6 +32,9 @@ current todo list.
   get selected instead of the real app (e.g. Settings).
 - Alt+Tab: a separate "Minimized" section (below an "Active" heading list)
   reaches minimized windows via Up/Down without joining the Tab cycle.
+- Alt+Tab: per-row minimize/maximize/close icon buttons on the
+  highlighted or hovered row, plus Del/-/+ keyboard equivalents for the
+  highlighted row, documented via an on-screen footer legend.
 - Window groups (tab/tile mode): merged to main — combine multiple real
   windows into one taskbar entry, switchable via tabs or shown as tiles.
 - Groups: real window reparenting so members can't be dragged out
@@ -45,8 +48,6 @@ current todo list.
 
 ## Left to do
 
-- Alt+Tab: add per-row minimize/close action buttons on the highlighted
-  row.
 - Alt+Tab: when a monitor's panel has more windows than fit on screen,
   truncate with "..." and auto-scroll to keep the most important ones
   (highlighted/MRU) visible.

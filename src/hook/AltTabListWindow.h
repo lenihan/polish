@@ -35,12 +35,18 @@ struct AltTabListRow {
 // a divider) lists minimized windows -- reachable via Up/Down but never
 // part of the Tab/Shift+Tab cycle itself (see PLAN.md's Alt+Tab-
 // improvements M4). Any row -- highlighted or, per explicit user request,
-// merely hovered by the mouse -- shows two small icon buttons at its
-// right edge: minimize/restore toggle and close (M5). Clicking either
-// acts on that row's window without ending the session or moving Tab's
-// own highlight; every row (not just a highlighted/hovered one) reserves
-// the same icon-sized space at its right edge regardless, so row text
-// never reflows width as highlight/hover moves around.
+// merely hovered by the mouse -- shows small icon buttons at its right
+// edge (M5): close and minimize/restore-toggle always, plus a third
+// maximize/restore-toggle button on active-section rows only (there's no
+// meaningful "maximized" state to toggle for a window that's currently
+// minimized). Clicking any of them acts on that row's window without
+// ending the session or moving Tab's own highlight; every row (not just
+// a highlighted/hovered one) reserves the same icon-sized space at its
+// right edge regardless, so row text never reflows width as
+// highlight/hover moves around or a row's own button count differs. A
+// footer legend below the last row documents the Del/-/+ keyboard
+// equivalents (see AltTabHook::RowAction) so they don't have to be
+// discovered by accident.
 //
 // On a multi-monitor setup, per explicit user request, one instance of
 // this class exists *per connected monitor* (see main.cpp's
@@ -133,6 +139,12 @@ public:
     // immediately refresh this panel's content in place.
     void SetOnRowMinimizeToggle(std::function<void(HWND)> callback) { onRowMinimizeToggle_ = std::move(callback); }
 
+    // Fired by a click on an active-section row's maximize/restore-toggle
+    // icon button -- never drawn or hit-testable on a minimized-section
+    // row (see class comment). Same non-committing, non-relocating
+    // contract as SetOnRowMinimizeToggle otherwise.
+    void SetOnRowMaximizeToggle(std::function<void(HWND)> callback) { onRowMaximizeToggle_ = std::move(callback); }
+
     // Fired by a click on a row's close ("X") icon button, same
     // highlighted-or-hovered-only contract as SetOnRowMinimizeToggle. The
     // caller posts a close request to hwnd and leaves ending/continuing
@@ -151,6 +163,10 @@ private:
         std::vector<RECT> rowRects;
         std::optional<RECT> activeHeaderRect;
         std::optional<RECT> minimizedHeaderRect;
+        // Keyboard-shortcut legend below the last row -- always present
+        // whenever there's at least one row (the panel is never shown
+        // with zero rows at all, see Show()'s own contract).
+        std::optional<RECT> footerRect;
         int contentHeight = 0;
     };
 
@@ -187,6 +203,7 @@ private:
     std::optional<size_t> hoveredIndex_;
     std::function<void(HWND)> onRowActivated_;
     std::function<void(HWND)> onRowMinimizeToggle_;
+    std::function<void(HWND)> onRowMaximizeToggle_;
     std::function<void(HWND)> onRowClose_;
 };
 
