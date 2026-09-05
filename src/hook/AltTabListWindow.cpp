@@ -40,9 +40,10 @@ constexpr double kHeaderFontScale = 0.85;
 
 // Per-row action-button hit target (square) -- reserved at the right
 // edge of *every* row (see class comment on why: keeps row text width
-// constant regardless of which row is currently highlighted), but only
-// ever drawn for the highlighted row. Glyphs are drawn a few px smaller
-// than the button box itself so they don't touch its edges.
+// constant regardless of which row is currently highlighted/hovered),
+// but only ever drawn for the highlighted row or whichever row the mouse
+// is currently over. Glyphs are drawn a few px smaller than the button
+// box itself so they don't touch its edges.
 constexpr int kActionButtonSize = 20;
 constexpr int kActionButtonGap = 6;
 constexpr int kActionButtonGlyphMargin = 5;
@@ -63,14 +64,41 @@ constexpr COLORREF kHighlightTextColor = RGB(255, 255, 255);
 constexpr COLORREF kMinimizedTextColor = RGB(165, 165, 165);
 constexpr COLORREF kSectionDividerColor = RGB(80, 80, 80);
 constexpr COLORREF kHeaderTextColor = RGB(150, 150, 150);
+// A subtler fill than the highlighted row's solid accent color -- just
+// enough to signal "the mouse is over this row" without it reading as
+// "this is what Tab would land on next" (that's the accent color's job).
+constexpr COLORREF kHoverBackgroundColor = RGB(55, 55, 55);
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
 // Horizontal space reserved for the two action buttons at every row's
 // right edge (see kActionButtonSize's own comment) -- one shared formula
-// so ComputeLayout (button rects) and Paint (row text width) can never
-// drift apart on how much space is actually set aside.
+// so the button-rect helpers below (row text width) can never drift
+// apart on how much space is actually set aside.
 int ActionsReservedWidth(UINT dpi) { return 2 * Scale(kActionButtonSize, dpi) + Scale(kActionButtonGap, dpi); }
+
+// Pure functions of a row's own rect (plus dpi) -- deliberately not
+// dependent on which row is highlighted/hovered, so both Paint and
+// WM_LBUTTONDOWN's hit-test can compute the exact same rects for
+// whichever row(s) need them (currently: the highlighted row and/or the
+// hovered row, which may be the same row, different rows, or either one
+// alone) without a caller having to first ask "is this the interesting
+// row" the way a single cached RowLayout field once did.
+RECT ComputeCloseButtonRect(const RECT& rowRect, UINT dpi) {
+    const int buttonSize = Scale(kActionButtonSize, dpi);
+    const int rowPaddingX = Scale(kRowPaddingX, dpi);
+    const int buttonTop = rowRect.top + (Scale(kRowHeight, dpi) - buttonSize) / 2;
+    const int closeLeft = rowRect.right - rowPaddingX - buttonSize;
+    return RECT{closeLeft, buttonTop, closeLeft + buttonSize, buttonTop + buttonSize};
+}
+
+RECT ComputeMinimizeToggleButtonRect(const RECT& rowRect, UINT dpi) {
+    const RECT close = ComputeCloseButtonRect(rowRect, dpi);
+    const int buttonSize = Scale(kActionButtonSize, dpi);
+    const int gap = Scale(kActionButtonGap, dpi);
+    const int toggleLeft = close.left - gap - buttonSize;
+    return RECT{toggleLeft, close.top, toggleLeft + buttonSize, close.bottom};
+}
 
 }  // namespace
 
@@ -159,28 +187,30 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             const RowLayout layout = ComputeLayout(dpi);
 
             // Action-button hit targets take priority over the row-body
-            // hit-test below -- both only ever exist on the highlighted
-            // row, and neither should also be treated as a row-body
-            // click (which would activate/commit instead of toggling
-            // minimize or closing).
-            if (highlightIndex_.has_value() && *highlightIndex_ < rows_.size()) {
-                if (layout.closeRect) {
-                    RECT r = *layout.closeRect;
-                    if (PtInRect(&r, pt)) {
-                        if (onRowClose_) {
-                            onRowClose_(rows_[*highlightIndex_].hwnd);
-                        }
-                        return 0;
-                    }
+            // hit-test below -- they only ever exist on the highlighted
+            // row and/or the hovered row (see class comment), and
+            // neither should also be treated as a row-body click (which
+            // would activate/commit instead of toggling minimize or
+            // closing). Checked for both rows even when they're the same
+            // one -- harmless duplicate work, not worth a branch to skip.
+            for (std::optional<size_t> rowIndex : {highlightIndex_, hoveredIndex_}) {
+                if (!rowIndex.has_value() || *rowIndex >= rows_.size() || *rowIndex >= layout.rowRects.size()) {
+                    continue;
                 }
-                if (layout.minimizeToggleRect) {
-                    RECT r = *layout.minimizeToggleRect;
-                    if (PtInRect(&r, pt)) {
-                        if (onRowMinimizeToggle_) {
-                            onRowMinimizeToggle_(rows_[*highlightIndex_].hwnd);
-                        }
-                        return 0;
+                const RECT& rowRect = layout.rowRects[*rowIndex];
+                RECT closeRect = ComputeCloseButtonRect(rowRect, dpi);
+                if (PtInRect(&closeRect, pt)) {
+                    if (onRowClose_) {
+                        onRowClose_(rows_[*rowIndex].hwnd);
                     }
+                    return 0;
+                }
+                RECT toggleRect = ComputeMinimizeToggleButtonRect(rowRect, dpi);
+                if (PtInRect(&toggleRect, pt)) {
+                    if (onRowMinimizeToggle_) {
+                        onRowMinimizeToggle_(rows_[*rowIndex].hwnd);
+                    }
+                    return 0;
                 }
             }
 
@@ -195,6 +225,34 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             }
             return 0;
         }
+
+        case WM_MOUSEMOVE: {
+            // TrackMouseEvent is (re-)armed on every move rather than
+            // once -- it's a one-shot subscription per MSDN (cleared the
+            // moment it fires), so it must be re-requested after every
+            // WM_MOUSELEAVE, and re-arming it redundantly on moves in
+            // between is harmless.
+            TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
+            TrackMouseEvent(&tme);
+
+            const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            const UINT dpi = GetDpiForWindow(hwnd);
+            const std::vector<RECT> rowRects = ComputeLayout(dpi).rowRects;
+            std::optional<size_t> newHover;
+            for (size_t i = 0; i < rowRects.size(); ++i) {
+                RECT r = rowRects[i];
+                if (PtInRect(&r, pt)) {
+                    newHover = i;
+                    break;
+                }
+            }
+            SetHoveredIndex(newHover);
+            return 0;
+        }
+
+        case WM_MOUSELEAVE:
+            SetHoveredIndex(std::nullopt);
+            return 0;
 
         case WM_DPICHANGED: {
             // Standard MSDN pattern (same as GroupChromeWindow): resize to
@@ -247,21 +305,6 @@ AltTabListWindow::RowLayout AltTabListWindow::ComputeLayout(UINT dpi) const {
         top += rowHeight;
     }
     layout.contentHeight = top + paddingY;
-
-    // Action-button hit targets, right-aligned within the highlighted
-    // row only (see class comment -- every row reserves the space, but
-    // only the highlighted one ever draws or hit-tests buttons there).
-    if (highlightIndex_.has_value() && *highlightIndex_ < layout.rowRects.size()) {
-        const RECT& row = layout.rowRects[*highlightIndex_];
-        const int buttonSize = Scale(kActionButtonSize, dpi);
-        const int gap = Scale(kActionButtonGap, dpi);
-        const int rowPaddingX = Scale(kRowPaddingX, dpi);
-        const int buttonTop = row.top + (rowHeight - buttonSize) / 2;
-        const int closeLeft = row.right - rowPaddingX - buttonSize;
-        const int toggleLeft = closeLeft - gap - buttonSize;
-        layout.closeRect = RECT{closeLeft, buttonTop, closeLeft + buttonSize, buttonTop + buttonSize};
-        layout.minimizeToggleRect = RECT{toggleLeft, buttonTop, toggleLeft + buttonSize, buttonTop + buttonSize};
-    }
     return layout;
 }
 
@@ -333,10 +376,10 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     SelectObject(hdc, textFont);
 
     // Glyphs are drawn with plain 1px lines in kHighlightTextColor --
-    // buttons only ever appear on the highlighted row, whose background
-    // is always the solid accent color, so that's the one color
-    // guaranteed to contrast with it (same color the row's own title
-    // text uses while highlighted).
+    // buttons only ever appear on a row with some background fill behind
+    // them (the highlighted row's solid accent color, or a hovered row's
+    // subtler kHoverBackgroundColor), so this one bright color is
+    // guaranteed to contrast with either.
     auto drawGlyphLine = [hdc](int x1, int y1, int x2, int y2) {
         MoveToEx(hdc, x1, y1, nullptr);
         LineTo(hdc, x2, y2);
@@ -347,17 +390,18 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     for (size_t i = 0; i < rowRects.size() && i < rows_.size(); ++i) {
         const RECT& rowRect = rowRects[i];
         const bool highlighted = (highlightIndex_.has_value() && *highlightIndex_ == i);
+        const bool hovered = (hoveredIndex_.has_value() && *hoveredIndex_ == i);
 
-        if (highlighted) {
-            HBRUSH accentBrush = CreateSolidBrush(accentColor);
+        if (highlighted || hovered) {
+            HBRUSH fillBrush = CreateSolidBrush(highlighted ? accentColor : kHoverBackgroundColor);
             HPEN nullPen = static_cast<HPEN>(GetStockObject(NULL_PEN));
-            HGDIOBJ oldBrush = SelectObject(hdc, accentBrush);
+            HGDIOBJ oldBrush = SelectObject(hdc, fillBrush);
             HGDIOBJ oldPen = SelectObject(hdc, nullPen);
             RoundRect(hdc, rowRect.left, rowRect.top, rowRect.right, rowRect.bottom, rowCornerRadius,
                       rowCornerRadius);
             SelectObject(hdc, oldBrush);
             SelectObject(hdc, oldPen);
-            DeleteObject(accentBrush);
+            DeleteObject(fillBrush);
         }
 
         int textLeft = rowRect.left + rowPaddingX;
@@ -372,12 +416,13 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         SetTextColor(hdc, highlighted ? kHighlightTextColor : (row.minimized ? kMinimizedTextColor : kTextColor));
         DrawTextW(hdc, row.title.c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 
-        if (highlighted && layout.minimizeToggleRect && layout.closeRect) {
+        if (highlighted || hovered) {
+            const RECT toggle = ComputeMinimizeToggleButtonRect(rowRect, dpi);
+            const RECT close = ComputeCloseButtonRect(rowRect, dpi);
             HPEN glyphPen = CreatePen(PS_SOLID, 1, kHighlightTextColor);
             HGDIOBJ oldPen = SelectObject(hdc, glyphPen);
             HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
 
-            const RECT& toggle = *layout.minimizeToggleRect;
             const int margin = Scale(kActionButtonGlyphMargin, dpi);
             if (row.minimized) {
                 // Restore glyph: a small square outline.
@@ -391,7 +436,6 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
                 drawGlyphLine(toggle.left + margin, y, toggle.right - margin, y);
             }
 
-            const RECT& close = *layout.closeRect;
             drawGlyphLine(close.left + margin, close.top + margin, close.right - margin, close.bottom - margin);
             drawGlyphLine(close.right - margin, close.top + margin, close.left + margin, close.bottom - margin);
 
@@ -486,10 +530,40 @@ void AltTabListWindow::SetHighlight(std::optional<size_t> index) {
     }
 }
 
+void AltTabListWindow::SetHoveredIndex(std::optional<size_t> index) {
+    if (index.has_value() && *index >= rows_.size()) {
+        index = std::nullopt;
+    }
+    if (index == hoveredIndex_) {
+        return;
+    }
+    const UINT dpi = GetDpiForWindow(window_);
+    const std::vector<RECT> rowRects = ComputeLayout(dpi).rowRects;
+    const std::optional<size_t> oldIndex = hoveredIndex_;
+    hoveredIndex_ = index;
+    // Same narrow-invalidate shape as SetHighlight -- a full-panel
+    // repaint on every mouse-move over the list would be wasteful and
+    // this codebase has already hit that exact flashing bug shape more
+    // than once elsewhere.
+    if (oldIndex.has_value() && *oldIndex < rowRects.size()) {
+        RECT r = rowRects[*oldIndex];
+        InvalidateRect(window_, &r, FALSE);
+    }
+    if (index.has_value() && *index < rowRects.size()) {
+        RECT r = rowRects[*index];
+        InvalidateRect(window_, &r, FALSE);
+    }
+}
+
 void AltTabListWindow::Hide() {
     if (window_ != nullptr) {
         ShowWindow(window_, SW_HIDE);
     }
+    // Otherwise a stale hoveredIndex_ from before this Hide() could point
+    // at the wrong row (or draw buttons prematurely) the moment the panel
+    // is shown again somewhere else, before the OS gets around to sending
+    // a fresh WM_MOUSEMOVE for wherever the cursor actually is now.
+    hoveredIndex_ = std::nullopt;
 }
 
 bool AltTabListWindow::IsVisible() const { return window_ != nullptr && IsWindowVisible(window_); }

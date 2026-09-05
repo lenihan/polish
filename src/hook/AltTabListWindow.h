@@ -34,12 +34,13 @@ struct AltTabListRow {
 // section below it (rows with AltTabListRow::minimized set, separated by
 // a divider) lists minimized windows -- reachable via Up/Down but never
 // part of the Tab/Shift+Tab cycle itself (see PLAN.md's Alt+Tab-
-// improvements M4). The highlighted row alone also shows two small icon
-// buttons at its right edge -- minimize/restore toggle and close (M5) --
-// acting on that row's window without ending the session or moving
-// focus; every row (not just the highlighted one) reserves the same
-// icon-sized space at its right edge regardless, so row text doesn't
-// reflow width when highlight moves.
+// improvements M4). Any row -- highlighted or, per explicit user request,
+// merely hovered by the mouse -- shows two small icon buttons at its
+// right edge: minimize/restore toggle and close (M5). Clicking either
+// acts on that row's window without ending the session or moving Tab's
+// own highlight; every row (not just a highlighted/hovered one) reserves
+// the same icon-sized space at its right edge regardless, so row text
+// never reflows width as highlight/hover moves around.
 //
 // On a multi-monitor setup, per explicit user request, one instance of
 // this class exists *per connected monitor* (see main.cpp's
@@ -124,16 +125,16 @@ public:
     // caller without knowing which monitor's panel/subset it came from).
     void SetOnRowActivated(std::function<void(HWND)> callback) { onRowActivated_ = std::move(callback); }
 
-    // Fired by a click on the highlighted row's minimize/restore-toggle
-    // icon button (see class comment) -- never on any other row, since
-    // only the highlighted row draws these at all. Does NOT end the
-    // session or call onRowActivated_; the caller is expected to act on
-    // hwnd (minimize if active, restore if minimized) and immediately
-    // refresh this panel's content in place.
+    // Fired by a click on a row's minimize/restore-toggle icon button
+    // (see class comment) -- only ever hit-testable on the highlighted
+    // row or the currently mouse-hovered row (never any other). Does NOT
+    // end the session or call onRowActivated_; the caller is expected to
+    // act on hwnd (minimize if active, restore if minimized) and
+    // immediately refresh this panel's content in place.
     void SetOnRowMinimizeToggle(std::function<void(HWND)> callback) { onRowMinimizeToggle_ = std::move(callback); }
 
-    // Fired by a click on the highlighted row's close ("X") icon button.
-    // Same non-committing contract as SetOnRowMinimizeToggle -- the
+    // Fired by a click on a row's close ("X") icon button, same
+    // highlighted-or-hovered-only contract as SetOnRowMinimizeToggle. The
     // caller posts a close request to hwnd and leaves ending/continuing
     // the session up to whatever happens as a result.
     void SetOnRowClose(std::function<void(HWND)> callback) { onRowClose_ = std::move(callback); }
@@ -150,12 +151,6 @@ private:
         std::vector<RECT> rowRects;
         std::optional<RECT> activeHeaderRect;
         std::optional<RECT> minimizedHeaderRect;
-        // Set only when highlightIndex_ points at a real row -- the two
-        // action-button hit targets on that row, right-aligned within it
-        // (see class comment). Both unset together; there is no
-        // partial-buttons state.
-        std::optional<RECT> minimizeToggleRect;
-        std::optional<RECT> closeRect;
         int contentHeight = 0;
     };
 
@@ -171,11 +166,25 @@ private:
     // Resizes/repositions the panel (content-sized from the current row
     // count) centered on `targetMonitor`, at the given DPI.
     void Reposition(HMONITOR targetMonitor, UINT dpi);
+    // Updates hoveredIndex_ (nullopt to clear) and narrow-invalidates
+    // just the old/new hovered row -- same shape as SetHighlight's own
+    // cheap-repaint path, for the same reason (avoid a full-panel
+    // repaint on every mouse-move over the list).
+    void SetHoveredIndex(std::optional<size_t> index);
 
     HINSTANCE instance_;
     HWND window_ = nullptr;
     std::vector<AltTabListRow> rows_;
     std::optional<size_t> highlightIndex_;
+    // The row currently under the mouse cursor, if any -- independent of
+    // highlightIndex_ (Tab-cycling and hovering are unrelated: hovering
+    // an unselected row reveals its own action buttons without touching
+    // Tab's own selection). Reset to nullopt on WM_MOUSELEAVE, since plain
+    // WM_MOUSEMOVE never fires once the cursor actually leaves the client
+    // area -- TrackMouseEvent(TME_LEAVE) is what makes that message
+    // arrive at all, re-armed on every WM_MOUSEMOVE since it's otherwise
+    // a one-shot subscription per MSDN.
+    std::optional<size_t> hoveredIndex_;
     std::function<void(HWND)> onRowActivated_;
     std::function<void(HWND)> onRowMinimizeToggle_;
     std::function<void(HWND)> onRowClose_;

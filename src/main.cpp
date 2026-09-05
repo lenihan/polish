@@ -1173,14 +1173,15 @@ void OnAltTabRowActivated(HWND hwnd) {
 }
 
 // Fired by AltTabListWindow's minimize/restore-toggle button, which only
-// ever appears on the highlighted row (see PLAN.md's Alt+Tab-improvements
-// M5) -- hwnd is therefore always whatever's currently highlighted,
-// whichever section it's in. Acts on it directly without ending the
-// session or moving focus, then rebuilds both lists and re-locates the
-// highlight by identity, same shape as OnAltTabCycle's own mid-session
-// refresh -- toggling naturally moves hwnd to the other section, so this
-// is what makes the highlight visibly follow it there instead of landing
-// on whatever now occupies its old slot.
+// ever appears on the highlighted row or a merely-hovered row (see
+// PLAN.md's Alt+Tab-improvements M5) -- hwnd may therefore be some row
+// other than whatever Tab-cycling last highlighted. Acts on it directly
+// without ending the session, then rebuilds both lists and re-locates
+// the highlight to hwnd by identity, same shape as OnAltTabCycle's own
+// mid-session refresh -- toggling naturally moves hwnd to the other
+// section, so this is what makes the highlight jump to follow it there
+// (whether or not hwnd was already the highlighted row) rather than
+// landing on whatever now occupies its old slot.
 void OnAltTabRowMinimizeToggle(HWND hwnd) {
     if (!g_altTabSessionOpen || !IsWindow(hwnd)) {
         return;
@@ -1222,20 +1223,61 @@ void OnAltTabRowMinimizeToggle(HWND hwnd) {
     ApplyAltTabDimming();
 }
 
-// Fired by AltTabListWindow's close ("X") button, same highlighted-row-
-// only contract as OnAltTabRowMinimizeToggle above. A graceful WM_CLOSE
-// the target app can still intercept (an unsaved-changes prompt, etc.),
-// deliberately not DestroyWindow. Session stays open. WM_CLOSE is
-// asynchronous -- this doesn't try to force the row out of the list
-// synchronously; the existing EVENT_OBJECT_DESTROY handler already
-// prunes g_activationHistory, and the next Tab/arrow-nav refresh
-// naturally reflects whatever's still actually open.
+// Fired by AltTabListWindow's close ("X") button on the highlighted row
+// or, per explicit user request, any merely-hovered row too. Posts a
+// graceful WM_CLOSE the target app can still intercept (an unsaved-
+// changes prompt, etc.), deliberately not DestroyWindow -- but rather
+// than waiting for that asynchronous close to actually take effect, this
+// removes hwnd from whichever list it's in immediately and fixes up the
+// highlight right away: if hwnd was the currently-selected window, the
+// selection advances to what's now "next" (the row that shifted into its
+// old slot); otherwise the highlight index is just adjusted to keep
+// pointing at the same logical window it already did. Waiting for the
+// natural next refresh instead was confirmed as feeling broken, human-
+// reported, on a window that's slow to actually close. If the app
+// cancels the close (its own unsaved-changes prompt, say), the window
+// simply reappears -- appended at the end -- on the very next Tab press,
+// via UpdateAltTabCandidatesPreservingOrder's normal "newly seen"
+// handling; an accepted, minor simplification rather than tracking
+// pending closes explicitly.
 void OnAltTabRowClose(HWND hwnd) {
     if (!g_altTabSessionOpen || !IsWindow(hwnd)) {
         return;
     }
     polish::LogDebug(std::format(L"[Polish] AltTab: row close -> hwnd={}", reinterpret_cast<void*>(hwnd)));
     PostMessageW(hwnd, WM_CLOSE, 0, 0);
+
+    const auto activeIt = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd);
+    if (activeIt != g_altTabCandidates.end()) {
+        const size_t removedIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), activeIt));
+        g_altTabCandidates.erase(activeIt);
+        if (g_altTabCandidates.size() < 2) {
+            polish::LogDebug(L"[Polish] AltTab: candidate count dropped below 2 after row close, ending session");
+            EndAltTabSession();
+            return;
+        }
+        if (removedIndex == g_altTabHighlightIndex) {
+            g_altTabHighlightIndex = removedIndex % g_altTabCandidates.size();
+        } else if (removedIndex < g_altTabHighlightIndex) {
+            --g_altTabHighlightIndex;
+        }
+        ApplyAltTabDimming();
+        return;
+    }
+
+    const auto minimizedIt = std::find(g_altTabMinimized.begin(), g_altTabMinimized.end(), hwnd);
+    if (minimizedIt != g_altTabMinimized.end()) {
+        const size_t removedIndex = static_cast<size_t>(std::distance(g_altTabMinimized.begin(), minimizedIt));
+        g_altTabMinimized.erase(minimizedIt);
+        if (g_altTabMinimized.empty()) {
+            g_altTabSelectionInMinimized = false;
+        } else if (removedIndex == g_altTabMinimizedHighlightIndex) {
+            g_altTabMinimizedHighlightIndex = removedIndex % g_altTabMinimized.size();
+        } else if (removedIndex < g_altTabMinimizedHighlightIndex) {
+            --g_altTabMinimizedHighlightIndex;
+        }
+        ApplyAltTabDimming();
+    }
 }
 
 // (Re)builds g_altTabPanels from the currently-connected monitors --
