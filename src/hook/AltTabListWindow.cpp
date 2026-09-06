@@ -46,6 +46,19 @@ constexpr int kFooterHeight = 22;
 constexpr int kFooterTopGap = 6;
 constexpr wchar_t kFooterLegendText[] = L"Del: Close    -: Minimize    +: Maximize";
 
+// A monitor with enough open windows to overflow the panel's natural
+// height gets a capped, scrollable viewport instead (see Reposition,
+// RecomputeScrollOffset) -- this margin keeps the capped panel from ever
+// touching the very top/bottom edge of the monitor's work area, and the
+// floor guarantees at least a few rows' worth of height even on a
+// pathologically short work area.
+constexpr int kViewportMarginPx = 40;
+// Fixed-position strip painted over the true top/bottom edge of the
+// viewport (not part of the scrolled content) whenever content is
+// actually scrolled out of view that direction -- see Paint.
+constexpr int kTruncationIndicatorHeight = 16;
+constexpr wchar_t kTruncationIndicatorText[] = L"...";
+
 // Per-row action-button hit target (square) -- reserved at the right
 // edge of *every* row (see class comment on why: keeps row text width
 // constant regardless of which row is currently highlighted/hovered, or
@@ -192,6 +205,24 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             const int width = clientRect.right - clientRect.left;
             const int height = clientRect.bottom - clientRect.top;
             if (width > 0 && height > 0) {
+                // BeginPaint clips hdc to the OS's own "dirty" rect
+                // (paint.rcPaint), which can be narrower than the full
+                // client area for a partial-invalidate repaint (e.g. one
+                // of the two-row narrow invalidates SetHighlight/
+                // SetHoveredIndex/RepaintRow use). Paint() always
+                // redraws the *entire* client area regardless of what's
+                // actually dirty (see WM_ERASEBKGND's own comment on
+                // this) -- clearing the clip region here is what makes
+                // the BitBlt below actually reach every pixel Paint()
+                // just drew into memDC, not just whatever triggered this
+                // particular WM_PAINT. Confirmed as a real, human-
+                // reported bug without this: content outside the
+                // triggering invalidate's own rect (a truncation
+                // indicator strip pinned to the viewport edge, unrelated
+                // to whichever row's highlight/hover changed) silently
+                // never made it to the screen.
+                SelectClipRgn(hdc, nullptr);
+
                 // Double-buffered for the same reason as GroupChromeWindow's
                 // tab strip: many separate GDI calls straight to the live
                 // screen HDC is a classic flicker source.
@@ -209,7 +240,12 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
         }
 
         case WM_LBUTTONDOWN: {
-            const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            // ComputeLayout's rects live in unshifted "natural" content
+            // space (see scrollOffset_'s own comment) -- translate the
+            // click point into that same space once, up front, so every
+            // PtInRect below can compare against those rects directly.
+            pt.y += scrollOffset_;
             const UINT dpi = GetDpiForWindow(hwnd);
             const RowLayout layout = ComputeLayout(dpi);
 
@@ -273,7 +309,8 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, hwnd, 0};
             TrackMouseEvent(&tme);
 
-            const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            pt.y += scrollOffset_;  // see WM_LBUTTONDOWN's identical translation
             const UINT dpi = GetDpiForWindow(hwnd);
             const std::vector<RECT> rowRects = ComputeLayout(dpi).rowRects;
             std::optional<size_t> newHover;
@@ -359,6 +396,19 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     HBRUSH backgroundBrush = CreateSolidBrush(kBackgroundColor);
     FillRect(hdc, &clientRect, backgroundBrush);
     DeleteObject(backgroundBrush);
+
+    // Everything from here on is drawn using ComputeLayout's "natural"
+    // (unshifted, potentially taller than the actual viewport) rects --
+    // shifting the DC's own viewport origin lets every one of those draw
+    // calls stay exactly as if there were no scrolling at all, with GDI
+    // itself doing the translation (and naturally clipping anything that
+    // ends up outside `clientRect`, which is exactly the height-capped
+    // viewport, not the full content height). The background fill above
+    // deliberately happens BEFORE this shift, using the real, unshifted
+    // clientRect, so it always covers the whole visible viewport
+    // regardless of scroll position.
+    POINT priorViewportOrg{};
+    SetViewportOrgEx(hdc, 0, -scrollOffset_, &priorViewportOrg);
 
     // A plain memory DC (see WM_PAINT) has no font selected of its own,
     // so it falls back to whatever stock font GDI defaults to -- a tiny,
@@ -527,6 +577,38 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         DrawTextW(hdc, kFooterLegendText, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
     }
 
+    // Back to unshifted (viewport/client) coordinates for the rest of
+    // this function -- the truncation strips below are fixed to the true
+    // top/bottom edge of the viewport, not part of the scrolled content.
+    SetViewportOrgEx(hdc, priorViewportOrg.x, priorViewportOrg.y, nullptr);
+
+    const int viewportHeight = clientRect.bottom - clientRect.top;
+    const int maxScroll = std::max(0, layout.contentHeight - viewportHeight);
+    if (maxScroll > 0) {
+        const int indicatorHeight = Scale(kTruncationIndicatorHeight, dpi);
+        HBRUSH indicatorBrush = CreateSolidBrush(kBackgroundColor);
+        SelectObject(hdc, headerFont);
+        SetTextColor(hdc, kHeaderTextColor);
+        // Painted on top of whatever scrolled content happens to land
+        // there (a row sliced in half by the viewport edge, most likely)
+        // -- deliberately capping that off with a clean, opaque strip and
+        // a "..." label rather than leaving a half-cut row as the only
+        // signal that more content exists off-screen.
+        if (scrollOffset_ > 0) {
+            RECT strip{clientRect.left, clientRect.top, clientRect.right, clientRect.top + indicatorHeight};
+            FillRect(hdc, &strip, indicatorBrush);
+            DrawTextW(hdc, kTruncationIndicatorText, -1, &strip,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        if (scrollOffset_ < maxScroll) {
+            RECT strip{clientRect.left, clientRect.bottom - indicatorHeight, clientRect.right, clientRect.bottom};
+            FillRect(hdc, &strip, indicatorBrush);
+            DrawTextW(hdc, kTruncationIndicatorText, -1, &strip,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        }
+        DeleteObject(indicatorBrush);
+    }
+
     SelectObject(hdc, oldFont);
     DeleteObject(textFont);
     DeleteObject(headerFont);
@@ -534,14 +616,24 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
 
 void AltTabListWindow::Reposition(HMONITOR targetMonitor, UINT dpi) {
     const int width = Scale(kPanelWidth, dpi);
-    const int height = ComputeLayout(dpi).contentHeight;
+    const int naturalHeight = ComputeLayout(dpi).contentHeight;
 
     MONITORINFO monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
-    RECT workArea{0, 0, width, height};
+    RECT workArea{0, 0, width, naturalHeight};
     if (GetMonitorInfoW(targetMonitor, &monitorInfo)) {
         workArea = monitorInfo.rcWork;
     }
+    // Cap the panel's height to the monitor's own work area (minus a
+    // margin) rather than letting it grow past the screen when there are
+    // enough candidates -- content beyond what fits scrolls instead (see
+    // scrollOffset_/RecomputeScrollOffset). The floor guarantees a few
+    // rows' worth of height even on a pathologically short work area.
+    const int workAreaHeight = workArea.bottom - workArea.top;
+    const int maxViewportHeight =
+        std::max(Scale(kRowHeight, dpi) * 3, workAreaHeight - Scale(kViewportMarginPx, dpi));
+    const int height = std::min(naturalHeight, maxViewportHeight);
+
     const int x = workArea.left + (workArea.right - workArea.left - width) / 2;
     const int y = workArea.top + (workArea.bottom - workArea.top - height) / 2;
 
@@ -566,6 +658,13 @@ void AltTabListWindow::Show(const std::vector<AltTabListRow>& rows, std::optiona
     UINT dpiY = USER_DEFAULT_SCREEN_DPI;
     GetDpiForMonitor(targetMonitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
     Reposition(targetMonitor, dpiX);
+    // Must run after Reposition -- it reads the window's now-current
+    // (possibly height-capped) client rect to decide whether/how much to
+    // scroll. Safe to call unconditionally: it clamps scrollOffset_ from
+    // whatever value it happened to hold before (e.g. from a completely
+    // different, longer row set in a prior session), so a short new list
+    // that needs no scrolling at all still correctly resets it to 0.
+    RecomputeScrollOffset();
     ShowWindow(window_, SW_SHOWNOACTIVATE);
     InvalidateRect(window_, nullptr, FALSE);
 }
@@ -593,21 +692,38 @@ void AltTabListWindow::SetHighlight(std::optional<size_t> index) {
     if (index == highlightIndex_) {
         return;
     }
-    const UINT dpi = GetDpiForWindow(window_);
-    const std::vector<RECT> rowRects = ComputeLayout(dpi).rowRects;
+    const std::optional<size_t> oldIndex = highlightIndex_;
+    highlightIndex_ = index;
+
+    // A scroll-offset change shifts literally every visible row, not
+    // just the two whose highlight state changed -- narrow-invalidating
+    // just those two in that case would leave the rest of the panel
+    // showing stale content at their old (pre-scroll) positions. Only
+    // takes this path on a monitor with enough candidates to overflow
+    // the viewport at all (see RecomputeScrollOffset) -- the common case
+    // (everything fits) never changes scrollOffset_ here.
+    if (RecomputeScrollOffset()) {
+        InvalidateRect(window_, nullptr, FALSE);
+        return;
+    }
+
     // Narrow invalidate -- just the row(s) that actually change look, not
     // the whole panel. This codebase has hit the "unconditional full
     // repaint causes visible flashing" bug shape more than once already
     // (the tab strip's own hover highlight, a member-title-change
     // repaint); no reason to reintroduce it here.
-    const std::optional<size_t> oldIndex = highlightIndex_;
-    highlightIndex_ = index;
+    const UINT dpi = GetDpiForWindow(window_);
+    const std::vector<RECT> rowRects = ComputeLayout(dpi).rowRects;
     if (oldIndex.has_value() && *oldIndex < rowRects.size()) {
         RECT r = rowRects[*oldIndex];
+        r.top -= scrollOffset_;
+        r.bottom -= scrollOffset_;
         InvalidateRect(window_, &r, FALSE);
     }
     if (index.has_value() && *index < rowRects.size()) {
         RECT r = rowRects[*index];
+        r.top -= scrollOffset_;
+        r.bottom -= scrollOffset_;
         InvalidateRect(window_, &r, FALSE);
     }
 }
@@ -629,12 +745,49 @@ void AltTabListWindow::SetHoveredIndex(std::optional<size_t> index) {
     // than once elsewhere.
     if (oldIndex.has_value() && *oldIndex < rowRects.size()) {
         RECT r = rowRects[*oldIndex];
+        r.top -= scrollOffset_;
+        r.bottom -= scrollOffset_;
         InvalidateRect(window_, &r, FALSE);
     }
     if (index.has_value() && *index < rowRects.size()) {
         RECT r = rowRects[*index];
+        r.top -= scrollOffset_;
+        r.bottom -= scrollOffset_;
         InvalidateRect(window_, &r, FALSE);
     }
+}
+
+bool AltTabListWindow::RecomputeScrollOffset() {
+    if (window_ == nullptr) {
+        return false;
+    }
+    const UINT dpi = GetDpiForWindow(window_);
+    const RowLayout layout = ComputeLayout(dpi);  // natural, unshifted coordinates
+    RECT clientRect;
+    GetClientRect(window_, &clientRect);
+    const int viewportHeight = clientRect.bottom - clientRect.top;
+    const int maxScroll = std::max(0, layout.contentHeight - viewportHeight);
+
+    int newOffset = std::clamp(scrollOffset_, 0, maxScroll);
+    if (highlightIndex_.has_value() && *highlightIndex_ < layout.rowRects.size()) {
+        // "Ensure visible" -- the smallest scroll adjustment that brings
+        // the highlighted row fully into the viewport, not a re-center-
+        // every-time jump. Keeps the list feeling stable across ordinary
+        // Tab presses instead of visibly hopping around.
+        const RECT& highlightRect = layout.rowRects[*highlightIndex_];
+        if (highlightRect.top - newOffset < 0) {
+            newOffset = highlightRect.top;
+        } else if (highlightRect.bottom - newOffset > viewportHeight) {
+            newOffset = highlightRect.bottom - viewportHeight;
+        }
+    }
+    newOffset = std::clamp(newOffset, 0, maxScroll);
+
+    if (newOffset == scrollOffset_) {
+        return false;
+    }
+    scrollOffset_ = newOffset;
+    return true;
 }
 
 void AltTabListWindow::RepaintRow(HWND hwnd) {
@@ -650,6 +803,8 @@ void AltTabListWindow::RepaintRow(HWND hwnd) {
     const std::vector<RECT> rowRects = ComputeLayout(dpi).rowRects;
     if (index < rowRects.size()) {
         RECT r = rowRects[index];
+        r.top -= scrollOffset_;
+        r.bottom -= scrollOffset_;
         InvalidateRect(window_, &r, FALSE);
     }
 }

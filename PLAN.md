@@ -35,6 +35,9 @@ current todo list.
 - Alt+Tab: per-row minimize/maximize/close icon buttons on the
   highlighted or hovered row, plus Del/-/+ keyboard equivalents for the
   highlighted row, documented via an on-screen footer legend.
+- Alt+Tab: a monitor's panel caps its height and scrolls (keeping the
+  highlighted row in view) with a "..." strip when there are more
+  candidates than fit on screen.
 - Window groups (tab/tile mode): merged to main — combine multiple real
   windows into one taskbar entry, switchable via tabs or shown as tiles.
 - Groups: real window reparenting so members can't be dragged out
@@ -48,9 +51,6 @@ current todo list.
 
 ## Left to do
 
-- Alt+Tab: when a monitor's panel has more windows than fit on screen,
-  truncate with "..." and auto-scroll to keep the most important ones
-  (highlighted/MRU) visible.
 - Add Alt+` to cycle a single app's own windows by most-recently-used
   order (native Windows does this by Z-order, not MRU).
 - Groups: handle a member window closing while backgrounded or tiled.

@@ -46,7 +46,11 @@ struct AltTabListRow {
 // highlight/hover moves around or a row's own button count differs. A
 // footer legend below the last row documents the Del/-/+ keyboard
 // equivalents (see AltTabHook::RowAction) so they don't have to be
-// discovered by accident.
+// discovered by accident. If a monitor has enough candidates that the
+// full list would overflow its work area, the panel's height is capped
+// instead of growing past the screen, and the content scrolls (see
+// scrollOffset_) to keep the highlighted row in view, with a small "..."
+// strip pinned to whichever edge(s) still have hidden content.
 //
 // On a multi-monitor setup, per explicit user request, one instance of
 // this class exists *per connected monitor* (see main.cpp's
@@ -198,11 +202,33 @@ private:
     // cheap-repaint path, for the same reason (avoid a full-panel
     // repaint on every mouse-move over the list).
     void SetHoveredIndex(std::optional<size_t> index);
+    // Re-derives scrollOffset_ from the current window's actual client
+    // height versus ComputeLayout's natural (unclamped) content height,
+    // keeping the highlighted row in view with the smallest possible
+    // scroll (an "ensure visible" listbox-style scroll, not a re-center-
+    // every-time one) -- see class comment on overflow. Returns whether
+    // scrollOffset_ actually changed value, so a caller that only moved
+    // the highlight within the already-visible viewport can still take
+    // its own cheap narrow-invalidate path instead of a full repaint.
+    bool RecomputeScrollOffset();
 
     HINSTANCE instance_;
     HWND window_ = nullptr;
     std::vector<AltTabListRow> rows_;
     std::optional<size_t> highlightIndex_;
+    // Vertical pixel offset applied only when there are more rows than
+    // fit in the panel's height-capped viewport (see kViewportMarginPx in
+    // the .cpp) -- 0 whenever everything fits, which is the overwhelming
+    // common case. ComputeLayout's rects stay in this "natural",
+    // unshifted coordinate space throughout; Paint applies the shift via
+    // SetViewportOrgEx for drawing, and every other consumer of a
+    // ComputeLayout rect (WM_LBUTTONDOWN/WM_MOUSEMOVE's hit-testing,
+    // SetHighlight/SetHoveredIndex/RepaintRow's invalidate rects) applies
+    // it manually instead, since none of those go through a GDI DC
+    // transform. Follows only the highlighted row, never the hovered one
+    // -- scrolling the list just because the mouse happened to sit near
+    // an edge would be jarring, not helpful.
+    int scrollOffset_ = 0;
     // The row currently under the mouse cursor, if any -- independent of
     // highlightIndex_ (Tab-cycling and hovering are unrelated: hovering
     // an unselected row reveals its own action buttons without touching
