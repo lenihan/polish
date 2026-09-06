@@ -13,13 +13,31 @@
 namespace polish {
 
 // The visible window for a group: a real, normal top-level application
-// window (WS_OVERLAPPEDWINDOW, no WS_EX_TOOLWINDOW) with a tab strip
-// across the top listing its members -- unlike AltTabDimOverlay/
-// AltTabHighlightBorder, this is meant to appear completely normally in
-// the taskbar and Alt+Tab, both natively and via Polish's own
-// replacement (see PLAN.md's "Alt+Tab integration" note: this needs
-// zero special-casing in IsCandidateWindow/RebuildAltTabCandidates,
-// simply by being a normal window).
+// window (WS_OVERLAPPEDWINDOW, no WS_EX_TOOLWINDOW) with a self-painted
+// title bar (replacing the native OS caption -- see TitleBarHeight) and,
+// in Tab mode, a tab strip across the top listing its members -- unlike
+// AltTabDimOverlay/AltTabHighlightBorder, this is meant to appear
+// completely normally in the taskbar and Alt+Tab, both natively and via
+// Polish's own replacement (see PLAN.md's "Alt+Tab integration" note:
+// this needs zero special-casing in IsCandidateWindow/
+// RebuildAltTabCandidates, simply by being a normal window).
+//
+// The custom title bar deliberately does NOT drop WS_CAPTION/
+// WS_THICKFRAME/WS_SYSMENU (the window creation style is unchanged from
+// a plain WS_OVERLAPPEDWINDOW) -- it shrinks the native caption's
+// non-client space down to a thin resize-border sliver via WM_NCCALCSIZE
+// and repaints its own content into the client area that frees up,
+// reporting HTCAPTION/HTMINBUTTON/HTMAXBUTTON/HTCLOSE for the
+// corresponding regions via WM_NCHITTEST. This is the same technique
+// Windows Terminal's non-client island window uses, and it's what keeps
+// DWM's drop shadow, Windows 11's rounded corners, WS_THICKFRAME edge-
+// resize, and Aero Snap (drag-to-edge, Win+Arrow, and -- because
+// HTMAXBUTTON is a real hit-test code Windows 11 itself recognizes --
+// the Snap Layouts hover flyout) all working exactly as they would for a
+// native caption, with none of it reimplemented by hand. Actually
+// dropping WS_CAPTION entirely (a fully borderless WS_POPUP window) was
+// considered and rejected for exactly this reason: it would silently
+// lose all of the above and require reimplementing each one manually.
 //
 // Rendering is plain GDI (FillRect/Rectangle/DrawTextW), not the
 // alpha-blended DIB/GDI+ pipeline the dim overlay and highlight border
@@ -216,11 +234,22 @@ private:
     // range for the current boundary list.
     void InvalidateSplitterBand(bool column, size_t index);
 
-    // Total space reserved above the member content: the tab strip
-    // itself, plus (Tab mode only) the connector band below it. Tile
-    // mode has no per-tab connector (no single active tab to connect),
-    // so it reserves just the strip.
+    // Total space reserved above the member content: the custom title
+    // bar band (see TitleBarHeight) always, plus -- Tab mode only -- the
+    // tab strip and its connector band below that. Tile mode has no tab
+    // strip (nothing to click, every member is simultaneously visible)
+    // but still needs the title bar band itself, since that's now the
+    // only place the group's name and window controls are shown at all
+    // (the native caption that used to show them is gone -- see
+    // TitleBarHeight's own comment).
     int HeaderHeight(UINT dpi) const;
+
+    // Height of the self-painted title bar band that replaces the native
+    // OS caption (removed via WM_NCCALCSIZE shrinking the real
+    // non-client caption down to a thin resize-border sliver -- see
+    // HandleMessage's WM_NCCALCSIZE/WM_NCHITTEST cases). Always reserved,
+    // in both Tab and Tile mode.
+    int TitleBarHeight(UINT dpi) const;
 
     HINSTANCE instance_;
     HWND window_ = nullptr;

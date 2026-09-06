@@ -13,6 +13,12 @@ namespace polish {
 namespace {
 
 constexpr wchar_t kWindowClassName[] = L"PolishGroupChromeWindow";
+// Height of the self-painted title bar band that replaces the native OS
+// caption -- see the class comment (GroupChromeWindow.h) for the
+// shrink-the-caption-via-WM_NCCALCSIZE technique this relies on. Chosen
+// to read as a normal Windows 11 title bar (comparable to e.g. Windows
+// Terminal's own custom one), not the plain ~31px native caption height.
+constexpr int kTitleBarHeight = 32;  // logical (96 DPI) px
 constexpr int kTabStripHeight = 36;   // logical (96 DPI) px
 constexpr int kTabMinWidth = 120;     // logical px
 constexpr int kTabMaxWidth = 220;     // logical px
@@ -145,6 +151,100 @@ LRESULT CALLBACK GroupChromeWindow::WindowProcThunk(HWND hwnd, UINT message, WPA
 
 LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
+        case WM_NCCALCSIZE: {
+            // wParam is FALSE (a single RECT*, no repositioning
+            // capability) the first time this fires during a window's
+            // own creation -- confirmed live: skipping the override in
+            // that case entirely (as an earlier version of this code did)
+            // left the native caption at full height and fully
+            // functional, since the TRUE-only override never ran until
+            // some later resize/move, which this window may never
+            // actually get. Both cases are handled the same way below:
+            // get DefWindowProcW's own answer first (correct left/right/
+            // bottom resize-border insets either way -- WS_THICKFRAME
+            // stays in place, so edge/corner resize keeps working exactly
+            // as it does natively), then shrink just its *top* -- sized
+            // for the full native caption, exactly the ~31px band this
+            // class reclaims to paint its own title bar into (see the
+            // class comment's shrink-not-remove technique) -- down to a
+            // thin resize-border sliver, handing the rest of that space
+            // back as ordinary client area.
+            RECT* rect = (wParam == TRUE) ? &reinterpret_cast<NCCALCSIZE_PARAMS*>(lParam)->rgrc[0]
+                                            : reinterpret_cast<RECT*>(lParam);
+            const RECT requestedRect = *rect;
+            const LRESULT result = DefWindowProcW(hwnd, message, wParam, lParam);
+            // Maximized windows are a documented, known gotcha here:
+            // Windows deliberately sizes a maximized top-level window a
+            // few px past the actual monitor work area on every side (so
+            // the invisible resize border lands off-screen), and
+            // DefWindowProcW's own top inset above already accounts for
+            // that specifically for this window's current maximized
+            // rect. Overriding it with our own thin-border constant
+            // (which knows nothing about that offset) would leave real
+            // content clipped at the monitor edge -- confirmed exactly
+            // this failure mode in early testing of this exact technique
+            // elsewhere, not something to rediscover here. Only override
+            // when not maximized; DefWindowProcW's own maximized-case
+            // top is already correct as-is.
+            if (!IsZoomed(hwnd)) {
+                const UINT dpi = GetDpiForWindow(hwnd);
+                const int topBorder =
+                    GetSystemMetricsForDpi(SM_CYSIZEFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                rect->top = requestedRect.top + topBorder;
+            }
+            return (wParam == TRUE) ? result : 0;
+        }
+
+        case WM_NCHITTEST: {
+            const LRESULT defaultHit = DefWindowProcW(hwnd, message, wParam, lParam);
+            // Only a genuine resize-border/corner hit is passed through --
+            // WS_THICKFRAME's own hit-testing for those is computed from
+            // the outer window rect and the OS resize-frame thickness,
+            // independent of caption height, so it still works unchanged
+            // even though the caption itself was shrunk above. Anything
+            // else DefWindowProcW might report here -- HTCAPTION,
+            // HTMINBUTTON, HTMAXBUTTON, HTCLOSE, HTSYSMENU -- is computed
+            // against the *original*, un-shrunk caption geometry (DPI/
+            // theme metrics it tracks on its own, not the client rect
+            // WM_NCCALCSIZE just changed), which is exactly what let a
+            // click land on the native minimize button and actually
+            // minimize the window even after this class's own
+            // WM_NCCALCSIZE override -- confirmed live: the native
+            // buttons kept working, unshrunk, until this exclusion was
+            // added. Every one of those must be re-decided by this
+            // class's own logic below instead.
+            switch (defaultHit) {
+                case HTLEFT:
+                case HTRIGHT:
+                case HTTOP:
+                case HTTOPLEFT:
+                case HTTOPRIGHT:
+                case HTBOTTOM:
+                case HTBOTTOMLEFT:
+                case HTBOTTOMRIGHT:
+                    return defaultHit;
+                default:
+                    break;
+            }
+            POINT clientPt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            ScreenToClient(hwnd, &clientPt);
+            RECT clientRect{};
+            GetClientRect(hwnd, &clientRect);
+            const UINT dpi = GetDpiForWindow(hwnd);
+            if (clientPt.y >= clientRect.top && clientPt.y < clientRect.top + TitleBarHeight(dpi)) {
+                // The whole band is draggable/double-click-to-maximize,
+                // same as the native caption it replaces -- returning
+                // HTCAPTION here is what makes DefWindowProcW's own
+                // WM_NCLBUTTONDOWN handling do all of that for free, with
+                // nothing else in this class needing to intercept it.
+                // TB2 (see PLAN.md's Groups-custom-title-bar plan) carves
+                // out HTMINBUTTON/HTMAXBUTTON/HTCLOSE for specific button
+                // rects within this same band.
+                return HTCAPTION;
+            }
+            return HTCLIENT;
+        }
+
         case WM_SETCURSOR: {
             // Only for hovering a splitter -- everything else (the
             // window's own resize border, etc.) still needs its normal
@@ -502,6 +602,7 @@ std::vector<RECT> GroupChromeWindow::ComputeTabRects(const RECT& clientRect) con
         return rects;  // Tile mode has no clickable tabs -- see Show()'s comment
     }
     const UINT dpi = GetDpiForWindow(window_);
+    const int tabTop = clientRect.top + TitleBarHeight(dpi);  // below the custom title bar band
     const int tabHeight = Scale(kTabStripHeight, dpi);
     const int tabMinWidth = Scale(kTabMinWidth, dpi);
     const int tabMaxWidth = Scale(kTabMaxWidth, dpi);
@@ -522,7 +623,7 @@ std::vector<RECT> GroupChromeWindow::ComputeTabRects(const RECT& clientRect) con
             break;
         }
         rects.push_back(
-            RECT{x, clientRect.top, std::min(x + tabWidth, static_cast<int>(clientRect.right)), clientRect.top + tabHeight});
+            RECT{x, tabTop, std::min(x + tabWidth, static_cast<int>(clientRect.right)), tabTop + tabHeight});
         x += tabWidth + tabGap;
     }
     return rects;
@@ -548,17 +649,24 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
 
     const UINT dpi = GetDpiForWindow(window_);
     const int cornerRadius = Scale(kTabCornerRadius, dpi);
+    const int titleBarHeight = TitleBarHeight(dpi);
+
+    // The custom title bar band itself -- reserved in both modes (see
+    // HeaderHeight's own comment). TB1: just a blank fill; the icon,
+    // group name, and min/max/close buttons land here in TB2.
+    RECT titleBarRect{clientRect.left, clientRect.top, clientRect.right, clientRect.top + titleBarHeight};
+    HBRUSH titleBarBrush = CreateSolidBrush(kContentColor);
+    FillRect(hdc, &titleBarRect, titleBarBrush);
+    DeleteObject(titleBarBrush);
 
     if (mode_ == GroupMode::Tile) {
-        // No custom header at all in Tile mode -- there are no tabs to
-        // render, and the native OS title bar already shows the
-        // group's name (Name(), set via SetWindowTextW), so the plain
-        // "Group (N window(s), tiled)" label this used to draw was
-        // pure duplication. Removing it hands that space back to the
-        // tiled members instead (see HeaderHeight, which returns 0 for
-        // this mode).
+        // No tab strip in Tile mode -- there are no tabs to render
+        // (every member is simultaneously visible instead, positioned by
+        // GroupManager's grid layout). Content fills everything below
+        // the title bar band.
+        RECT tileContentRect{clientRect.left, clientRect.top + titleBarHeight, clientRect.right, clientRect.bottom};
         HBRUSH contentBrush = CreateSolidBrush(kContentColor);
-        FillRect(hdc, &clientRect, contentBrush);
+        FillRect(hdc, &tileContentRect, contentBrush);
         DeleteObject(contentBrush);
 
         if (!tileColumnBoundaries_.empty() || !tileRowBoundaries_.empty()) {
@@ -582,8 +690,8 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
                                            hoveredSplitter_->second == i);
                 const int width = highlighted ? splitterWidth : restWidth;
                 const int boundary = tileColumnBoundaries_[i];
-                RECT bar{clientRect.left + boundary - width / 2, clientRect.top,
-                         clientRect.left + boundary + (width - width / 2), clientRect.bottom};
+                RECT bar{clientRect.left + boundary - width / 2, tileContentRect.top,
+                         clientRect.left + boundary + (width - width / 2), tileContentRect.bottom};
                 HBRUSH splitterBrush = CreateSolidBrush(highlighted ? accentColor : kActiveBorderColor);
                 FillRect(hdc, &bar, splitterBrush);
                 DeleteObject(splitterBrush);
@@ -595,8 +703,8 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
                                            hoveredSplitter_->second == i);
                 const int width = highlighted ? splitterWidth : restWidth;
                 const int boundary = tileRowBoundaries_[i];
-                RECT bar{clientRect.left, clientRect.top + boundary - width / 2, clientRect.right,
-                         clientRect.top + boundary + (width - width / 2)};
+                RECT bar{clientRect.left, tileContentRect.top + boundary - width / 2, clientRect.right,
+                         tileContentRect.top + boundary + (width - width / 2)};
                 HBRUSH splitterBrush = CreateSolidBrush(highlighted ? accentColor : kActiveBorderColor);
                 FillRect(hdc, &bar, splitterBrush);
                 DeleteObject(splitterBrush);
@@ -613,7 +721,8 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     // the last tab all read as "more inactive tab" instead of a
     // visually distinct empty band. Active/hover tabs simply draw their
     // own fill on top.
-    RECT stripRect{clientRect.left, clientRect.top, clientRect.right, clientRect.top + tabHeight};
+    RECT stripRect{clientRect.left, clientRect.top + titleBarHeight, clientRect.right,
+                    clientRect.top + titleBarHeight + tabHeight};
     HBRUSH stripBrush = CreateSolidBrush(kInactiveTabColor);
     FillRect(hdc, &stripRect, stripBrush);
     DeleteObject(stripBrush);
@@ -725,14 +834,17 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
 }
 
 int GroupChromeWindow::HeaderHeight(UINT dpi) const {
+    // The title bar band is reserved in both modes -- it's now the only
+    // place the group's name and window controls are shown at all (see
+    // TitleBarHeight's own comment). Tile mode has no tab strip beyond
+    // that (nothing to click, every member is simultaneously visible).
     if (mode_ != GroupMode::Tab) {
-        // Tile mode has no custom header at all -- see PaintTabStrip's
-        // own comment (the native title bar already shows the group's
-        // name, and there are no tabs to render).
-        return 0;
+        return TitleBarHeight(dpi);
     }
-    return Scale(kTabStripHeight, dpi) + Scale(kTabConnectorHeight, dpi);
+    return TitleBarHeight(dpi) + Scale(kTabStripHeight, dpi) + Scale(kTabConnectorHeight, dpi);
 }
+
+int GroupChromeWindow::TitleBarHeight(UINT dpi) const { return Scale(kTitleBarHeight, dpi); }
 
 RECT GroupChromeWindow::ContentRectInScreenCoords() const {
     if (window_ == nullptr) {

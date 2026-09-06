@@ -62,6 +62,9 @@ current todo list.
   controls (riskiest planned piece, not started).
 - Groups: make tab placement and tile-grid growth direction
   orientation-aware.
+- Groups: add a third layout mode between Tab and full Tile — a single
+  row or single column of tiles (1×N) — name still undecided ("row/col"
+  changes meaning depending on orientation, which doesn't sit right).
 - Groups: rename to "Polish Groups" and make it pinnable to the Start
   menu.
 - Groups: support nested groups (a group containing other groups).
@@ -69,6 +72,8 @@ current todo list.
 - Groups: add a per-process exclusion list.
 - Add a "Restart as Administrator" tray item so elevated windows become
   manageable.
+- Add theme-aware window shadows: white/light shadows in dark mode, dark
+  shadows in light mode, so windows stand out against the background.
 - Do a full `docs/LIMITATIONS.md` pass and manual test matrix.
 - Backlog, not yet scoped: clipboard copy flash, paste history popup,
   Quick Access rename without renaming the file, radial start menu,
