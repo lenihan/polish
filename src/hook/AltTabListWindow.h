@@ -44,13 +44,14 @@ struct AltTabListRow {
 // a highlighted/hovered one) reserves the same icon-sized space at its
 // right edge regardless, so row text never reflows width as
 // highlight/hover moves around or a row's own button count differs. A
-// footer legend below the last row documents the Del/-/+ keyboard
-// equivalents (see AltTabHook::RowAction) so they don't have to be
-// discovered by accident. If a monitor has enough candidates that the
+// footer legend pinned below everything else documents the Del/-/+
+// keyboard equivalents (see AltTabHook::RowAction) so they don't have to
+// be discovered by accident. If a monitor has enough candidates that the
 // full list would overflow its work area, the panel's height is capped
-// instead of growing past the screen, and the content scrolls (see
-// scrollOffset_) to keep the highlighted row in view, with a small "..."
-// strip pinned to whichever edge(s) still have hidden content.
+// instead of growing past the screen, and the headers/rows scroll (see
+// scrollOffset_) to keep the highlighted row in view -- the footer legend
+// stays pinned in place regardless, and a small chevron+count strip
+// (e.g. "▾ 12 more") marks whichever edge(s) still have hidden content.
 //
 // On a multi-monitor setup, per explicit user request, one instance of
 // this class exists *per connected monitor* (see main.cpp's
@@ -178,10 +179,11 @@ private:
         std::vector<RECT> rowRects;
         std::optional<RECT> activeHeaderRect;
         std::optional<RECT> minimizedHeaderRect;
-        // Keyboard-shortcut legend below the last row -- always present
-        // whenever there's at least one row (the panel is never shown
-        // with zero rows at all, see Show()'s own contract).
-        std::optional<RECT> footerRect;
+        // Headers + rows only -- the keyboard-shortcut footer legend is
+        // NOT part of this "natural" scrollable layout at all (see
+        // Paint's own comment on FooterBandHeight): it's always pinned to
+        // the bottom of the actual viewport instead, so it stays visible
+        // even while this content scrolls underneath it.
         int contentHeight = 0;
     };
 

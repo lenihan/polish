@@ -38,10 +38,13 @@ constexpr int kHeaderHeight = 22;
 // overkill for one label.
 constexpr double kHeaderFontScale = 0.85;
 
-// Keyboard-shortcut legend below the last row -- always present, in the
-// same small muted style as the section headings (see kHeaderFontScale/
-// kHeaderTextColor, both reused rather than a fourth font/color pair for
-// one more small label).
+// Keyboard-shortcut legend -- always present, pinned to the bottom of
+// the viewport (see FooterBandHeight/Paint), in the same small muted
+// style as the section headings (see kHeaderFontScale/kHeaderTextColor,
+// both reused rather than a fourth font/color pair for one more label).
+// Deliberately NOT part of ComputeLayout's scrollable rows/headers
+// layout -- per explicit user request, it must stay visible even while
+// that content scrolls underneath it on an overflowing monitor.
 constexpr int kFooterHeight = 22;
 constexpr int kFooterTopGap = 6;
 constexpr wchar_t kFooterLegendText[] = L"Del: Close    -: Minimize    +: Maximize";
@@ -53,11 +56,17 @@ constexpr wchar_t kFooterLegendText[] = L"Del: Close    -: Minimize    +: Maximi
 // floor guarantees at least a few rows' worth of height even on a
 // pathologically short work area.
 constexpr int kViewportMarginPx = 40;
-// Fixed-position strip painted over the true top/bottom edge of the
-// viewport (not part of the scrolled content) whenever content is
-// actually scrolled out of view that direction -- see Paint.
-constexpr int kTruncationIndicatorHeight = 16;
-constexpr wchar_t kTruncationIndicatorText[] = L"...";
+// Fixed-position strip painted at the top/bottom edge of the *scrollable*
+// region (not part of the scrolled content itself, and not to be
+// confused with the separately-pinned footer below it) whenever content
+// is actually scrolled out of view that direction -- see Paint. A plain
+// "..." was tried first and confirmed, human-reported, as too subtle to
+// read as a real UI affordance at this size -- a small triangle plus an
+// exact count (e.g. "12 more") is both bigger and more informative.
+constexpr int kTruncationIndicatorHeight = 24;
+constexpr int kTruncationChevronWidth = 10;
+constexpr int kTruncationChevronHeight = 6;
+constexpr int kTruncationChevronTextGap = 6;
 
 // Per-row action-button hit target (square) -- reserved at the right
 // edge of *every* row (see class comment on why: keeps row text width
@@ -105,6 +114,12 @@ int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USE
 int ActionsReservedWidth(UINT dpi) {
     return kActionButtonCount * Scale(kActionButtonSize, dpi) + (kActionButtonCount - 1) * Scale(kActionButtonGap, dpi);
 }
+
+// Vertical space always reserved at the bottom of the viewport for the
+// pinned keyboard-shortcut footer (see its own comment) -- one shared
+// formula so Reposition (panel height) and Paint (where the scrollable
+// region ends and the footer begins) can never drift apart.
+int FooterBandHeight(UINT dpi) { return Scale(kFooterTopGap, dpi) + Scale(kFooterHeight, dpi); }
 
 // Pure functions of a row's own rect (plus dpi) -- deliberately not
 // dependent on which row is highlighted/hovered, so both Paint and
@@ -379,13 +394,6 @@ AltTabListWindow::RowLayout AltTabListWindow::ComputeLayout(UINT dpi) const {
         layout.rowRects.push_back(RECT{paddingX, top, paddingX + width, top + rowHeight});
         top += rowHeight;
     }
-
-    if (!rows_.empty()) {
-        top += Scale(kFooterTopGap, dpi);
-        const int footerHeight = Scale(kFooterHeight, dpi);
-        layout.footerRect = RECT{paddingX, top, paddingX + width, top + footerHeight};
-        top += footerHeight;
-    }
     layout.contentHeight = top + paddingY;
     return layout;
 }
@@ -397,16 +405,30 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     FillRect(hdc, &clientRect, backgroundBrush);
     DeleteObject(backgroundBrush);
 
-    // Everything from here on is drawn using ComputeLayout's "natural"
-    // (unshifted, potentially taller than the actual viewport) rects --
-    // shifting the DC's own viewport origin lets every one of those draw
-    // calls stay exactly as if there were no scrolling at all, with GDI
-    // itself doing the translation (and naturally clipping anything that
-    // ends up outside `clientRect`, which is exactly the height-capped
-    // viewport, not the full content height). The background fill above
-    // deliberately happens BEFORE this shift, using the real, unshifted
-    // clientRect, so it always covers the whole visible viewport
-    // regardless of scroll position.
+    // Headers/rows only ever scroll within the client area minus the
+    // pinned footer band (see FooterBandHeight) -- clipping to that
+    // reduced rect BEFORE the viewport-origin shift below (so this is in
+    // plain device coordinates, not scroll-shifted ones) keeps a row that
+    // would otherwise land underneath the footer from ever painting over
+    // it, without needing to individually bound every single draw call
+    // down there.
+    const int scrollViewportHeight =
+        std::max(0, static_cast<int>(clientRect.bottom - clientRect.top) - FooterBandHeight(dpi));
+    RECT scrollClipRect{clientRect.left, clientRect.top, clientRect.right, clientRect.top + scrollViewportHeight};
+    HRGN scrollClipRgn = CreateRectRgnIndirect(&scrollClipRect);
+    SelectClipRgn(hdc, scrollClipRgn);
+    DeleteObject(scrollClipRgn);
+
+    // Everything from here on (until the clip is cleared again below) is
+    // drawn using ComputeLayout's "natural" (unshifted, potentially
+    // taller than the actual scrollable viewport) rects -- shifting the
+    // DC's own viewport origin lets every one of those draw calls stay
+    // exactly as if there were no scrolling at all, with GDI itself doing
+    // the translation (and the clip region above stopping anything that
+    // ends up below the scrollable area, footer band included). The
+    // background fill above deliberately happens BEFORE this shift, using
+    // the real, unshifted clientRect, so it always covers the whole
+    // visible viewport regardless of scroll position.
     POINT priorViewportOrg{};
     SetViewportOrgEx(hdc, 0, -scrollOffset_, &priorViewportOrg);
 
@@ -570,43 +592,106 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         }
     }
 
-    if (layout.footerRect) {
-        SelectObject(hdc, headerFont);
-        SetTextColor(hdc, kHeaderTextColor);
-        RECT r = *layout.footerRect;
-        DrawTextW(hdc, kFooterLegendText, -1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-    }
-
-    // Back to unshifted (viewport/client) coordinates for the rest of
-    // this function -- the truncation strips below are fixed to the true
-    // top/bottom edge of the viewport, not part of the scrolled content.
+    // Back to unshifted (viewport/client) coordinates, with no clip
+    // restriction, for the rest of this function -- the truncation strips
+    // and the pinned footer below are fixed to the true edges of the
+    // viewport, not part of the scrolled/clipped content drawn above.
     SetViewportOrgEx(hdc, priorViewportOrg.x, priorViewportOrg.y, nullptr);
+    SelectClipRgn(hdc, nullptr);
 
-    const int viewportHeight = clientRect.bottom - clientRect.top;
-    const int maxScroll = std::max(0, layout.contentHeight - viewportHeight);
+    const int maxScroll = std::max(0, layout.contentHeight - scrollViewportHeight);
     if (maxScroll > 0) {
         const int indicatorHeight = Scale(kTruncationIndicatorHeight, dpi);
         HBRUSH indicatorBrush = CreateSolidBrush(kBackgroundColor);
         SelectObject(hdc, headerFont);
         SetTextColor(hdc, kHeaderTextColor);
+
+        int hiddenAbove = 0;
+        int hiddenBelow = 0;
+        for (const RECT& r : layout.rowRects) {
+            if (r.top < scrollOffset_) {
+                ++hiddenAbove;
+            }
+            if (r.bottom > scrollOffset_ + scrollViewportHeight) {
+                ++hiddenBelow;
+            }
+        }
+
+        // A plain "..." was tried first here and confirmed, human-
+        // reported, too subtle at this size to read as a real UI
+        // affordance -- a small triangle pointing the scroll direction,
+        // plus an exact count, is a more standard "more content this
+        // way" signal and gives a concrete sense of how much is hidden.
         // Painted on top of whatever scrolled content happens to land
-        // there (a row sliced in half by the viewport edge, most likely)
-        // -- deliberately capping that off with a clean, opaque strip and
-        // a "..." label rather than leaving a half-cut row as the only
-        // signal that more content exists off-screen.
+        // there (a row sliced in half by the clip edge, most likely)
+        // rather than leaving that half-cut row as the only signal.
+        auto drawTruncationStrip = [&](RECT area, int hiddenCount, bool chevronPointsUp) {
+            FillRect(hdc, &area, indicatorBrush);
+            const std::wstring text = std::to_wstring(hiddenCount) + L" more";
+            SIZE textSize{};
+            GetTextExtentPoint32W(hdc, text.c_str(), static_cast<int>(text.size()), &textSize);
+            const int chevronWidth = Scale(kTruncationChevronWidth, dpi);
+            const int chevronHeight = Scale(kTruncationChevronHeight, dpi);
+            const int gap = Scale(kTruncationChevronTextGap, dpi);
+            const int totalWidth = chevronWidth + gap + textSize.cx;
+            const int centerX = (area.left + area.right) / 2;
+            const int centerY = (area.top + area.bottom) / 2;
+            const int left = centerX - totalWidth / 2;
+
+            HBRUSH chevronBrush = CreateSolidBrush(kHeaderTextColor);
+            HPEN chevronPen = CreatePen(PS_SOLID, 1, kHeaderTextColor);
+            HGDIOBJ oldChevronBrush = SelectObject(hdc, chevronBrush);
+            HGDIOBJ oldChevronPen = SelectObject(hdc, chevronPen);
+            POINT pts[3];
+            if (chevronPointsUp) {
+                pts[0] = POINT{left + chevronWidth / 2, centerY - chevronHeight / 2};
+                pts[1] = POINT{left, centerY + chevronHeight / 2};
+                pts[2] = POINT{left + chevronWidth, centerY + chevronHeight / 2};
+            } else {
+                pts[0] = POINT{left, centerY - chevronHeight / 2};
+                pts[1] = POINT{left + chevronWidth, centerY - chevronHeight / 2};
+                pts[2] = POINT{left + chevronWidth / 2, centerY + chevronHeight / 2};
+            }
+            Polygon(hdc, pts, 3);
+            SelectObject(hdc, oldChevronBrush);
+            SelectObject(hdc, oldChevronPen);
+            DeleteObject(chevronBrush);
+            DeleteObject(chevronPen);
+
+            RECT textRect{left + chevronWidth + gap, area.top, area.right, area.bottom};
+            DrawTextW(hdc, text.c_str(), -1, &textRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        };
+
         if (scrollOffset_ > 0) {
             RECT strip{clientRect.left, clientRect.top, clientRect.right, clientRect.top + indicatorHeight};
-            FillRect(hdc, &strip, indicatorBrush);
-            DrawTextW(hdc, kTruncationIndicatorText, -1, &strip,
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            drawTruncationStrip(strip, hiddenAbove, /*chevronPointsUp=*/true);
         }
         if (scrollOffset_ < maxScroll) {
-            RECT strip{clientRect.left, clientRect.bottom - indicatorHeight, clientRect.right, clientRect.bottom};
-            FillRect(hdc, &strip, indicatorBrush);
-            DrawTextW(hdc, kTruncationIndicatorText, -1, &strip,
-                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            RECT strip{clientRect.left, scrollViewportHeight - indicatorHeight, clientRect.right, scrollViewportHeight};
+            drawTruncationStrip(strip, hiddenBelow, /*chevronPointsUp=*/false);
         }
         DeleteObject(indicatorBrush);
+    }
+
+    // The footer legend is pinned to the true bottom of the viewport --
+    // per explicit user request, it must stay visible even while the
+    // rows/headers above scroll underneath it, not scroll away with
+    // them. A subtle divider marks that boundary, otherwise invisible
+    // once scrolling is actually happening.
+    if (!rows_.empty()) {
+        HPEN dividerPen = CreatePen(PS_SOLID, 1, kSectionDividerColor);
+        HGDIOBJ oldPen = SelectObject(hdc, dividerPen);
+        MoveToEx(hdc, clientRect.left, scrollViewportHeight, nullptr);
+        LineTo(hdc, clientRect.right, scrollViewportHeight);
+        SelectObject(hdc, oldPen);
+        DeleteObject(dividerPen);
+
+        SelectObject(hdc, headerFont);
+        SetTextColor(hdc, kHeaderTextColor);
+        RECT footerRect{clientRect.left, clientRect.bottom - Scale(kFooterHeight, dpi), clientRect.right,
+                         clientRect.bottom};
+        DrawTextW(hdc, kFooterLegendText, -1, &footerRect,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
     }
 
     SelectObject(hdc, oldFont);
@@ -616,7 +701,9 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
 
 void AltTabListWindow::Reposition(HMONITOR targetMonitor, UINT dpi) {
     const int width = Scale(kPanelWidth, dpi);
-    const int naturalHeight = ComputeLayout(dpi).contentHeight;
+    // The footer is always reserved, on top of whatever headers/rows
+    // naturally need -- see FooterBandHeight's own comment.
+    const int naturalHeight = ComputeLayout(dpi).contentHeight + FooterBandHeight(dpi);
 
     MONITORINFO monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
@@ -765,7 +852,10 @@ bool AltTabListWindow::RecomputeScrollOffset() {
     const RowLayout layout = ComputeLayout(dpi);  // natural, unshifted coordinates
     RECT clientRect;
     GetClientRect(window_, &clientRect);
-    const int viewportHeight = clientRect.bottom - clientRect.top;
+    // Rows/headers only ever scroll within the client area *minus* the
+    // pinned footer band -- see FooterBandHeight's own comment.
+    const int viewportHeight =
+        std::max(0, static_cast<int>(clientRect.bottom - clientRect.top) - FooterBandHeight(dpi));
     const int maxScroll = std::max(0, layout.contentHeight - viewportHeight);
 
     int newOffset = std::clamp(scrollOffset_, 0, maxScroll);

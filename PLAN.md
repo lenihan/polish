@@ -36,8 +36,9 @@ current todo list.
   highlighted or hovered row, plus Del/-/+ keyboard equivalents for the
   highlighted row, documented via an on-screen footer legend.
 - Alt+Tab: a monitor's panel caps its height and scrolls (keeping the
-  highlighted row in view) with a "..." strip when there are more
-  candidates than fit on screen.
+  highlighted row in view) with a chevron+count strip ("▾ N more") when
+  there are more candidates than fit on screen, and the keyboard-shortcut
+  footer stays pinned in view instead of scrolling away.
 - Window groups (tab/tile mode): merged to main — combine multiple real
   windows into one taskbar entry, switchable via tabs or shown as tiles.
 - Groups: real window reparenting so members can't be dragged out
