@@ -14,6 +14,7 @@
 #include "hook/AltTabDimOverlay.h"
 #include "hook/AltTabHighlightBorder.h"
 #include "hook/AltTabHook.h"
+#include "hook/AltTabListWindow.h"
 #include "hook/GroupChromeWindow.h"
 #include "hook/GroupHotkeyDialog.h"
 #include "hook/GroupPickerWindow.h"
@@ -83,22 +84,67 @@ std::unique_ptr<polish::TrayIcon> g_trayIcon;
 polish::Settings g_settings;
 std::unique_ptr<polish::AltTabHook> g_altTabHook;
 
-// Alt+Tab switcher session state. A snapshot of candidates is taken once
-// when a session starts (first Tab press) and used for the whole
-// session -- if a candidate closes mid-session its overlay just sits
-// over whatever's left there until the session ends; not handled more
-// gracefully than that yet. The overlay pool only ever grows (indices
-// beyond the current session's candidate count just stay hidden), so
-// repeated sessions don't pay window-creation cost more than once per
-// "most windows ever open at once this run."
+// Alt+Tab switcher session state. The candidate list is refreshed on
+// every cycle (see OnAltTabCycle), not just once at session start, so a
+// window opening/closing/minimizing mid-session is reflected the next
+// time Tab is pressed -- order-preserving once a session is already open
+// (UpdateAltTabCandidatesPreservingOrder), so Tab walks down a list that
+// holds still, not one that reshuffles survivors around on every press.
+// On a multi-monitor setup, grouped by monitor (see
+// GetMonitorsCurrentFirst) -- current monitor's windows first, then each
+// other monitor's in turn -- per explicit user request: every window
+// stays reachable, but Tab finishes the current monitor before
+// continuing onto the next one, and each monitor gets its own list
+// panel (g_altTabPanels) showing only its own windows.
+// The overlay pool only ever grows (indices beyond the current
+// candidate count just stay hidden, and are explicitly hidden again if the
+// count shrinks -- see OnAltTabCycle), so repeated sessions don't pay
+// window-creation cost more than once per "most windows ever open at once
+// this run."
 bool g_altTabSessionOpen = false;
 std::vector<HWND> g_altTabCandidates;
 size_t g_altTabHighlightIndex = 0;
+// Minimized candidate windows -- a separate list from g_altTabCandidates
+// (see PLAN.md's Alt+Tab-improvements M4), kept out of the normal
+// Tab/Shift+Tab cycle entirely. Rebuilt fresh via EnumWindows on every
+// cycle/navigate, same as the active list; unlike g_altTabCandidates it
+// has no "preserve existing order mid-session" pass, since nothing this
+// app does (no promote/demote pulse touches a minimized window) is
+// expected to reshuffle it the way ApplyAltTabDimming's own Z-order pulse
+// once did for the active list.
+std::vector<HWND> g_altTabMinimized;
+// True while arrow-navigation selection sits in the minimized section
+// instead of the normal Tab-cycle (g_altTabHighlightIndex). Only Up/Down
+// (OnAltTabNavigate) can set this; Tab/Shift+Tab (OnAltTabCycle) always
+// clear it and re-focus the active section, per the plan's explicit
+// "Tab/Shift+Tab always stay within the active section" requirement.
+bool g_altTabSelectionInMinimized = false;
+size_t g_altTabMinimizedHighlightIndex = 0;
 std::vector<std::unique_ptr<polish::AltTabDimOverlay>> g_altTabOverlays;
 // Only one window is ever highlighted at a time, unlike the dim overlays
 // (one per non-highlighted candidate), so this is a single instance, not
 // a pool.
 std::unique_ptr<polish::AltTabHighlightBorder> g_altTabHighlightBorder;
+// One always-shown active-window list panel *per connected monitor* (see
+// PLAN.md's Alt+Tab-improvements plan) -- each showing only its own
+// monitor's subset of g_altTabCandidates, with a highlighted row only on
+// whichever monitor's subset actually contains the globally-highlighted
+// window. Enumerated and created once at startup (pre-warmed, same
+// lifecycle as g_altTabHighlightBorder) -- a monitor connected/
+// disconnected while the app is already running isn't picked up until
+// restart, an accepted v1 simplification.
+struct AltTabMonitorPanel {
+    HMONITOR monitor;
+    std::unique_ptr<polish::AltTabListWindow> window;
+};
+std::vector<AltTabMonitorPanel> g_altTabPanels;
+// The candidate list as of the panels' last full rebuild -- lets
+// ApplyAltTabDimming tell "the set changed, rebuild rows" apart from
+// "just the highlight moved, cheap path" (see ApplyAltTabDimming).
+std::vector<HWND> g_altTabListWindowLastCandidates;
+// Same purpose as g_altTabListWindowLastCandidates, for the minimized
+// section -- either list changing forces a full panel rebuild.
+std::vector<HWND> g_altTabListWindowLastMinimized;
 
 // Most-recently-used window activation order, for the in-progress
 // Alt+Tab replacement (see PLAN.md). Tracks *every* real window that
@@ -139,6 +185,11 @@ int g_thumbnailStabilizeAttemptsLeft = 0;
 // group's tab label until something else (a tab click, a
 // drag) happened to trigger a repaint.
 void OnMemberTitleChanged(HWND hwnd);
+
+// Defined further below (near the group-related icon helpers) -- forward
+// declared here so BuildAltTabListRows (Alt+Tab section) can reuse it
+// instead of duplicating the WM_GETICON/GCLP_HICONSM lookup.
+HICON GetWindowIconHandle(HWND hwnd);
 
 // The window currently being live-tracked for settle events -- i.e. the
 // foreground window, whenever it's a candidate window (see
@@ -458,6 +509,37 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
     }
 }
 
+// The monitor a session's list panel/dim overlays initially orient
+// around -- the one containing the current foreground window, matching
+// this feature's existing monitor-placement decision. Computed fresh
+// every rebuild (not cached), but stable for the life of a session in
+// practice: the foreground window itself never changes mid-session (only
+// a commit changes it), so this returns the same monitor on every cycle
+// of the same Alt-hold.
+HMONITOR GetForegroundMonitor() { return MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST); }
+
+BOOL CALLBACK EnumMonitorsProc(HMONITOR monitor, HDC /*hdc*/, LPRECT /*rect*/, LPARAM lParam) {
+    reinterpret_cast<std::vector<HMONITOR>*>(lParam)->push_back(monitor);
+    return TRUE;
+}
+
+// Every connected monitor, current-monitor-first then the rest in their
+// original (stable) EnumDisplayMonitors order -- the order
+// RebuildAltTabCandidates/UpdateAltTabCandidatesPreservingOrder group
+// candidates by, so that a flat Tab/Shift+Tab walk over the resulting
+// list finishes the current monitor's windows before continuing onto the
+// next one. std::stable_partition (not a full sort) is exactly "move the
+// current monitor to the front, leave everyone else's relative order
+// alone" -- there's no other meaningful ordering to impose between
+// monitors this app has no other opinion about.
+std::vector<HMONITOR> GetMonitorsCurrentFirst() {
+    std::vector<HMONITOR> monitors;
+    EnumDisplayMonitors(nullptr, nullptr, EnumMonitorsProc, reinterpret_cast<LPARAM>(&monitors));
+    const HMONITOR current = GetForegroundMonitor();
+    std::stable_partition(monitors.begin(), monitors.end(), [current](HMONITOR m) { return m == current; });
+    return monitors;
+}
+
 BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
     if (polish::IsCandidateWindow(hwnd) && !IsIconic(hwnd)) {
         reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
@@ -475,29 +557,135 @@ BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
 // showed up. Windows Polish *does* have recency data for are still
 // ordered by true MRU first; anything else falls back to EnumWindows'
 // own Z-order (topmost first), appended after.
+//
+// On a multi-monitor setup, the resulting MRU-then-Z-order list is then
+// *grouped* by monitor -- current monitor's windows first (in their
+// relative order from that list), then each other monitor's windows in
+// turn (see GetMonitorsCurrentFirst) -- per explicit user request: every
+// window should still be reachable via Alt+Tab (nothing is excluded),
+// but Tab should finish cycling through the current monitor before
+// continuing onto the next one, rather than interleaving monitors
+// arbitrarily. (An earlier version of this excluded other monitors'
+// windows entirely -- reversed after the user clarified they want
+// everything reachable, just ordered by monitor.)
 void RebuildAltTabCandidates() {
     std::vector<HWND> allCandidates;
     EnumWindows(EnumCandidateWindowsProc, reinterpret_cast<LPARAM>(&allCandidates));
 
-    g_altTabCandidates.clear();
+    std::vector<HWND> globalOrdered;
     for (HWND hwnd : g_activationHistory.OrderedWindows()) {
         if (std::find(allCandidates.begin(), allCandidates.end(), hwnd) != allCandidates.end()) {
-            g_altTabCandidates.push_back(hwnd);
+            globalOrdered.push_back(hwnd);
         }
     }
     for (HWND hwnd : allCandidates) {
-        if (std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd) ==
-            g_altTabCandidates.end()) {
-            g_altTabCandidates.push_back(hwnd);
+        if (std::find(globalOrdered.begin(), globalOrdered.end(), hwnd) == globalOrdered.end()) {
+            globalOrdered.push_back(hwnd);
         }
     }
+
+    g_altTabCandidates.clear();
+    for (HMONITOR monitor : GetMonitorsCurrentFirst()) {
+        for (HWND hwnd : globalOrdered) {
+            if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) == monitor) {
+                g_altTabCandidates.push_back(hwnd);
+            }
+        }
+    }
+}
+
+BOOL CALLBACK EnumMinimizedCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
+    if (polish::IsMinimizedCandidateWindow(hwnd)) {
+        reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
+    }
+    return TRUE;
+}
+
+// The minimized-section counterpart of RebuildAltTabCandidates/
+// UpdateAltTabCandidatesPreservingOrder -- a single function covers both
+// session-start and mid-session refreshes since, unlike the active list,
+// there's no order-preservation concern here to justify two separate
+// paths (see g_altTabMinimized's own comment).
+void RebuildAltTabMinimizedCandidates() {
+    g_altTabMinimized.clear();
+    EnumWindows(EnumMinimizedCandidateWindowsProc, reinterpret_cast<LPARAM>(&g_altTabMinimized));
+}
+
+// Which monitor a minimized window's row belongs to, grouping it the same
+// way BuildAltTabListRowsForMonitor groups active candidates. Deliberately
+// NOT MonitorFromWindow(hwnd, ...) -- GetWindowRect (which that resolves
+// to under the hood) returns a meaningless off-screen sentinel rect for
+// an iconic window, which would make every minimized window resolve to
+// whichever monitor happens to contain that sentinel coordinate rather
+// than the monitor it actually last sat on. WINDOWPLACEMENT's
+// rcNormalPosition is the restore rect, unaffected by the window's
+// current iconic state.
+HMONITOR MonitorForMinimizedCandidate(HWND hwnd) {
+    WINDOWPLACEMENT placement{};
+    placement.length = sizeof(placement);
+    if (GetWindowPlacement(hwnd, &placement)) {
+        return MonitorFromRect(&placement.rcNormalPosition, MONITOR_DEFAULTTONEAREST);
+    }
+    return MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+}
+
+// Used mid-session instead of RebuildAltTabCandidates (which recomputes
+// order from scratch every time -- appropriate at session start, but not
+// mid-session): keeps every still-open candidate in its *existing*
+// g_altTabCandidates position, only dropping ones that closed and
+// appending ones that newly appeared. Tab should walk down a list that
+// holds still while you're holding Alt, not reshuffle out from under
+// you -- confirmed as a real, human-reported problem: RebuildAltTabCandidates'
+// MRU-then-Z-order ordering isn't actually stable across a session, since
+// ApplyAltTabDimming's own promote-then-demote Z-order pulse on whichever
+// window is currently highlighted changes real Z-order every cycle, which
+// (for any candidate not yet in g_activationHistory's MRU data) feeds
+// straight back into RebuildAltTabCandidates' own "anything else falls
+// back to Z-order" tail -- the previously-highlighted window's tail
+// position would visibly jump on the very next cycle. Still handles
+// windows genuinely opening/closing mid-session (M1's actual goal),
+// just without reordering survivors to do it. A brand-new candidate that
+// opens mid-session is appended at the very end of the whole list
+// (regardless of which monitor it's on) rather than being inserted into
+// its "correct" monitor group -- a known, accepted simplification (new
+// mid-session candidates are rare, and the existing snapshot's monitor
+// grouping is otherwise left completely undisturbed).
+void UpdateAltTabCandidatesPreservingOrder() {
+    std::vector<HWND> allCandidates;
+    EnumWindows(EnumCandidateWindowsProc, reinterpret_cast<LPARAM>(&allCandidates));
+
+    std::vector<HWND> updated;
+    for (HWND hwnd : g_altTabCandidates) {
+        if (std::find(allCandidates.begin(), allCandidates.end(), hwnd) != allCandidates.end()) {
+            updated.push_back(hwnd);
+        }
+    }
+    // Newly-appeared candidates (opened since the last cycle) -- MRU
+    // order first, then Z-order, same append rule RebuildAltTabCandidates
+    // itself uses, just restricted to windows `updated` doesn't already
+    // have.
+    for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+        if (std::find(allCandidates.begin(), allCandidates.end(), hwnd) != allCandidates.end() &&
+            std::find(updated.begin(), updated.end(), hwnd) == updated.end()) {
+            updated.push_back(hwnd);
+        }
+    }
+    for (HWND hwnd : allCandidates) {
+        if (std::find(updated.begin(), updated.end(), hwnd) == updated.end()) {
+            updated.push_back(hwnd);
+        }
+    }
+    g_altTabCandidates = updated;
 }
 
 // Called synchronously from inside AltTabHook's low-level hook callback
 // (see its class comment for why that's safe here) to decide whether
 // Alt+Tab should be intercepted at all. Rebuilds the candidate list as a
-// side effect -- by the time a real session starts, g_altTabCandidates
-// is already correct and OnAltTabCycle doesn't need to rebuild it again.
+// side effect so a session's first Tab always starts from a fresh list;
+// OnAltTabCycle refreshes it on every subsequent Tab too (order-
+// preserving once a session is already open -- see
+// UpdateAltTabCandidatesPreservingOrder), so this is just the
+// session-start case, not the only refresh point.
 bool AltTabHasEligibleCandidates() {
     if (!g_settings.altTabEnabled) {
         return false;  // native Alt+Tab runs untouched -- see AltTabHook
@@ -549,10 +737,78 @@ void EnsureAltTabHighlightBorder() {
 // force DWM to fully recompute z-order for a window that's never
 // actually activated. The promote-then-demote pulse sidesteps that
 // entirely instead of chasing it further.)
+// One monitor's own rows -- the subset of g_altTabCandidates on
+// `monitor`, in their existing relative order, plus which local row (if
+// any) is the globally-highlighted window (nullopt if the highlighted
+// window is on a different monitor's panel instead). Titles/icons are
+// re-read fresh from each hwnd every call (not cached) -- cheap for the
+// small per-monitor candidate counts this feature deals with, and means
+// a title change mid-session shows up without any separate invalidation
+// path.
+struct MonitorRowsResult {
+    std::vector<polish::AltTabListRow> rows;
+    std::optional<size_t> highlightIndex;
+};
+
+// The single window currently treated as "selected", whether that's the
+// normal Tab-cycle highlight (g_altTabHighlightIndex over
+// g_altTabCandidates) or, once M4's arrow-navigation has moved into it,
+// a row in the minimized section instead (g_altTabMinimizedHighlightIndex
+// over g_altTabMinimized) -- see g_altTabSelectionInMinimized. Centralizing
+// this one lookup is what lets BuildAltTabListRowsForMonitor mark the
+// right row highlighted regardless of which section it's actually in.
+HWND CurrentAltTabHighlightedWindow() {
+    if (g_altTabSelectionInMinimized) {
+        return (g_altTabMinimizedHighlightIndex < g_altTabMinimized.size())
+                   ? g_altTabMinimized[g_altTabMinimizedHighlightIndex]
+                   : nullptr;
+    }
+    return (g_altTabHighlightIndex < g_altTabCandidates.size()) ? g_altTabCandidates[g_altTabHighlightIndex]
+                                                                 : nullptr;
+}
+
+MonitorRowsResult BuildAltTabListRowsForMonitor(HMONITOR monitor) {
+    MonitorRowsResult result;
+    const HWND highlighted = CurrentAltTabHighlightedWindow();
+    for (HWND hwnd : g_altTabCandidates) {
+        if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != monitor) {
+            continue;
+        }
+        if (hwnd == highlighted) {
+            result.highlightIndex = result.rows.size();
+        }
+        wchar_t title[256] = L"";
+        GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+        result.rows.push_back(polish::AltTabListRow{hwnd, title, GetWindowIconHandle(hwnd), /*minimized=*/false});
+    }
+    // Minimized section, appended after every active row so it always
+    // renders below them (AltTabListWindow's divider logic assumes
+    // minimized rows are contiguous at the end -- see its class comment).
+    for (HWND hwnd : g_altTabMinimized) {
+        if (MonitorForMinimizedCandidate(hwnd) != monitor) {
+            continue;
+        }
+        if (hwnd == highlighted) {
+            result.highlightIndex = result.rows.size();
+        }
+        wchar_t title[256] = L"";
+        GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+        result.rows.push_back(polish::AltTabListRow{hwnd, title, GetWindowIconHandle(hwnd), /*minimized=*/true});
+    }
+    return result;
+}
+
 void ApplyAltTabDimming() {
     const ULONGLONG t0 = GetTickCount64();
+    // While selection sits in the minimized section, nothing in
+    // g_altTabCandidates is "the highlighted one" -- dim all of them (the
+    // desktop stays visibly dimmed while browsing the minimized list) and
+    // skip the promote/border step entirely below, since a minimized
+    // window has no on-screen rect to draw a border around (see
+    // PLAN.md's Alt+Tab-improvements M4).
+    const bool selectionIsMinimized = g_altTabSelectionInMinimized;
     for (size_t i = 0; i < g_altTabCandidates.size(); ++i) {
-        if (i == g_altTabHighlightIndex) {
+        if (!selectionIsMinimized && i == g_altTabHighlightIndex) {
             continue;  // handled last, below
         }
         HWND hwnd = g_altTabCandidates[i];
@@ -561,24 +817,30 @@ void ApplyAltTabDimming() {
     }
     const ULONGLONG t1 = GetTickCount64();
 
-    const HWND highlighted = g_altTabCandidates[g_altTabHighlightIndex];
-    g_altTabOverlays[g_altTabHighlightIndex]->Hide();
-    const bool promoted = polish::PromoteWindowToFront(highlighted);
-    if (!promoted) {
-        // Most likely cause: highlighted belongs to a more-privileged
-        // (elevated) process than this one -- UIPI blocks cross-privilege
-        // window manipulation. See docs/LIMITATIONS.md #1; this is a
-        // known, permanent gap, not something to chase further if that's
-        // what the logged error confirms.
-        polish::LogDebug(std::format(
-            L"[Polish] AltTab: WARNING SetWindowPos(TOPMOST) failed for hwnd={} GetLastError={}",
-            reinterpret_cast<void*>(highlighted), GetLastError()));
-    }
-    const ULONGLONG t2 = GetTickCount64();
+    ULONGLONG t2 = t1;
+    ULONGLONG t3 = t1;
+    if (!selectionIsMinimized) {
+        const HWND highlighted = g_altTabCandidates[g_altTabHighlightIndex];
+        g_altTabOverlays[g_altTabHighlightIndex]->Hide();
+        const bool promoted = polish::PromoteWindowToFront(highlighted);
+        if (!promoted) {
+            // Most likely cause: highlighted belongs to a more-privileged
+            // (elevated) process than this one -- UIPI blocks cross-privilege
+            // window manipulation. See docs/LIMITATIONS.md #1; this is a
+            // known, permanent gap, not something to chase further if that's
+            // what the logged error confirms.
+            polish::LogDebug(std::format(
+                L"[Polish] AltTab: WARNING SetWindowPos(TOPMOST) failed for hwnd={} GetLastError={}",
+                reinterpret_cast<void*>(highlighted), GetLastError()));
+        }
+        t2 = GetTickCount64();
 
-    EnsureAltTabHighlightBorder();
-    g_altTabHighlightBorder->ShowAroundTarget(highlighted);
-    const ULONGLONG t3 = GetTickCount64();
+        EnsureAltTabHighlightBorder();
+        g_altTabHighlightBorder->ShowAroundTarget(highlighted);
+        t3 = GetTickCount64();
+    } else if (g_altTabHighlightBorder) {
+        g_altTabHighlightBorder->Hide();
+    }
 
     // Timing breadcrumbs to chase a human-reported "flash of the
     // previous window" glitch with real evidence -- a pre-warming fix
@@ -587,6 +849,55 @@ void ApplyAltTabDimming() {
     polish::LogDebug(std::format(
         L"[Polish] AltTab: dimming timing -- otherOverlays={}ms highlightPromote={}ms highlightBorder={}ms",
         t1 - t0, t2 - t1, t3 - t2));
+
+    // One list panel per connected monitor, shown alongside the dim/
+    // border visuals for every session (not a separately-toggled thing --
+    // see PLAN.md's Alt+Tab-improvements plan). Each panel shows only its
+    // own monitor's subset of g_altTabCandidates; only the one monitor
+    // whose subset actually contains the globally-highlighted window
+    // shows a highlighted row.
+    //
+    // Full rebuild (Show) only when the candidate set itself actually
+    // changed since the last cycle; otherwise just move the highlight
+    // marker (SetHighlight, a narrow row invalidate). This codebase has
+    // hit the "unconditional full repaint causes visible flashing" bug
+    // shape three separate times already (the tab strip's hover
+    // highlight, a member-title-change repaint, this exact class's own
+    // clip-optimization for the highlight border) -- not repeating it in
+    // brand new code that already knows better.
+    if (!g_altTabPanels.empty()) {
+        const bool candidatesChanged = (g_altTabCandidates != g_altTabListWindowLastCandidates) ||
+                                        (g_altTabMinimized != g_altTabListWindowLastMinimized);
+        if (candidatesChanged) {
+            std::wstring rowDump;
+            for (HWND hwnd : g_altTabCandidates) {
+                wchar_t title[128] = L"";
+                GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+                if (!rowDump.empty()) {
+                    rowDump += L" | ";
+                }
+                rowDump += std::format(L"{}:\"{}\"", reinterpret_cast<void*>(hwnd), title);
+            }
+            polish::LogDebug(std::format(L"[Polish] AltTab: list panel rows (highlightIndex={}): {}",
+                                          g_altTabHighlightIndex, rowDump));
+        }
+        for (auto& panel : g_altTabPanels) {
+            MonitorRowsResult monitorResult = BuildAltTabListRowsForMonitor(panel.monitor);
+            if (monitorResult.rows.empty()) {
+                panel.window->Hide();
+                continue;
+            }
+            if (candidatesChanged) {
+                panel.window->Show(monitorResult.rows, monitorResult.highlightIndex, panel.monitor);
+            } else {
+                panel.window->SetHighlight(monitorResult.highlightIndex);
+            }
+        }
+        if (candidatesChanged) {
+            g_altTabListWindowLastCandidates = g_altTabCandidates;
+            g_altTabListWindowLastMinimized = g_altTabMinimized;
+        }
+    }
 }
 
 void EndAltTabSession() {
@@ -596,6 +907,22 @@ void EndAltTabSession() {
     if (g_altTabHighlightBorder) {
         g_altTabHighlightBorder->Hide();
     }
+    for (auto& panel : g_altTabPanels) {
+        panel.window->Hide();
+    }
+    // Forces the next session's first cycle to take ApplyAltTabDimming's
+    // full-rebuild (Show) path rather than the cheap SetHighlight-only
+    // path, even if the candidate set ends up identical -- SetHighlight
+    // never calls ShowWindow, so without this the panel would stay
+    // hidden (from the Hide() above) for a whole session that happened
+    // to see no candidate-set change since the last one.
+    g_altTabListWindowLastCandidates.clear();
+    g_altTabListWindowLastMinimized.clear();
+    // A fresh session should always start with focus in the active
+    // section, never left over in the minimized one from whatever the
+    // previous session's arrow-navigation last did.
+    g_altTabSelectionInMinimized = false;
+    g_altTabMinimizedHighlightIndex = 0;
     g_altTabSessionOpen = false;
 }
 
@@ -605,16 +932,69 @@ void OnAltTabCycle(bool backward) {
         polish::LogDebug(
             std::format(L"[Polish] AltTab: message-queue delay since Tab detected: {}ms", queueDelayMs));
     }
-    if (g_altTabCandidates.empty()) {
-        // Defensive only -- shouldn't happen. AltTabHook's
-        // hasEligibleCandidates callback (AltTabHasEligibleCandidates,
-        // which rebuilds g_altTabCandidates as a side effect) already
-        // guarantees at least 2 entries before this ever fires for a new
-        // session, and both run on the same thread with nothing else
-        // able to run in between.
+
+    // Capture identity (not index) of the currently highlighted window,
+    // and the overlay-relevant size, before rebuilding -- both the
+    // candidate's position in the list and the list's own length can
+    // change once the rebuild below runs.
+    const bool wasSessionOpen = g_altTabSessionOpen;
+    const HWND previouslyHighlighted =
+        (wasSessionOpen && g_altTabHighlightIndex < g_altTabCandidates.size())
+            ? g_altTabCandidates[g_altTabHighlightIndex]
+            : nullptr;
+    const size_t previousCandidateCount = g_altTabCandidates.size();
+
+    // Refreshed on every cycle, not just once at session start, so a
+    // window opening/closing/minimizing mid-session (via any means other
+    // than this app's own Alt+Tab) is reflected the next time Tab is
+    // pressed. Safe to do here: unlike AltTabHasEligibleCandidates, this
+    // runs off the hook thread already (dispatched via the PostMessageW
+    // hop), so EnumWindows' cost here carries none of the low-level-hook
+    // timeout risk that confines hook-thread work to bounded, no-UI
+    // calls.
+    //
+    // Session start uses the full MRU-based RebuildAltTabCandidates (a
+    // fresh list is exactly right the first time). Every cycle *after*
+    // that uses UpdateAltTabCandidatesPreservingOrder instead -- Tab
+    // should walk down a list that holds still while Alt is held, not
+    // reshuffle survivors around just because the highlighted window's
+    // own Z-order changed (see that function's comment for the concrete
+    // mechanism that caused it to visibly reorder before this fix).
+    if (wasSessionOpen) {
+        UpdateAltTabCandidatesPreservingOrder();
+    } else {
+        RebuildAltTabCandidates();
+    }
+    RebuildAltTabMinimizedCandidates();
+    // Tab/Shift+Tab always operate on the active section, regardless of
+    // where arrow-navigation (OnAltTabNavigate) last left selection --
+    // see g_altTabSelectionInMinimized's own comment.
+    g_altTabSelectionInMinimized = false;
+
+    // The overlay pool only ever grows (EnsureAltTabOverlayPoolSize,
+    // below); if the candidate count just shrank, hide every overlay at an
+    // index that no longer has a corresponding candidate, or it would sit
+    // stuck over whatever real window used to occupy that slot.
+    for (size_t i = g_altTabCandidates.size(); i < previousCandidateCount && i < g_altTabOverlays.size(); ++i) {
+        g_altTabOverlays[i]->Hide();
+    }
+
+    if (g_altTabCandidates.size() < 2) {
+        // A live rebuild can drop the count below the feature's minimum
+        // mid-session (candidates closing) in a way session start's own
+        // AltTabHasEligibleCandidates guard can't prevent. End cleanly
+        // rather than divide/mod by a degenerate count below.
+        if (wasSessionOpen) {
+            polish::LogDebug(L"[Polish] AltTab: candidate count dropped below 2 mid-session, ending session");
+            EndAltTabSession();
+        }
         return;
     }
-    if (!g_altTabSessionOpen) {
+
+    EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
+    const size_t count = g_altTabCandidates.size();
+
+    if (!wasSessionOpen) {
         std::wstring candidateDump;
         for (HWND hwnd : g_altTabCandidates) {
             wchar_t title[128] = L"";
@@ -635,16 +1015,24 @@ void OnAltTabCycle(bool backward) {
         }
         polish::LogDebug(std::format(L"[Polish] AltTab: session starting, {} candidate(s): {}",
                                       g_altTabCandidates.size(), candidateDump));
-        EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
         // Index 0 is the current window itself (freshest in the MRU
         // order); the first Tab press should land on the previous
         // window, matching native Alt+Tab's single-tap-swap behavior.
-        g_altTabHighlightIndex = 1 % g_altTabCandidates.size();
+        g_altTabHighlightIndex = 1 % count;
         g_altTabSessionOpen = true;
     } else {
-        const size_t count = g_altTabCandidates.size();
-        g_altTabHighlightIndex =
-            backward ? (g_altTabHighlightIndex + count - 1) % count : (g_altTabHighlightIndex + 1) % count;
+        // Re-locate the previously highlighted window by identity -- the
+        // rebuild above may have changed its index, or removed it
+        // entirely if it closed mid-session (in which case fall back to
+        // a clamped index rather than stepping from a stale one).
+        size_t baseIndex = std::min(g_altTabHighlightIndex, count - 1);
+        if (previouslyHighlighted) {
+            const auto it = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), previouslyHighlighted);
+            if (it != g_altTabCandidates.end()) {
+                baseIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), it));
+            }
+        }
+        g_altTabHighlightIndex = backward ? (baseIndex + count - 1) % count : (baseIndex + 1) % count;
     }
     ApplyAltTabDimming();
     polish::LogDebug(std::format(L"[Polish] AltTab: cycle {} -> highlighting hwnd={}",
@@ -676,14 +1064,23 @@ void OnAltTabCommit() {
     if (!g_altTabSessionOpen) {
         return;
     }
-    const HWND target = g_altTabCandidates[g_altTabHighlightIndex];
+    const bool selectionIsMinimized = g_altTabSelectionInMinimized;
+    const HWND target = CurrentAltTabHighlightedWindow();
     EndAltTabSession();
-    if (IsWindow(target)) {
+    if (target != nullptr && IsWindow(target)) {
+        if (selectionIsMinimized) {
+            // A minimized window needs an explicit restore before
+            // SetForegroundWindow reliably brings it to front -- same
+            // finding GroupManager already relies on for a maximized/
+            // iconic member (see PLAN.md's Alt+Tab-improvements M4).
+            ShowWindow(target, SW_RESTORE);
+        }
         InjectHarmlessCtrlKeystroke();
         const BOOL result = SetForegroundWindow(target);
         polish::LogDebug(std::format(
-            L"[Polish] AltTab: commit -> hwnd={} SetForegroundWindow result={} actualForeground={}",
-            reinterpret_cast<void*>(target), result != FALSE, reinterpret_cast<void*>(GetForegroundWindow())));
+            L"[Polish] AltTab: commit -> hwnd={} minimized={} SetForegroundWindow result={} actualForeground={}",
+            reinterpret_cast<void*>(target), selectionIsMinimized, result != FALSE,
+            reinterpret_cast<void*>(GetForegroundWindow())));
         return;
     }
     polish::LogDebug(std::format(L"[Polish] AltTab: commit -> hwnd={} no longer a valid window",
@@ -696,6 +1093,260 @@ void OnAltTabCancel() {
     }
     EndAltTabSession();
     polish::LogDebug(L"[Polish] AltTab: cancel");
+}
+
+// Arrow-key navigation, fired only while a session is already active
+// (AltTabHook guarantees that -- see its class comment). While selection
+// is in the active section, Down/Up behave exactly like Tab/Shift+Tab
+// (including wraparound) *except* that Down from the last active row
+// moves into the minimized section instead of wrapping to the first
+// active row -- Up from the minimized section's first row moves back
+// there symmetrically. Once in the minimized section, Down/Up just walk
+// it linearly (no wraparound at either end -- there's no "next" list to
+// spill into past the last minimized row). Tab/Shift+Tab
+// (OnAltTabCycle) always reset out of the minimized section on the very
+// next press, regardless of where this last left it.
+void OnAltTabNavigate(bool downward) {
+    if (!g_altTabSessionOpen) {
+        return;
+    }
+    if (!g_altTabSelectionInMinimized && downward && !g_altTabCandidates.empty() &&
+        g_altTabHighlightIndex + 1 >= g_altTabCandidates.size()) {
+        RebuildAltTabMinimizedCandidates();
+        if (!g_altTabMinimized.empty()) {
+            g_altTabSelectionInMinimized = true;
+            g_altTabMinimizedHighlightIndex = 0;
+            ApplyAltTabDimming();
+            return;
+        }
+        // Nothing minimized to move into -- fall through to the normal
+        // wraparound cycle below, same as if this check never fired.
+    }
+
+    if (g_altTabSelectionInMinimized) {
+        RebuildAltTabMinimizedCandidates();
+        if (g_altTabMinimized.empty()) {
+            g_altTabSelectionInMinimized = false;
+        } else if (downward) {
+            if (g_altTabMinimizedHighlightIndex + 1 < g_altTabMinimized.size()) {
+                ++g_altTabMinimizedHighlightIndex;
+            }
+        } else if (g_altTabMinimizedHighlightIndex == 0) {
+            g_altTabSelectionInMinimized = false;
+        } else {
+            --g_altTabMinimizedHighlightIndex;
+        }
+        ApplyAltTabDimming();
+        return;
+    }
+
+    OnAltTabCycle(/*backward=*/!downward);
+}
+
+// A row click in the list panel commits directly to that row's window,
+// regardless of whichever one Tab-cycling last landed the highlight on.
+// Takes the clicked row's own HWND (not an index) -- each monitor's panel
+// only knows its own local subset, so a plain index would be ambiguous
+// without knowing which panel it came from; looking the HWND up here
+// resolves it to the right position in the one shared g_altTabCandidates
+// list.
+void OnAltTabRowActivated(HWND hwnd) {
+    if (!g_altTabSessionOpen) {
+        return;
+    }
+    const auto activeIt = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd);
+    if (activeIt != g_altTabCandidates.end()) {
+        g_altTabHighlightIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), activeIt));
+        g_altTabSelectionInMinimized = false;
+        OnAltTabCommit();
+        return;
+    }
+    // Not an active candidate -- check the minimized section (see
+    // PLAN.md's Alt+Tab-improvements M4). A click there should restore
+    // and commit directly, same as Enter after arrow-navigating to it.
+    const auto minimizedIt = std::find(g_altTabMinimized.begin(), g_altTabMinimized.end(), hwnd);
+    if (minimizedIt != g_altTabMinimized.end()) {
+        g_altTabMinimizedHighlightIndex = static_cast<size_t>(std::distance(g_altTabMinimized.begin(), minimizedIt));
+        g_altTabSelectionInMinimized = true;
+        OnAltTabCommit();
+    }
+}
+
+// Fired by AltTabListWindow's minimize/restore-toggle button, which only
+// ever appears on the highlighted row or a merely-hovered row (see
+// PLAN.md's Alt+Tab-improvements M5) -- hwnd may therefore be some row
+// other than whatever Tab-cycling last highlighted. Acts on it directly
+// without ending the session, then rebuilds both lists and re-locates
+// the highlight to hwnd by identity, same shape as OnAltTabCycle's own
+// mid-session refresh -- toggling naturally moves hwnd to the other
+// section, so this is what makes the highlight jump to follow it there
+// (whether or not hwnd was already the highlighted row) rather than
+// landing on whatever now occupies its old slot.
+void OnAltTabRowMinimizeToggle(HWND hwnd) {
+    if (!g_altTabSessionOpen || !IsWindow(hwnd)) {
+        return;
+    }
+    if (IsIconic(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    } else {
+        ShowWindow(hwnd, SW_MINIMIZE);
+    }
+
+    UpdateAltTabCandidatesPreservingOrder();
+    RebuildAltTabMinimizedCandidates();
+    if (g_altTabCandidates.size() < 2) {
+        // Same degenerate-count guard as OnAltTabCycle -- minimizing the
+        // second-to-last active window can drop the active list below
+        // the feature's minimum mid-session.
+        polish::LogDebug(L"[Polish] AltTab: candidate count dropped below 2 after row minimize toggle, ending session");
+        EndAltTabSession();
+        return;
+    }
+    EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
+
+    const auto activeIt = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd);
+    if (activeIt != g_altTabCandidates.end()) {
+        g_altTabHighlightIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), activeIt));
+        g_altTabSelectionInMinimized = false;
+    } else {
+        const auto minimizedIt = std::find(g_altTabMinimized.begin(), g_altTabMinimized.end(), hwnd);
+        if (minimizedIt != g_altTabMinimized.end()) {
+            g_altTabMinimizedHighlightIndex = static_cast<size_t>(std::distance(g_altTabMinimized.begin(), minimizedIt));
+            g_altTabSelectionInMinimized = true;
+        } else {
+            // hwnd vanished entirely (closed itself in response, or some
+            // other race) -- clamp rather than reference a stale index.
+            g_altTabHighlightIndex = std::min(g_altTabHighlightIndex, g_altTabCandidates.size() - 1);
+            g_altTabSelectionInMinimized = false;
+        }
+    }
+    ApplyAltTabDimming();
+}
+
+// Fired by AltTabListWindow's maximize/restore-toggle button, which only
+// ever appears on an active-section row (see PLAN.md's Alt+Tab-
+// improvements M5 follow-up) -- unlike minimize/close, maximize/restore
+// never moves hwnd between sections, so this doesn't need to relocate
+// anything, just refresh so the highlight border immediately matches the
+// window's new (restored/maximized) bounds instead of waiting for the
+// next Tab press. Deliberately a no-op for a minimized-section hwnd
+// (including one reached via the Plus keyboard shortcut while browsing
+// that section) -- maximizing only ever applied to "active windows" per
+// the feature request, not as a side-channel way to un-minimize.
+void OnAltTabRowMaximizeToggle(HWND hwnd) {
+    if (!g_altTabSessionOpen || hwnd == nullptr || !IsWindow(hwnd)) {
+        return;
+    }
+    const auto it = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd);
+    if (it == g_altTabCandidates.end()) {
+        return;
+    }
+    if (IsZoomed(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    } else {
+        ShowWindow(hwnd, SW_MAXIMIZE);
+    }
+    g_altTabHighlightIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), it));
+    g_altTabSelectionInMinimized = false;
+    ApplyAltTabDimming();
+    // ApplyAltTabDimming's own panel-refresh only repaints when the
+    // candidate list or highlight index actually changed -- neither did
+    // here (hwnd stayed in the same slot), so without this the row's
+    // maximize/restore glyph would keep showing its pre-toggle state
+    // until some other, unrelated change happened to trigger a repaint.
+    // Confirmed as a real, human-reported bug: the icon didn't update
+    // immediately after clicking it.
+    for (auto& panel : g_altTabPanels) {
+        panel.window->RepaintRow(hwnd);
+    }
+}
+
+// Fired by AltTabListWindow's close ("X") button on the highlighted row
+// or, per explicit user request, any merely-hovered row too. Posts a
+// graceful WM_CLOSE the target app can still intercept (an unsaved-
+// changes prompt, etc.), deliberately not DestroyWindow -- but rather
+// than waiting for that asynchronous close to actually take effect, this
+// removes hwnd from whichever list it's in immediately and fixes up the
+// highlight right away: if hwnd was the currently-selected window, the
+// selection advances to what's now "next" (the row that shifted into its
+// old slot); otherwise the highlight index is just adjusted to keep
+// pointing at the same logical window it already did. Waiting for the
+// natural next refresh instead was confirmed as feeling broken, human-
+// reported, on a window that's slow to actually close. If the app
+// cancels the close (its own unsaved-changes prompt, say), the window
+// simply reappears -- appended at the end -- on the very next Tab press,
+// via UpdateAltTabCandidatesPreservingOrder's normal "newly seen"
+// handling; an accepted, minor simplification rather than tracking
+// pending closes explicitly.
+void OnAltTabRowClose(HWND hwnd) {
+    if (!g_altTabSessionOpen || !IsWindow(hwnd)) {
+        return;
+    }
+    polish::LogDebug(std::format(L"[Polish] AltTab: row close -> hwnd={}", reinterpret_cast<void*>(hwnd)));
+    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+
+    const auto activeIt = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd);
+    if (activeIt != g_altTabCandidates.end()) {
+        const size_t removedIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), activeIt));
+        g_altTabCandidates.erase(activeIt);
+        if (g_altTabCandidates.size() < 2) {
+            polish::LogDebug(L"[Polish] AltTab: candidate count dropped below 2 after row close, ending session");
+            EndAltTabSession();
+            return;
+        }
+        if (removedIndex == g_altTabHighlightIndex) {
+            g_altTabHighlightIndex = removedIndex % g_altTabCandidates.size();
+        } else if (removedIndex < g_altTabHighlightIndex) {
+            --g_altTabHighlightIndex;
+        }
+        ApplyAltTabDimming();
+        return;
+    }
+
+    const auto minimizedIt = std::find(g_altTabMinimized.begin(), g_altTabMinimized.end(), hwnd);
+    if (minimizedIt != g_altTabMinimized.end()) {
+        const size_t removedIndex = static_cast<size_t>(std::distance(g_altTabMinimized.begin(), minimizedIt));
+        g_altTabMinimized.erase(minimizedIt);
+        if (g_altTabMinimized.empty()) {
+            g_altTabSelectionInMinimized = false;
+        } else if (removedIndex == g_altTabMinimizedHighlightIndex) {
+            g_altTabMinimizedHighlightIndex = removedIndex % g_altTabMinimized.size();
+        } else if (removedIndex < g_altTabMinimizedHighlightIndex) {
+            --g_altTabMinimizedHighlightIndex;
+        }
+        ApplyAltTabDimming();
+    }
+}
+
+// (Re)builds g_altTabPanels from the currently-connected monitors --
+// called once at startup, and again on WM_DISPLAYCHANGE (a monitor
+// connected/disconnected, or a resolution/topology change). Without the
+// WM_DISPLAYCHANGE call, the panels created at startup would keep
+// referencing whichever monitors were connected *then*: confirmed as a
+// real bug, human-reported -- disconnecting a second monitor without
+// restarting Polish left every panel silently showing nothing at all,
+// since none of the (now stale/nonexistent) cached HMONITOR handles
+// matched any current window's real monitor anymore, and
+// BuildAltTabListRowsForMonitor's per-panel row list came back empty for
+// every panel. Destroying and recreating the whole set (rather than
+// trying to diff old vs. new monitors) keeps this simple -- monitor
+// topology changes are rare and never happen mid-Alt+Tab-session in
+// practice (ends any open session first regardless, to be safe if one
+// somehow is).
+void RefreshAltTabPanels() {
+    if (g_altTabSessionOpen) {
+        EndAltTabSession();
+    }
+    g_altTabPanels.clear();
+    for (HMONITOR monitor : GetMonitorsCurrentFirst()) {
+        AltTabMonitorPanel panel{monitor, std::make_unique<polish::AltTabListWindow>(GetModuleHandleW(nullptr))};
+        panel.window->SetOnRowActivated(OnAltTabRowActivated);
+        panel.window->SetOnRowMinimizeToggle(OnAltTabRowMinimizeToggle);
+        panel.window->SetOnRowMaximizeToggle(OnAltTabRowMaximizeToggle);
+        panel.window->SetOnRowClose(OnAltTabRowClose);
+        g_altTabPanels.push_back(std::move(panel));
+    }
+    polish::LogDebug(std::format(L"[Polish] AltTab: panels rebuilt for {} monitor(s)", g_altTabPanels.size()));
 }
 
 constexpr UINT kMenuIdRestoreSync = 1;
@@ -1459,7 +2110,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 
         case polish::AltTabHook::kHookMessage:
             if (g_altTabHook) {
-                g_altTabHook->HandleHookMessage(wParam);
+                g_altTabHook->HandleHookMessage(wParam, lParam);
             }
             return 0;
 
@@ -1473,6 +2124,14 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             if (wParam == kNewGroupHotkeyId) {
                 TriggerNewGroup(nullptr);
             }
+            return 0;
+
+        case WM_DISPLAYCHANGE:
+            // Monitor connected/disconnected, or a resolution/topology
+            // change -- rebuild Alt+Tab's per-monitor panels against the
+            // new reality. See RefreshAltTabPanels' own comment for the
+            // real, human-reported bug this fixes.
+            RefreshAltTabPanels();
             return 0;
 
         case kCloseGroupMessage:
@@ -1611,19 +2270,48 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     } else {
         polish::LogDebug(L"[Polish] Alt+Tab keyboard hook installed successfully");
     }
+    g_altTabHook->SetOnNavigate(OnAltTabNavigate);
+    // Del/-/+ act on whichever row Tab-cycling currently has highlighted
+    // -- there's no keyboard equivalent of a mouse hover, so this is
+    // always CurrentAltTabHighlightedWindow(), unlike the panel's own
+    // mouse-driven callbacks (SetOnRowClose etc.), which can also fire
+    // for a merely-hovered, non-highlighted row.
+    g_altTabHook->SetOnRowAction([](polish::AltTabHook::RowAction action) {
+        const HWND hwnd = CurrentAltTabHighlightedWindow();
+        switch (action) {
+            case polish::AltTabHook::RowAction::Close:
+                OnAltTabRowClose(hwnd);
+                break;
+            case polish::AltTabHook::RowAction::MinimizeToggle:
+                OnAltTabRowMinimizeToggle(hwnd);
+                break;
+            case polish::AltTabHook::RowAction::MaximizeToggle:
+                OnAltTabRowMaximizeToggle(hwnd);
+                break;
+        }
+    });
+    // Lets AltTabHook's mouse hook tell "a click on one of the list
+    // panels" apart from "a click anywhere else" (which commits the
+    // session) -- see AltTabHook's class comment on this second,
+    // deliberately-bounded hook-thread exception.
+    g_altTabHook->SetIsOwnUI([](POINT screenPt) {
+        return std::any_of(g_altTabPanels.begin(), g_altTabPanels.end(),
+                            [screenPt](const AltTabMonitorPanel& panel) { return panel.window->ContainsPoint(screenPt); });
+    });
 
-    // Pre-create the dim overlays and highlight border now, at startup,
-    // rather than paying CreateWindowExW + first-paint latency in
-    // response to the user's actual first Tab press -- confirmed as a
-    // real, visible glitch (the previously-active window briefly still
-    // looked highlighted/undimmed before the real highlight caught up).
-    // EnsureAltTabOverlayPoolSize only ever grows the pool, so this is
-    // purely a head start for the common case, not a hard requirement --
-    // it still grows safely later if more windows open than were open
-    // right now.
+    // Pre-create the dim overlays, highlight border, and one list panel
+    // per connected monitor now, at startup, rather than paying
+    // CreateWindowExW + first-paint latency in response to the user's
+    // actual first Tab press -- confirmed as a real, visible glitch (the
+    // previously-active window briefly still looked highlighted/undimmed
+    // before the real highlight caught up). EnsureAltTabOverlayPoolSize
+    // only ever grows the pool, so this is purely a head start for the
+    // common case, not a hard requirement -- it still grows safely later
+    // if more windows open than were open right now.
     RebuildAltTabCandidates();
     EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
     EnsureAltTabHighlightBorder();
+    RefreshAltTabPanels();
 
     OnForegroundChanged(GetForegroundWindow());
 

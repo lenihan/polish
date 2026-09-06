@@ -69,6 +69,30 @@ namespace polish {
 // synchronous, no-UI operation, nowhere near the timeout risk that
 // candidate popups/DWM calls would be -- it's the *rendering* work that
 // stays deferred via the posted message below, not this.
+//
+// A second exception, same category: isOwnUI (see SetIsOwnUI), if set, is
+// also called synchronously -- from inside the mouse hook this time --
+// before deciding whether a click commits the session. It exists because
+// the mouse hook's default behavior (any button-down anywhere commits
+// unconditionally, see HandleMouseEvent) would otherwise swallow a click
+// meant for Polish's own list-panel UI as a generic commit trigger,
+// instead of letting it reach that panel's own row/button hit-testing. A
+// WindowFromPoint-plus-handle-comparison check is the same bounded,
+// synchronous, no-UI shape as hasEligibleCandidates above.
+//
+// Arrow-key (Up/Down) navigation, once a session is already active, is
+// recognized the same way Tab is -- swallowed and posted via onNavigate --
+// but strictly gated on sessionActive_ already being true: unlike Tab,
+// arrow keys are used constantly system-wide, so they must never be able
+// to start a session and must be completely inert otherwise. The same
+// physically-down debounce pattern used for tabPhysicallyDown_ applies
+// per-key here too, so OS auto-repeat on a held arrow doesn't rapid-cycle
+// through the list -- the identical bug shape already found and fixed
+// once for Tab itself.
+//
+// Delete/-/+ (see SetOnRowAction), once a session is already active, are
+// recognized and debounced the exact same way -- close/minimize-toggle/
+// maximize-toggle the currently Tab-highlighted row without a mouse.
 class AltTabHook {
 public:
     // hasEligibleCandidates(): called synchronously, only when a session
@@ -95,14 +119,40 @@ public:
     AltTabHook(const AltTabHook&) = delete;
     AltTabHook& operator=(const AltTabHook&) = delete;
 
+    // Optional: called synchronously from the mouse hook (see class
+    // comment) with the screen point of a button-down, to decide whether
+    // that click is on Polish's own list-panel UI rather than some other
+    // real window. When it returns true, the click is left completely
+    // untouched (not treated as a generic commit trigger) so the panel's
+    // own hit-testing can handle it. Unset (or returning false for a
+    // given point) preserves today's behavior exactly.
+    void SetIsOwnUI(std::function<bool(POINT screenPt)> isOwnUI) { isOwnUI_ = std::move(isOwnUI); }
+
+    // Optional: Up/Down arrow-key navigation while a session is already
+    // active (see class comment) -- downward=true for Down, false for Up.
+    // Never fires unless sessionActive_ is already true.
+    void SetOnNavigate(std::function<void(bool downward)> onNavigate) { onNavigate_ = std::move(onNavigate); }
+
+    // Del/-/+ pressed while a session is already active -- keyboard
+    // equivalents of clicking a row's close/minimize-toggle/maximize-
+    // toggle action button (see AltTabListWindow), but with no keyboard
+    // equivalent of "hover" these always mean whichever row is currently
+    // Tab-highlighted; the callback itself is expected to resolve that.
+    // Never fires unless sessionActive_ is already true, same gating as
+    // arrow-key navigation.
+    enum class RowAction { Close, MinimizeToggle, MaximizeToggle };
+    void SetOnRowAction(std::function<void(RowAction action)> onRowAction) { onRowAction_ = std::move(onRowAction); }
+
     // Routes the hook's private message. The hook callback runs on this
     // thread already (low-level hooks are called on the installing
     // thread), so this posts via PostMessage to messageWindow rather
     // than calling back directly -- keeps the hook callback itself down
     // to just recognizing keys and posting, per the timeout risk above.
     // Callers must route WM messages with message id == kHookMessage
-    // here from their WindowProc.
-    void HandleHookMessage(WPARAM wParam);
+    // here from their WindowProc, passing both wParam and lParam through
+    // unchanged (lParam carries the RowAction payload for that action;
+    // every other message ignores it).
+    void HandleHookMessage(WPARAM wParam, LPARAM lParam);
 
     // GetTickCount64() at the moment the first Tab-while-Alt of the
     // current/most recent session was detected in the hook -- a cheap,
@@ -125,7 +175,7 @@ private:
     static LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK LowLevelMouseProc(int code, WPARAM wParam, LPARAM lParam);
     bool HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data);
-    bool HandleMouseEvent(WPARAM wParam);
+    bool HandleMouseEvent(WPARAM wParam, POINT screenPt);
     void InstallMouseHook();
     void UninstallMouseHook();
 
@@ -134,6 +184,9 @@ private:
     std::function<void(bool backward)> onCycle_;
     std::function<void()> onCommit_;
     std::function<void()> onCancel_;
+    std::function<bool(POINT screenPt)> isOwnUI_;
+    std::function<void(bool downward)> onNavigate_;
+    std::function<void(RowAction action)> onRowAction_;
     HHOOK hook_ = nullptr;
     HHOOK mouseHook_ = nullptr;
 
@@ -152,6 +205,19 @@ private:
     // shouldn't rapidly cycle through windows any more than native
     // Alt+Tab does.
     bool tabPhysicallyDown_ = false;
+
+    // Same debounce shape as tabPhysicallyDown_, one per arrow key (Up and
+    // Down are independent keys, so a single shared flag can't tell them
+    // apart if both happened to be down, however unlikely).
+    bool upPhysicallyDown_ = false;
+    bool downPhysicallyDown_ = false;
+
+    // Same debounce shape again, one per row-action key -- holding
+    // Minus/Plus down shouldn't rapidly toggle minimize/maximize via OS
+    // key-repeat any more than holding Tab should rapidly cycle.
+    bool deletePhysicallyDown_ = false;
+    bool minusPhysicallyDown_ = false;
+    bool plusPhysicallyDown_ = false;
 
     // True for the rest of the current Alt-hold once Ctrl+Alt+Tab (the
     // deliberate escape hatch to native Alt+Tab -- see HandleKeyEvent)
