@@ -13,12 +13,20 @@ namespace polish {
 namespace {
 
 constexpr wchar_t kWindowClassName[] = L"PolishGroupChromeWindow";
+// The chrome's initial size on first Show() -- logical (96 DPI) px, NOT
+// the raw pixels CreateWindowExW itself takes (see Show's own comment on
+// why these get DPI-scaled explicitly right after creation, rather than
+// passed to CreateWindowExW as-is).
+constexpr int kDefaultChromeWidth = 1200;
+constexpr int kDefaultChromeHeight = 850;
 // Height of the self-painted title bar band that replaces the native OS
 // caption -- see the class comment (GroupChromeWindow.h) for the
-// shrink-the-caption-via-WM_NCCALCSIZE technique this relies on. Chosen
-// to read as a normal Windows 11 title bar (comparable to e.g. Windows
-// Terminal's own custom one), not the plain ~31px native caption height.
-constexpr int kTitleBarHeight = 32;  // logical (96 DPI) px
+// shrink-the-caption-via-WM_NCCALCSIZE technique this relies on. A first
+// pass at 32 (chosen to read as a normal Windows 11 title bar) was part
+// of what got confirmed "huge" on a real 200% display, alongside
+// kTitleBarButtonWidth's own oversized first guess -- trimmed down as
+// part of the same live tuning pass.
+constexpr int kTitleBarHeight = 28;  // logical (96 DPI) px
 constexpr int kTabStripHeight = 36;   // logical (96 DPI) px
 constexpr int kTabMinWidth = 120;     // logical px
 constexpr int kTabMaxWidth = 220;     // logical px
@@ -59,6 +67,38 @@ constexpr int kMinTileSize = 80;       // logical px
 
 constexpr UINT_PTR kHoverTimerId = 1;
 constexpr UINT kHoverDelayMs = 400;
+
+// Title-bar band content -- icon, title text, and the three caption
+// buttons (see PaintTitleBar/MinimizeButtonRect/MaximizeButtonRect/
+// CloseButtonRect). An initial pass at kTitleBarButtonWidth=46 (a
+// commonly-quoted native Windows 10/11 caption button width) plus an
+// 8px glyph margin was still reported "huge" even after a first
+// shrink pass (46->32, margin 8->6) -- turned out the button *box* was
+// already fine (smaller than Windows' own SM_CXSIZE metric at the same
+// DPI), but the *glyph drawn inside it* wasn't: measuring a live 2x-DPI
+// screenshot pixel-for-pixel against VS Code's own custom title bar
+// (same monitor, same DPI, a known-good reference) found our close-X
+// glyph at ~40x31 physical px versus VS Code's ~19x19 -- because the
+// old approach sized the glyph as "button box minus a fixed margin", so
+// a bigger button box directly meant a bigger glyph. Real title bars
+// don't scale the glyph with the hit-box: the glyph is a small, fixed
+// size regardless of how big the clickable button is. kTitleBarGlyphSize
+// is that fixed glyph bounding box, centered within each button rect
+// (see GlyphRect below) instead of being derived from it.
+constexpr int kTitleBarButtonWidth = 32;      // logical px
+constexpr int kTitleBarIconSize = 16;         // logical px -- matches the small icon a native caption shows
+constexpr int kTitleBarIconLeftPadding = 10;  // logical px, before the icon
+constexpr int kTitleBarIconTextGap = 8;       // logical px, between icon and title text
+// Fixed glyph bounding box (independent of button size -- see comment
+// above) and the offset between the two overlapping squares of the
+// restore-from-maximized glyph.
+constexpr int kTitleBarGlyphSize = 10;
+constexpr int kTitleBarRestoreGlyphOffset = 2;
+// Windows' own "close" red -- used only for the close button's hover
+// fill, in both light and dark mode (native Windows 11 does the same:
+// the close button is the one caption button whose hover color doesn't
+// follow the theme).
+constexpr COLORREF kTitleBarCloseHoverColor = RGB(0xE8, 0x11, 0x23);
 
 // Local to this window's own context menu -- TrackPopupMenu's returned
 // command isn't routed through WM_COMMAND, so these don't need to be
@@ -232,18 +272,110 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             GetClientRect(hwnd, &clientRect);
             const UINT dpi = GetDpiForWindow(hwnd);
             if (clientPt.y >= clientRect.top && clientPt.y < clientRect.top + TitleBarHeight(dpi)) {
-                // The whole band is draggable/double-click-to-maximize,
-                // same as the native caption it replaces -- returning
-                // HTCAPTION here is what makes DefWindowProcW's own
-                // WM_NCLBUTTONDOWN handling do all of that for free, with
-                // nothing else in this class needing to intercept it.
-                // TB2 (see PLAN.md's Groups-custom-title-bar plan) carves
-                // out HTMINBUTTON/HTMAXBUTTON/HTCLOSE for specific button
-                // rects within this same band.
+                // The three button rects take priority over the plain
+                // draggable band -- returning HTMINBUTTON/HTMAXBUTTON/
+                // HTCLOSE here is what makes the WM_NCLBUTTONDOWN handler
+                // below know which button a click landed on (these codes
+                // are *not* enough on their own to trigger the action --
+                // confirmed live that DefWindowProcW's default handling
+                // doesn't minimize/maximize/close just because
+                // WM_NCHITTEST reports one of these, once the real
+                // caption has been shrunk the way this class does; see
+                // WM_NCLBUTTONDOWN's own comment). See PaintTitleBar for
+                // the purely-visual half of this.
+                RECT r = CloseButtonRect(clientRect, dpi);
+                if (PtInRect(&r, clientPt)) {
+                    return HTCLOSE;
+                }
+                r = MaximizeButtonRect(clientRect, dpi);
+                if (PtInRect(&r, clientPt)) {
+                    return HTMAXBUTTON;
+                }
+                r = MinimizeButtonRect(clientRect, dpi);
+                if (PtInRect(&r, clientPt)) {
+                    return HTMINBUTTON;
+                }
+                // The rest of the band is draggable/double-click-to-
+                // maximize, same as the native caption it replaces --
+                // returning HTCAPTION here is what makes DefWindowProcW's
+                // own WM_NCLBUTTONDOWN handling do all of that for free.
                 return HTCAPTION;
             }
             return HTCLIENT;
         }
+
+        case WM_NCMOUSEMOVE: {
+            // wParam is the same hit-test code WM_NCHITTEST just
+            // returned for this point -- no need to recompute which
+            // button rect the cursor is over from coordinates.
+            const std::optional<UINT> newHover =
+                (wParam == HTMINBUTTON || wParam == HTMAXBUTTON || wParam == HTCLOSE)
+                    ? std::optional<UINT>(static_cast<UINT>(wParam))
+                    : std::nullopt;
+            if (!trackingNcMouseLeave_) {
+                TRACKMOUSEEVENT tme{};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE | TME_NONCLIENT;
+                tme.hwndTrack = hwnd;
+                if (TrackMouseEvent(&tme)) {
+                    trackingNcMouseLeave_ = true;
+                }
+            }
+            if (newHover != hoveredTitleBarButton_) {
+                hoveredTitleBarButton_ = newHover;
+                InvalidateTitleBar();
+            }
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+        }
+
+        case WM_NCMOUSELEAVE:
+            trackingNcMouseLeave_ = false;
+            if (hoveredTitleBarButton_.has_value()) {
+                hoveredTitleBarButton_.reset();
+                InvalidateTitleBar();
+            }
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+
+        case WM_NCLBUTTONDOWN:
+            // Committing on *down* here, not up, despite that being the
+            // less-native-feeling choice (a real caption button commits
+            // on release, letting you drag off to cancel) -- confirmed
+            // live, with message-level logging, that WM_NCLBUTTONDOWN
+            // with wParam HTMINBUTTON/HTMAXBUTTON/HTCLOSE correctly
+            // arrives here, but letting it fall through to
+            // DefWindowProcW (as an earlier version of this code did,
+            // committing on the *up* message instead) never resulted in
+            // a WM_NCLBUTTONUP being delivered back to this window proc
+            // at all -- DefWindowProcW's own default handling for these
+            // specific hit-test codes appears to enter its own internal
+            // capture/tracking loop (the same general mechanism a
+            // native caption button's own press-track-release visual
+            // feedback relies on) that consumes the eventual release
+            // internally rather than dispatching it back to the owning
+            // window's own WndProc, and -- per this class's own earlier
+            // finding -- doesn't perform the action itself either once
+            // the real caption has been shrunk this way. Handling on
+            // down is what actually works.
+            switch (wParam) {
+                case HTMINBUTTON:
+                    ShowWindow(hwnd, SW_MINIMIZE);
+                    return 0;
+                case HTMAXBUTTON:
+                    ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+                    return 0;
+                case HTCLOSE:
+                    // Same graceful-close path a real caption's close
+                    // button would trigger (WM_SYSCOMMAND/SC_CLOSE
+                    // ultimately just posts WM_CLOSE) -- reuses the
+                    // existing WM_CLOSE handler unchanged (onClosing_
+                    // reparents members back out before DefWindowProcW's
+                    // own WM_CLOSE handling destroys the window).
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    return 0;
+                default:
+                    break;
+            }
+            return DefWindowProcW(hwnd, message, wParam, lParam);
 
         case WM_SETCURSOR: {
             // Only for hovering a splitter -- everything else (the
@@ -652,12 +784,12 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     const int titleBarHeight = TitleBarHeight(dpi);
 
     // The custom title bar band itself -- reserved in both modes (see
-    // HeaderHeight's own comment). TB1: just a blank fill; the icon,
-    // group name, and min/max/close buttons land here in TB2.
+    // HeaderHeight's own comment).
     RECT titleBarRect{clientRect.left, clientRect.top, clientRect.right, clientRect.top + titleBarHeight};
     HBRUSH titleBarBrush = CreateSolidBrush(kContentColor);
     FillRect(hdc, &titleBarRect, titleBarBrush);
     DeleteObject(titleBarBrush);
+    PaintTitleBar(hdc, clientRect);
 
     if (mode_ == GroupMode::Tile) {
         // No tab strip in Tile mode -- there are no tabs to render
@@ -846,6 +978,150 @@ int GroupChromeWindow::HeaderHeight(UINT dpi) const {
 
 int GroupChromeWindow::TitleBarHeight(UINT dpi) const { return Scale(kTitleBarHeight, dpi); }
 
+RECT GroupChromeWindow::CloseButtonRect(const RECT& clientRect, UINT dpi) const {
+    const int w = Scale(kTitleBarButtonWidth, dpi);
+    const int h = TitleBarHeight(dpi);
+    return RECT{clientRect.right - w, clientRect.top, clientRect.right, clientRect.top + h};
+}
+
+RECT GroupChromeWindow::MaximizeButtonRect(const RECT& clientRect, UINT dpi) const {
+    const RECT close = CloseButtonRect(clientRect, dpi);
+    const int w = Scale(kTitleBarButtonWidth, dpi);
+    return RECT{close.left - w, close.top, close.left, close.bottom};
+}
+
+RECT GroupChromeWindow::MinimizeButtonRect(const RECT& clientRect, UINT dpi) const {
+    const RECT maximize = MaximizeButtonRect(clientRect, dpi);
+    const int w = Scale(kTitleBarButtonWidth, dpi);
+    return RECT{maximize.left - w, maximize.top, maximize.left, maximize.bottom};
+}
+
+void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
+    const bool dark = IsDarkModeEnabled();
+    const UINT dpi = GetDpiForWindow(window_);
+    const int titleBarHeight = TitleBarHeight(dpi);
+
+    // Icon + title text, left-aligned -- the title text is whatever the
+    // owner already set via SetWindowTextW (main.cpp sets this to the
+    // group's name, same as it always has -- that call still matters for
+    // the taskbar/Alt+Tab tooltip text even though the native caption no
+    // longer paints it itself). Read fresh every paint rather than cached,
+    // matching this class's existing SetMemberTitles/SetMemberIcons
+    // convention of not needing a separate invalidation path when the
+    // owner updates it.
+    const int iconSize = Scale(kTitleBarIconSize, dpi);
+    const int iconLeft = clientRect.left + Scale(kTitleBarIconLeftPadding, dpi);
+    const int iconTop = clientRect.top + (titleBarHeight - iconSize) / 2;
+    // GCLP_HICONSM -- the same small icon set once at class-registration
+    // time (see the constructor), not a fresh load; borrowed, not owned.
+    const HICON icon = reinterpret_cast<HICON>(GetClassLongPtrW(window_, GCLP_HICONSM));
+    if (icon != nullptr) {
+        DrawIconEx(hdc, iconLeft, iconTop, icon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
+    }
+
+    wchar_t title[256] = L"";
+    GetWindowTextW(window_, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+
+    // The real system caption font (NONCLIENTMETRICS' lfCaptionFont) --
+    // this class is replacing the native caption, so using the exact
+    // font Windows itself would have used here (rather than the tab
+    // strip's own DEFAULT_GUI_FONT/bold-DEFAULT_GUI_FONT pair) is what
+    // makes the custom band actually read as a title bar.
+    NONCLIENTMETRICSW metrics{};
+    metrics.cbSize = sizeof(metrics);
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi);
+    HFONT captionFont = CreateFontIndirectW(&metrics.lfCaptionFont);
+    HGDIOBJ oldFont = SelectObject(hdc, captionFont);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, dark ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x1A, 0x1A, 0x1A));
+
+    const int textLeft = (icon != nullptr) ? iconLeft + iconSize + Scale(kTitleBarIconTextGap, dpi) : iconLeft;
+    RECT textRect{textLeft, clientRect.top, MinimizeButtonRect(clientRect, dpi).left, clientRect.top + titleBarHeight};
+    DrawTextW(hdc, title, -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    SelectObject(hdc, oldFont);
+    DeleteObject(captionFont);
+
+    // The three caption buttons -- glyphs only drawn in the plain
+    // "native Windows glyph shapes" convention already established in
+    // AltTabListWindow.cpp (a single line for minimize, a square/
+    // overlapping-squares outline for maximize/restore, an X for close),
+    // not new iconography. This is purely the visual half -- the actual
+    // minimize/maximize/close action happens in WM_NCLBUTTONDOWN, keyed
+    // off the same HTMINBUTTON/HTMAXBUTTON/HTCLOSE codes WM_NCHITTEST
+    // reports for these same rects.
+    const RECT minimizeRect = MinimizeButtonRect(clientRect, dpi);
+    const RECT maximizeRect = MaximizeButtonRect(clientRect, dpi);
+    const RECT closeRect = CloseButtonRect(clientRect, dpi);
+    const COLORREF hoverFill = dark ? RGB(0x3A, 0x3A, 0x3A) : RGB(0xE5, 0xE5, 0xE5);
+    const COLORREF glyphColor = dark ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x1A, 0x1A, 0x1A);
+
+    auto fillIfHovered = [&](const RECT& rect, UINT hitTest, bool isClose) {
+        if (hoveredTitleBarButton_ != hitTest) {
+            return false;
+        }
+        HBRUSH brush = CreateSolidBrush(isClose ? kTitleBarCloseHoverColor : hoverFill);
+        FillRect(hdc, &rect, brush);
+        DeleteObject(brush);
+        return true;
+    };
+    fillIfHovered(minimizeRect, HTMINBUTTON, false);
+    const bool maximizeHovered = fillIfHovered(maximizeRect, HTMAXBUTTON, false);
+    const bool closeHovered = fillIfHovered(closeRect, HTCLOSE, true);
+
+    HPEN glyphPen = CreatePen(PS_SOLID, 1, closeHovered ? RGB(0xFF, 0xFF, 0xFF) : glyphColor);
+    HGDIOBJ oldPen = SelectObject(hdc, glyphPen);
+    HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    auto drawLine = [hdc](int x1, int y1, int x2, int y2) {
+        MoveToEx(hdc, x1, y1, nullptr);
+        LineTo(hdc, x2, y2);
+    };
+
+    // Fixed-size glyph, centered within a button rect regardless of how
+    // big the button's own clickable hit-box is (see kTitleBarGlyphSize's
+    // comment for why -- deriving the glyph from the button box size was
+    // the actual bug behind the "huge buttons" report).
+    const int glyphSize = Scale(kTitleBarGlyphSize, dpi);
+    auto glyphRect = [glyphSize](const RECT& buttonRect) {
+        const int cx = (buttonRect.left + buttonRect.right) / 2;
+        const int cy = (buttonRect.top + buttonRect.bottom) / 2;
+        const int half = glyphSize / 2;
+        return RECT{cx - half, cy - half, cx + half, cy + half};
+    };
+
+    const RECT minimizeGlyph = glyphRect(minimizeRect);
+    drawLine(minimizeGlyph.left, minimizeGlyph.bottom, minimizeGlyph.right, minimizeGlyph.bottom);
+
+    const RECT maximizeGlyph = glyphRect(maximizeRect);
+    if (IsZoomed(window_)) {
+        // Restore glyph: two overlapping offset squares, the front one
+        // filled with whatever's already behind it (the hover fill, or
+        // the band's own background if not hovered) before being
+        // outlined, so it properly occludes the back square underneath
+        // -- same technique/reasoning as AltTabListWindow's identical
+        // restore glyph (plain NULL_BRUSH outlines would just show both
+        // squares' lines crossing through each other instead).
+        const int offset = Scale(kTitleBarRestoreGlyphOffset, dpi);
+        Rectangle(hdc, maximizeGlyph.left + offset, maximizeGlyph.top, maximizeGlyph.right,
+                  maximizeGlyph.bottom - offset);
+        HBRUSH occludeBrush = CreateSolidBrush(maximizeHovered ? hoverFill : (dark ? RGB(0x20, 0x20, 0x20) : RGB(0xFF, 0xFF, 0xFF)));
+        SelectObject(hdc, occludeBrush);
+        Rectangle(hdc, maximizeGlyph.left, maximizeGlyph.top + offset, maximizeGlyph.right - offset,
+                  maximizeGlyph.bottom);
+        SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        DeleteObject(occludeBrush);
+    } else {
+        Rectangle(hdc, maximizeGlyph.left, maximizeGlyph.top, maximizeGlyph.right, maximizeGlyph.bottom);
+    }
+
+    const RECT closeGlyph = glyphRect(closeRect);
+    drawLine(closeGlyph.left, closeGlyph.top, closeGlyph.right, closeGlyph.bottom);
+    drawLine(closeGlyph.right, closeGlyph.top, closeGlyph.left, closeGlyph.bottom);
+
+    SelectObject(hdc, oldBrush);
+    SelectObject(hdc, oldPen);
+    DeleteObject(glyphPen);
+}
+
 RECT GroupChromeWindow::ContentRectInScreenCoords() const {
     if (window_ == nullptr) {
         return RECT{};
@@ -880,6 +1156,17 @@ void GroupChromeWindow::InvalidateTabStrip() {
     const UINT dpi = GetDpiForWindow(window_);
     RECT headerRect{client.left, client.top, client.right, client.top + HeaderHeight(dpi)};
     InvalidateRect(window_, &headerRect, TRUE);
+}
+
+void GroupChromeWindow::InvalidateTitleBar() {
+    if (window_ == nullptr) {
+        return;
+    }
+    RECT client{};
+    GetClientRect(window_, &client);
+    const UINT dpi = GetDpiForWindow(window_);
+    RECT titleBarRect{client.left, client.top, client.right, client.top + TitleBarHeight(dpi)};
+    InvalidateRect(window_, &titleBarRect, TRUE);
 }
 
 void GroupChromeWindow::SetTileSplitters(std::vector<int> columnBoundaries, std::vector<int> rowBoundaries) {
@@ -1134,9 +1421,37 @@ void GroupChromeWindow::Show(const std::vector<std::wstring>& memberTitles, Grou
         // This is the standard Win32 fix for a parent with child
         // windows it never means to paint over.
         window_ = CreateWindowExW(0, kWindowClassName, L"Group", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                                   CW_USEDEFAULT, CW_USEDEFAULT, 1200, 850, nullptr, nullptr, instance_, this);
+                                   CW_USEDEFAULT, CW_USEDEFAULT, kDefaultChromeWidth, kDefaultChromeHeight, nullptr,
+                                   nullptr, instance_, this);
         if (window_ != nullptr) {
             ApplyDarkTitleBar(window_, IsDarkModeEnabled());
+            // kDefaultChromeWidth/Height above are logical (96 DPI) px,
+            // but CreateWindowExW's own width/height parameters are
+            // always raw physical pixels -- it has no way to know which
+            // monitor (and therefore DPI) the window will actually land
+            // on ahead of time, so it can't scale them itself. Rescale
+            // now that GetDpiForWindow can report the real answer for
+            // this now-real window -- confirmed real, human-reported: a
+            // group created directly on a 200% monitor (no monitor
+            // crossing to trigger WM_DPICHANGED's own equivalent fix)
+            // kept the un-scaled physical size, making the whole window
+            // effectively half its intended logical size on screen --
+            // and this title bar band, correctly DPI-scaled on its own,
+            // looked wildly oversized relative to that shrunken window.
+            // SWP_FRAMECHANGED additionally forces Windows to re-run
+            // WM_NCCALCSIZE and actually repaint the non-client/client
+            // boundary right now, rather than leaving whatever it
+            // composited during CreateWindowExW's own internal (pre-
+            // WM_NCCALCSIZE-override) sizing pass on screen -- confirmed
+            // real, human-reported: without this, the reclaimed former-
+            // caption strip showed stale white until the window was
+            // moved (which triggers its own frame recalculation as a
+            // side effect) or something else forced a repaint.
+            const UINT dpi = GetDpiForWindow(window_);
+            const int width = Scale(kDefaultChromeWidth, dpi);
+            const int height = Scale(kDefaultChromeHeight, dpi);
+            SetWindowPos(window_, nullptr, 0, 0, width, height,
+                         SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
     if (window_ == nullptr) {

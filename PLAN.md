@@ -49,6 +49,10 @@ current todo list.
 - Groups: configurable "New Group" hotkey (works around hotkey
   conflicts on this machine).
 - Groups: tab-hover thumbnail preview of a member window.
+- Groups: replaced the native OS title bar with a self-painted one
+  (shrink-the-caption technique, keeps DWM shadow/rounded corners/Snap)
+  with working minimize/maximize/restore/close buttons; verified live at
+  2x DPI.
 
 ## Left to do
 
@@ -58,8 +62,10 @@ current todo list.
 - Groups: test and fix multi-monitor / mixed-DPI support (never tried on
   real hardware).
 - Groups: clamp tile auto-grow-to-fit to monitor bounds.
-- Groups: build the custom title bar with alignment/mode/manage-windows
-  controls (riskiest planned piece, not started).
+- Groups: add mode-toggle and manage-windows buttons to the new title
+  bar (reusing the existing callbacks behind the hidden right-click menu
+  today) — alignment button deferred until tab/tile orientation-aware
+  layout lands.
 - Groups: make tab placement and tile-grid growth direction
   orientation-aware.
 - Groups: add a third layout mode between Tab and full Tile — a single

@@ -233,6 +233,11 @@ private:
     // content-area fill behind the members. No-op if `index` is out of
     // range for the current boundary list.
     void InvalidateSplitterBand(bool column, size_t index);
+    // Repaints just the title bar band (not the tab strip below it, and
+    // not the content area) -- for a hover-highlight change on one of
+    // the three caption buttons, same narrow-invalidate reasoning as
+    // InvalidateTabStrip.
+    void InvalidateTitleBar();
 
     // Total space reserved above the member content: the custom title
     // bar band (see TitleBarHeight) always, plus -- Tab mode only -- the
@@ -251,6 +256,19 @@ private:
     // in both Tab and Tile mode.
     int TitleBarHeight(UINT dpi) const;
 
+    // Draws the icon, title text, and minimize/maximize-restore/close
+    // button glyphs into the title bar band -- called from PaintTabStrip
+    // (same memDC, same double-buffered BitBlt) so the whole client area
+    // still repaints as one atomic frame.
+    void PaintTitleBar(HDC hdc, const RECT& clientRect) const;
+    // The three button rects (client coordinates), right-aligned within
+    // the title bar band -- one shared source of truth for painting,
+    // WM_NCHITTEST, and hover tracking, in that native left-to-right
+    // order (minimize, maximize, close) matching Windows' own caption.
+    RECT MinimizeButtonRect(const RECT& clientRect, UINT dpi) const;
+    RECT MaximizeButtonRect(const RECT& clientRect, UINT dpi) const;
+    RECT CloseButtonRect(const RECT& clientRect, UINT dpi) const;
+
     HINSTANCE instance_;
     HWND window_ = nullptr;
     std::vector<std::wstring> memberTitles_;
@@ -267,6 +285,26 @@ private:
     std::function<void(std::optional<size_t>, const RECT&)> onTabHovered_;
     std::optional<size_t> hoveredTabIndex_;
     bool trackingMouseLeave_ = false;
+
+    // Which title-bar button (HTMINBUTTON/HTMAXBUTTON/HTCLOSE) the mouse
+    // is currently over, if any -- nullopt otherwise. Drives only the
+    // hover highlight PaintTitleBar draws; the actual minimize/maximize/
+    // close action is handled explicitly in WM_NCLBUTTONDOWN, keyed off
+    // the same codes -- confirmed live (message-level logging) that
+    // DefWindowProcW's own default handling neither performs these
+    // automatically nor even delivers a WM_NCLBUTTONUP back to this
+    // window's own WndProc for these specific hit-test codes, once the
+    // real caption has been shrunk to a thin border the way this class
+    // does -- its own internal button-tracking loop appears to consume
+    // the eventual release. Handling on *down* is what actually works,
+    // even though committing on the native caption's own *up* would
+    // normally be the more correct-feeling choice.
+    std::optional<UINT> hoveredTitleBarButton_;
+    // Separate from trackingMouseLeave_ (client-area tab hover) --
+    // TME_NONCLIENT is its own TrackMouseEvent registration, needed to
+    // reliably get WM_NCMOUSELEAVE once the cursor leaves a title-bar
+    // button, the non-client counterpart of the same pattern.
+    bool trackingNcMouseLeave_ = false;
 
     // Tile mode splitters -- content-rect-relative pixel positions, set
     // by SetTileSplitters after every reflow.
