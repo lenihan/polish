@@ -139,13 +139,14 @@ public:
     void SetOnTabReordered(std::function<void(size_t, size_t)> callback) { onTabReordered_ = std::move(callback); }
 
     // Called when "Switch to Tab"/"Switch to Tile" is chosen from the
-    // right-click context menu. The owner decides the actual new mode
-    // (GroupState::Mode() is the source of truth) and calls SetMode
-    // back.
+    // right-click context menu, or the title bar's mode-toggle button is
+    // clicked -- same request either way. The owner decides the actual
+    // new mode (GroupState::Mode() is the source of truth) and calls
+    // SetMode back.
     void SetOnModeToggleRequested(std::function<void()> callback) { onModeToggleRequested_ = std::move(callback); }
 
     // Called when "Edit windows..." is chosen from the right-click
-    // context menu.
+    // context menu, or the title bar's manage-windows button is clicked.
     void SetOnEditWindowsRequested(std::function<void()> callback) {
         onEditWindowsRequested_ = std::move(callback);
     }
@@ -269,6 +270,19 @@ private:
     RECT MaximizeButtonRect(const RECT& clientRect, UINT dpi) const;
     RECT CloseButtonRect(const RECT& clientRect, UINT dpi) const;
 
+    // Two more buttons immediately left of the caption buttons -- mode
+    // toggle and manage-windows, the same two actions the right-click
+    // context menu already offers (see ShowContextMenu), now with a
+    // visible trigger instead of only a hidden menu. Unlike the caption
+    // buttons above, these are ordinary *client*-area buttons (plain
+    // WM_LBUTTONDOWN, not a WM_NCHITTEST code) -- there's no OS-
+    // recognized hit-test value for "app-defined title bar button", so
+    // WM_NCHITTEST instead reports plain HTCLIENT for these two rects
+    // (see its own switch) rather than HTCAPTION, letting normal client
+    // mouse messages reach them.
+    RECT ModeToggleButtonRect(const RECT& clientRect, UINT dpi) const;
+    RECT ManageWindowsButtonRect(const RECT& clientRect, UINT dpi) const;
+
     HINSTANCE instance_;
     HWND window_ = nullptr;
     std::vector<std::wstring> memberTitles_;
@@ -305,6 +319,19 @@ private:
     // reliably get WM_NCMOUSELEAVE once the cursor leaves a title-bar
     // button, the non-client counterpart of the same pattern.
     bool trackingNcMouseLeave_ = false;
+
+    // Which of the two *client*-area title-bar buttons (mode toggle,
+    // manage windows) the mouse is over, if any -- the client-area
+    // counterpart of hoveredTitleBarButton_ above, tracked via ordinary
+    // WM_MOUSEMOVE/WM_MOUSELEAVE (trackingMouseLeave_, already armed for
+    // tab hover) rather than the NC variants, since these aren't a
+    // WM_NCHITTEST code. Drives only the hover highlight; both buttons
+    // fire their callback directly on WM_LBUTTONDOWN (see there) with no
+    // separate pressed-state tracking, matching the caption buttons'
+    // own commit-on-down choice, and simpler than tabs' drag/capture
+    // handling for something that's just a one-shot command.
+    enum class TitleBarActionButton { ModeToggle, ManageWindows };
+    std::optional<TitleBarActionButton> hoveredActionButton_;
 
     // Tile mode splitters -- content-rect-relative pixel positions, set
     // by SetTileSplitters after every reflow.

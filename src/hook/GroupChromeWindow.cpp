@@ -295,6 +295,19 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                 if (PtInRect(&r, clientPt)) {
                     return HTMINBUTTON;
                 }
+                // The mode-toggle/manage-windows buttons are plain
+                // client-area buttons (see their own rect comment in the
+                // header) -- HTCLIENT here, not HTCAPTION, is what lets
+                // WM_LBUTTONDOWN actually reach WM_LBUTTONDOWN's handler
+                // below instead of starting a window drag.
+                r = ManageWindowsButtonRect(clientRect, dpi);
+                if (PtInRect(&r, clientPt)) {
+                    return HTCLIENT;
+                }
+                r = ModeToggleButtonRect(clientRect, dpi);
+                if (PtInRect(&r, clientPt)) {
+                    return HTCLIENT;
+                }
                 // The rest of the band is draggable/double-click-to-
                 // maximize, same as the native caption it replaces --
                 // returning HTCAPTION here is what makes DefWindowProcW's
@@ -441,6 +454,31 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
 
         case WM_LBUTTONDOWN: {
             const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            {
+                // Mode-toggle/manage-windows: checked before the Tile-
+                // mode splitter and Tab-mode tab hit-tests below, since
+                // the title bar band (and these two buttons within it)
+                // exists in both modes. Fires directly on down, same as
+                // the caption buttons -- no capture/drag handling needed
+                // for a one-shot command button.
+                RECT clientRect;
+                GetClientRect(hwnd, &clientRect);
+                const UINT dpi = GetDpiForWindow(hwnd);
+                RECT r = ManageWindowsButtonRect(clientRect, dpi);
+                if (PtInRect(&r, pt)) {
+                    if (onEditWindowsRequested_) {
+                        onEditWindowsRequested_();
+                    }
+                    return 0;
+                }
+                r = ModeToggleButtonRect(clientRect, dpi);
+                if (PtInRect(&r, pt)) {
+                    if (onModeToggleRequested_) {
+                        onModeToggleRequested_();
+                    }
+                    return 0;
+                }
+            }
             if (mode_ == GroupMode::Tile) {
                 if (const auto hit = HitTestSplitter(pt)) {
                     draggingSplitter_ = *hit;
@@ -471,6 +509,37 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             if (draggingSplitter_.has_value()) {
                 DragSplitter(pt);
                 return 0;
+            }
+            {
+                // Mode-toggle/manage-windows hover -- checked in both
+                // modes (the title bar band always exists), independent
+                // of the mode-specific hover tracking below.
+                RECT clientRect;
+                GetClientRect(hwnd, &clientRect);
+                const UINT dpi = GetDpiForWindow(hwnd);
+                std::optional<TitleBarActionButton> newActionHover;
+                RECT r = ManageWindowsButtonRect(clientRect, dpi);
+                if (PtInRect(&r, pt)) {
+                    newActionHover = TitleBarActionButton::ManageWindows;
+                } else {
+                    r = ModeToggleButtonRect(clientRect, dpi);
+                    if (PtInRect(&r, pt)) {
+                        newActionHover = TitleBarActionButton::ModeToggle;
+                    }
+                }
+                if (!trackingMouseLeave_) {
+                    TRACKMOUSEEVENT tme{};
+                    tme.cbSize = sizeof(tme);
+                    tme.dwFlags = TME_LEAVE;
+                    tme.hwndTrack = hwnd;
+                    if (TrackMouseEvent(&tme)) {
+                        trackingMouseLeave_ = true;
+                    }
+                }
+                if (newActionHover != hoveredActionButton_) {
+                    hoveredActionButton_ = newActionHover;
+                    InvalidateTitleBar();
+                }
             }
             if (mode_ == GroupMode::Tile) {
                 // Splitter hover highlight -- Tile mode has no tabs, so
@@ -579,6 +648,10 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             if (hoveredSplitter_.has_value()) {
                 InvalidateSplitterBand(hoveredSplitter_->first, hoveredSplitter_->second);
                 hoveredSplitter_.reset();
+            }
+            if (hoveredActionButton_.has_value()) {
+                hoveredActionButton_.reset();
+                InvalidateTitleBar();
             }
             return 0;
 
@@ -996,6 +1069,18 @@ RECT GroupChromeWindow::MinimizeButtonRect(const RECT& clientRect, UINT dpi) con
     return RECT{maximize.left - w, maximize.top, maximize.left, maximize.bottom};
 }
 
+RECT GroupChromeWindow::ManageWindowsButtonRect(const RECT& clientRect, UINT dpi) const {
+    const RECT minimize = MinimizeButtonRect(clientRect, dpi);
+    const int w = Scale(kTitleBarButtonWidth, dpi);
+    return RECT{minimize.left - w, minimize.top, minimize.left, minimize.bottom};
+}
+
+RECT GroupChromeWindow::ModeToggleButtonRect(const RECT& clientRect, UINT dpi) const {
+    const RECT manageWindows = ManageWindowsButtonRect(clientRect, dpi);
+    const int w = Scale(kTitleBarButtonWidth, dpi);
+    return RECT{manageWindows.left - w, manageWindows.top, manageWindows.left, manageWindows.bottom};
+}
+
 void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
     const bool dark = IsDarkModeEnabled();
     const UINT dpi = GetDpiForWindow(window_);
@@ -1036,7 +1121,8 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
     SetTextColor(hdc, dark ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x1A, 0x1A, 0x1A));
 
     const int textLeft = (icon != nullptr) ? iconLeft + iconSize + Scale(kTitleBarIconTextGap, dpi) : iconLeft;
-    RECT textRect{textLeft, clientRect.top, MinimizeButtonRect(clientRect, dpi).left, clientRect.top + titleBarHeight};
+    RECT textRect{textLeft, clientRect.top, ModeToggleButtonRect(clientRect, dpi).left,
+                  clientRect.top + titleBarHeight};
     DrawTextW(hdc, title, -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     SelectObject(hdc, oldFont);
     DeleteObject(captionFont);
@@ -1116,6 +1202,78 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
     const RECT closeGlyph = glyphRect(closeRect);
     drawLine(closeGlyph.left, closeGlyph.top, closeGlyph.right, closeGlyph.bottom);
     drawLine(closeGlyph.right, closeGlyph.top, closeGlyph.left, closeGlyph.bottom);
+
+    // Mode-toggle and manage-windows: two more buttons, same rect/hover/
+    // glyph machinery as the three above, but plain client-area buttons
+    // (see their rect comments) with an ordinary hover fill -- no
+    // close-red special case, so a fresh plain-glyphColor pen rather
+    // than reusing glyphPen (which may currently be the close button's
+    // hover-white).
+    HPEN actionGlyphPen = CreatePen(PS_SOLID, 1, glyphColor);
+    SelectObject(hdc, actionGlyphPen);
+
+    const RECT manageWindowsRect = ManageWindowsButtonRect(clientRect, dpi);
+    const bool manageWindowsHovered = hoveredActionButton_ == TitleBarActionButton::ManageWindows;
+    if (manageWindowsHovered) {
+        HBRUSH brush = CreateSolidBrush(hoverFill);
+        FillRect(hdc, &manageWindowsRect, brush);
+        DeleteObject(brush);
+    }
+    // "Manage windows" glyph: three horizontal lines -- the same list-
+    // icon convention as a hamburger menu, reading as "this group's
+    // window list" without inventing new iconography beyond this file's
+    // existing line/rectangle vocabulary.
+    const RECT manageWindowsGlyph = glyphRect(manageWindowsRect);
+    const int manageWindowsStep = (manageWindowsGlyph.bottom - manageWindowsGlyph.top) / 2;
+    for (int i = 0; i <= 2; ++i) {
+        const int y = manageWindowsGlyph.top + i * manageWindowsStep;
+        drawLine(manageWindowsGlyph.left, y, manageWindowsGlyph.right, y);
+    }
+
+    const RECT modeToggleRect = ModeToggleButtonRect(clientRect, dpi);
+    const bool modeToggleHovered = hoveredActionButton_ == TitleBarActionButton::ModeToggle;
+    if (modeToggleHovered) {
+        HBRUSH brush = CreateSolidBrush(hoverFill);
+        FillRect(hdc, &modeToggleRect, brush);
+        DeleteObject(brush);
+    }
+    const RECT modeToggleGlyph = glyphRect(modeToggleRect);
+    if (mode_ == GroupMode::Tile) {
+        // Tile-mode glyph: a 2x2 grid of small squares -- depicts the
+        // *current* layout, the same convention a view-mode toggle
+        // button normally uses (e.g. Explorer's list/grid switcher),
+        // rather than the mode a click would switch to.
+        const int cellW = (modeToggleGlyph.right - modeToggleGlyph.left - 2) / 2;
+        const int cellH = (modeToggleGlyph.bottom - modeToggleGlyph.top - 2) / 2;
+        for (int row = 0; row < 2; ++row) {
+            for (int col = 0; col < 2; ++col) {
+                const int left = modeToggleGlyph.left + col * (cellW + 2);
+                const int top = modeToggleGlyph.top + row * (cellH + 2);
+                Rectangle(hdc, left, top, left + cellW, top + cellH);
+            }
+        }
+    } else {
+        // Tab-mode glyph: a small tab notch overlapping the top-left of
+        // a page outline -- same overlapping-rectangle occlusion
+        // technique as the restore glyph above (fill the front shape
+        // with the background color before outlining it), so the notch
+        // reads as sitting in front of the page instead of just two
+        // crossing outlines.
+        const int notchWidth = (modeToggleGlyph.right - modeToggleGlyph.left) * 2 / 3;
+        const int notchHeight = (modeToggleGlyph.bottom - modeToggleGlyph.top) / 3;
+        Rectangle(hdc, modeToggleGlyph.left, modeToggleGlyph.top + notchHeight, modeToggleGlyph.right,
+                  modeToggleGlyph.bottom);
+        HBRUSH occludeBrush =
+            CreateSolidBrush(modeToggleHovered ? hoverFill : (dark ? RGB(0x20, 0x20, 0x20) : RGB(0xFF, 0xFF, 0xFF)));
+        SelectObject(hdc, occludeBrush);
+        Rectangle(hdc, modeToggleGlyph.left, modeToggleGlyph.top, modeToggleGlyph.left + notchWidth,
+                  modeToggleGlyph.top + notchHeight + 1);
+        SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        DeleteObject(occludeBrush);
+    }
+
+    SelectObject(hdc, glyphPen);
+    DeleteObject(actionGlyphPen);
 
     SelectObject(hdc, oldBrush);
     SelectObject(hdc, oldPen);

@@ -53,6 +53,13 @@ current todo list.
   (shrink-the-caption technique, keeps DWM shadow/rounded corners/Snap)
   with working minimize/maximize/restore/close buttons; verified live at
   2x DPI.
+- Groups: mode-toggle and manage-windows buttons in the title bar
+  (reusing the existing callbacks behind the right-click menu, which
+  stays as a redundant path) — client-area buttons, not caption ones,
+  with their own glyphs (grid/tab icon, list icon) and hover highlight;
+  verified live that both fire correctly and never start a window drag.
+  Alignment button still deferred until tab/tile orientation-aware
+  layout lands.
 
 ## Left to do
 
@@ -62,10 +69,6 @@ current todo list.
 - Groups: test and fix multi-monitor / mixed-DPI support (never tried on
   real hardware).
 - Groups: clamp tile auto-grow-to-fit to monitor bounds.
-- Groups: add mode-toggle and manage-windows buttons to the new title
-  bar (reusing the existing callbacks behind the hidden right-click menu
-  today) — alignment button deferred until tab/tile orientation-aware
-  layout lands.
 - Groups: make tab placement and tile-grid growth direction
   orientation-aware.
 - Groups: add a third layout mode between Tab and full Tile — a single
