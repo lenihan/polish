@@ -78,11 +78,18 @@ current todo list.
 - Groups: add a per-process exclusion list.
 - Add a "Restart as Administrator" tray item so elevated windows become
   manageable.
+- Taskbar: clicking a taskbar app icon should cycle through that app's
+  windows in MRU order (native Windows does this by Z-order, not MRU) —
+  same MRU-ordering idea as the Alt+backtick item above.
+- Taskbar: hovering a taskbar app icon should show its windows with
+  thumbnails for active ones and plain text for minimized ones.
+- Taskbar: that hover preview should let you minimize/maximize/restore/
+  close each window directly, without switching to it first.
 - Add theme-aware window shadows: white/light shadows in dark mode, dark
   shadows in light mode, so windows stand out against the background.
 - Do a full `docs/LIMITATIONS.md` pass and manual test matrix.
 - Backlog, not yet scoped: clipboard copy flash, paste history popup,
   Quick Access rename without renaming the file, radial start menu,
-  taskbar icon click-to-cycle, reorder windows within a taskbar group,
-  consider a WinUI3 rewrite, improve virtual desktops (persist layout,
-  pin an app to all desktops, show current desktop indicator).
+  reorder windows within a taskbar group, consider a WinUI3 rewrite,
+  improve virtual desktops (persist layout, pin an app to all desktops,
+  show current desktop indicator).
