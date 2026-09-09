@@ -1392,6 +1392,10 @@ void GroupChromeWindow::UpdateTooltip() {
         SendMessageW(tooltipWindow_, TTM_TRACKACTIVATE, FALSE, reinterpret_cast<LPARAM>(&ti));
         return;
     }
+    // Applied fresh on every show, not just once at creation, so a
+    // theme change without restarting Polish still takes effect (same
+    // reasoning as ApplyDarkModeToMenu's own comment).
+    ApplyDarkModeToTooltip(tooltipWindow_);
     ti.lpszText = const_cast<LPWSTR>(text.c_str());
     SendMessageW(tooltipWindow_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
     POINT cursor{};

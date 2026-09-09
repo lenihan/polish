@@ -25,6 +25,17 @@ void ApplyDarkTitleBar(HWND hwnd, bool dark);
 // on the next menu shown.
 void ApplyDarkModeToMenu(HWND ownerWindow);
 
+// Same idea as ApplyDarkModeToMenu, but for a tooltip common control
+// (TOOLTIPS_CLASSW) -- comctl32's tooltip understands the same
+// "DarkMode_Explorer" pseudo-theme directly (its background/text/border
+// all follow from the theme class switch, no separate
+// TTM_SETTIPBKCOLOR/TTM_SETTIPTEXTCOLOR needed -- those two are the
+// *old*, pre-visual-styles way of coloring a tooltip and are actually
+// ignored once a theme is applied). Call this fresh every time before
+// showing the tooltip, not just once at creation, same reasoning as
+// ApplyDarkModeToMenu's own comment about live theme changes.
+void ApplyDarkModeToTooltip(HWND tooltipWindow);
+
 // The user's chosen Windows accent color (Settings > Personalization >
 // Colors), for highlighting something as interactive/draggable the
 // same way the OS itself would. Reads

@@ -21,6 +21,31 @@ using FlushMenuThemesFn = void(WINAPI*)();
 
 enum PreferredAppMode { Default, AllowDark, ForceDark, ForceLight, Max };
 
+// Shared by ApplyDarkModeToMenu and ApplyDarkModeToTooltip -- both need
+// this process opted into *tracking* the live system dark/light setting
+// (AllowDark, not ForceDark) before SetWindowTheme's "DarkMode_Explorer"
+// pseudo-theme has any effect, and both need FlushMenuThemes so a
+// mid-session theme change is picked up rather than whatever was cached
+// from the last time a themed control was shown.
+void EnsureDarkModeAllowed() {
+    static HMODULE uxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (uxtheme == nullptr) {
+        return;
+    }
+    static bool appModeSet = false;
+    if (!appModeSet) {
+        if (auto* setPreferredAppMode =
+                reinterpret_cast<SetPreferredAppModeFn>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(135)))) {
+            setPreferredAppMode(AllowDark);
+        }
+        appModeSet = true;
+    }
+    if (auto* flushMenuThemes =
+            reinterpret_cast<FlushMenuThemesFn>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(136)))) {
+        flushMenuThemes();
+    }
+}
+
 }  // namespace
 
 bool IsDarkModeEnabled() {
@@ -46,26 +71,13 @@ void ApplyDarkTitleBar(HWND hwnd, bool dark) {
 }
 
 void ApplyDarkModeToMenu(HWND ownerWindow) {
-    static HMODULE uxtheme = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    if (uxtheme == nullptr) {
-        return;
-    }
-    // AllowDark (not ForceDark) once, ever -- opts this process into
-    // *tracking* the live system setting for native menus, rather than
-    // always being dark regardless of it.
-    static bool appModeSet = false;
-    if (!appModeSet) {
-        if (auto* setPreferredAppMode =
-                reinterpret_cast<SetPreferredAppModeFn>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(135)))) {
-            setPreferredAppMode(AllowDark);
-        }
-        appModeSet = true;
-    }
-    if (auto* flushMenuThemes =
-            reinterpret_cast<FlushMenuThemesFn>(GetProcAddress(uxtheme, MAKEINTRESOURCEA(136)))) {
-        flushMenuThemes();
-    }
+    EnsureDarkModeAllowed();
     SetWindowTheme(ownerWindow, IsDarkModeEnabled() ? L"DarkMode_Explorer" : nullptr, nullptr);
+}
+
+void ApplyDarkModeToTooltip(HWND tooltipWindow) {
+    EnsureDarkModeAllowed();
+    SetWindowTheme(tooltipWindow, IsDarkModeEnabled() ? L"DarkMode_Explorer" : nullptr, nullptr);
 }
 
 COLORREF GetAccentColor() {
