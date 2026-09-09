@@ -1,5 +1,6 @@
 #include "hook/GroupChromeWindow.h"
 
+#include <commctrl.h>
 #include <dwmapi.h>
 #include <windowsx.h>
 
@@ -99,6 +100,11 @@ constexpr int kTitleBarRestoreGlyphOffset = 2;
 // the close button is the one caption button whose hover color doesn't
 // follow the theme).
 constexpr COLORREF kTitleBarCloseHoverColor = RGB(0xE8, 0x11, 0x23);
+// Vertical inset (top and bottom) of the thin separator line drawn
+// between the mode-toggle/manage-windows buttons and the min/max/close
+// caption buttons -- shorter than the full band height, the same
+// "doesn't touch the edges" convention as most apps' toolbar separators.
+constexpr int kTitleBarSeparatorInset = 8;  // logical px
 
 // Local to this window's own context menu -- TrackPopupMenu's returned
 // command isn't routed through WM_COMMAND, so these don't need to be
@@ -145,6 +151,19 @@ void DrawConcaveFillet(HDC hdc, int cornerX, int cornerY, int radius, COLORREF i
 }  // namespace
 
 GroupChromeWindow::GroupChromeWindow(HINSTANCE instance) : instance_(instance) {
+    static bool commonControlsInitialized = false;
+    if (!commonControlsInitialized) {
+        // ICC_TAB_CLASSES, not the more obviously-named ICC_*TOOLTIP*
+        // flag -- comctl32 groups the tooltip common control in with tab
+        // controls historically; this is the documented way to make
+        // TOOLTIPS_CLASSW available (see UpdateTooltip/Show).
+        INITCOMMONCONTROLSEX icc{};
+        icc.dwSize = sizeof(icc);
+        icc.dwICC = ICC_TAB_CLASSES;
+        InitCommonControlsEx(&icc);
+        commonControlsInitialized = true;
+    }
+
     static bool classRegistered = false;
     if (!classRegistered) {
         WNDCLASSEXW windowClass{};
@@ -337,6 +356,7 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             if (newHover != hoveredTitleBarButton_) {
                 hoveredTitleBarButton_ = newHover;
                 InvalidateTitleBar();
+                UpdateTooltip();
             }
             return DefWindowProcW(hwnd, message, wParam, lParam);
         }
@@ -346,6 +366,7 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             if (hoveredTitleBarButton_.has_value()) {
                 hoveredTitleBarButton_.reset();
                 InvalidateTitleBar();
+                UpdateTooltip();
             }
             return DefWindowProcW(hwnd, message, wParam, lParam);
 
@@ -372,9 +393,21 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             switch (wParam) {
                 case HTMINBUTTON:
                     ShowWindow(hwnd, SW_MINIMIZE);
+                    // The window (and its title bar) is about to be
+                    // hidden -- explicitly drop the hover state too, not
+                    // just repaint, so the tracked tooltip doesn't keep
+                    // floating over the desktop where the button used
+                    // to be.
+                    hoveredTitleBarButton_.reset();
+                    UpdateTooltip();
                     return 0;
                 case HTMAXBUTTON:
                     ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+                    // Same button, but its meaning just flipped
+                    // (Maximize <-> Restore) -- refresh the tooltip text
+                    // immediately rather than waiting for the cursor to
+                    // leave and re-enter the button.
+                    UpdateTooltip();
                     return 0;
                 case HTCLOSE:
                     // Same graceful-close path a real caption's close
@@ -469,6 +502,13 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                     if (onEditWindowsRequested_) {
                         onEditWindowsRequested_();
                     }
+                    // The picker dialog just took activation -- drop the
+                    // hover/tooltip explicitly rather than leaving it
+                    // floating over this now-inactive window until the
+                    // cursor happens to move.
+                    hoveredActionButton_.reset();
+                    InvalidateTitleBar();
+                    UpdateTooltip();
                     return 0;
                 }
                 r = ModeToggleButtonRect(clientRect, dpi);
@@ -476,6 +516,11 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                     if (onModeToggleRequested_) {
                         onModeToggleRequested_();
                     }
+                    // onModeToggleRequested_ calls SetMode back
+                    // synchronously, so mode_ (and therefore the
+                    // tooltip's Switch-to-Tile/Switch-to-Tab text) is
+                    // already up to date here.
+                    UpdateTooltip();
                     return 0;
                 }
             }
@@ -539,6 +584,7 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                 if (newActionHover != hoveredActionButton_) {
                     hoveredActionButton_ = newActionHover;
                     InvalidateTitleBar();
+                    UpdateTooltip();
                 }
             }
             if (mode_ == GroupMode::Tile) {
@@ -652,6 +698,7 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             if (hoveredActionButton_.has_value()) {
                 hoveredActionButton_.reset();
                 InvalidateTitleBar();
+                UpdateTooltip();
             }
             return 0;
 
@@ -1072,7 +1119,12 @@ RECT GroupChromeWindow::MinimizeButtonRect(const RECT& clientRect, UINT dpi) con
 RECT GroupChromeWindow::ManageWindowsButtonRect(const RECT& clientRect, UINT dpi) const {
     const RECT minimize = MinimizeButtonRect(clientRect, dpi);
     const int w = Scale(kTitleBarButtonWidth, dpi);
-    return RECT{minimize.left - w, minimize.top, minimize.left, minimize.bottom};
+    // A full button-width gap (not just the separator line drawn inside
+    // it -- see PaintTitleBar) between this button and the caption
+    // buttons, so the two clusters read as obviously separate groups
+    // rather than five buttons in a row.
+    const int gap = Scale(kTitleBarButtonWidth, dpi);
+    return RECT{minimize.left - gap - w, minimize.top, minimize.left - gap, minimize.bottom};
 }
 
 RECT GroupChromeWindow::ModeToggleButtonRect(const RECT& clientRect, UINT dpi) const {
@@ -1203,6 +1255,25 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
     drawLine(closeGlyph.left, closeGlyph.top, closeGlyph.right, closeGlyph.bottom);
     drawLine(closeGlyph.right, closeGlyph.top, closeGlyph.left, closeGlyph.bottom);
 
+    // A thin separator centered in the full button-width gap between the
+    // mode-toggle/manage-windows buttons and the min/max/close caption
+    // buttons (see ManageWindowsButtonRect's own comment on that gap),
+    // so the two are visibly distinct groups rather than reading as five
+    // undifferentiated buttons in a row. PS_SOLID width 1 is a cosmetic
+    // pen (always exactly 1 physical device pixel regardless of DPI),
+    // the same hairline convention the active tab's own border pen uses.
+    {
+        const int separatorInset = Scale(kTitleBarSeparatorInset, dpi);
+        const int separatorX = (ManageWindowsButtonRect(clientRect, dpi).right + minimizeRect.left) / 2;
+        const COLORREF separatorColor = dark ? RGB(0x45, 0x45, 0x45) : RGB(0xD5, 0xD5, 0xD5);
+        HPEN separatorPen = CreatePen(PS_SOLID, 1, separatorColor);
+        SelectObject(hdc, separatorPen);
+        drawLine(separatorX, clientRect.top + separatorInset, separatorX,
+                 clientRect.top + titleBarHeight - separatorInset);
+        SelectObject(hdc, glyphPen);  // deselect separatorPen before deleting it
+        DeleteObject(separatorPen);
+    }
+
     // Mode-toggle and manage-windows: two more buttons, same rect/hover/
     // glyph machinery as the three above, but plain client-area buttons
     // (see their rect comments) with an ordinary hover fill -- no
@@ -1224,9 +1295,16 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
     // window list" without inventing new iconography beyond this file's
     // existing line/rectangle vocabulary.
     const RECT manageWindowsGlyph = glyphRect(manageWindowsRect);
-    const int manageWindowsStep = (manageWindowsGlyph.bottom - manageWindowsGlyph.top) / 2;
+    // Tighter vertical spacing than the full glyph box -- confirmed,
+    // human-reported, that stretching the three lines across the whole
+    // glyph height read as "too vertical" for a hamburger icon; this
+    // matches a more typical hamburger's tighter, more compact spacing.
+    const int hamburgerHeight = (manageWindowsGlyph.bottom - manageWindowsGlyph.top) * 3 / 5;
+    const int hamburgerTop =
+        manageWindowsGlyph.top + (manageWindowsGlyph.bottom - manageWindowsGlyph.top - hamburgerHeight) / 2;
+    const int manageWindowsStep = hamburgerHeight / 2;
     for (int i = 0; i <= 2; ++i) {
-        const int y = manageWindowsGlyph.top + i * manageWindowsStep;
+        const int y = hamburgerTop + i * manageWindowsStep;
         drawLine(manageWindowsGlyph.left, y, manageWindowsGlyph.right, y);
     }
 
@@ -1278,6 +1356,51 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
     SelectObject(hdc, oldBrush);
     SelectObject(hdc, oldPen);
     DeleteObject(glyphPen);
+}
+
+void GroupChromeWindow::UpdateTooltip() {
+    if (tooltipWindow_ == nullptr) {
+        return;
+    }
+    std::wstring text;
+    if (hoveredTitleBarButton_.has_value()) {
+        switch (*hoveredTitleBarButton_) {
+            case HTMINBUTTON:
+                text = L"Minimize";
+                break;
+            case HTMAXBUTTON:
+                text = IsZoomed(window_) ? L"Restore" : L"Maximize";
+                break;
+            case HTCLOSE:
+                text = L"Close";
+                break;
+            default:
+                break;
+        }
+    } else if (hoveredActionButton_.has_value()) {
+        text = *hoveredActionButton_ == TitleBarActionButton::ModeToggle
+                   ? (mode_ == GroupMode::Tab ? L"Switch to Tile" : L"Switch to Tab")
+                   : L"Edit Group Windows...";
+    }
+
+    TOOLINFOW ti{};
+    ti.cbSize = sizeof(ti);
+    ti.hwnd = window_;
+    ti.uId = 1;
+
+    if (text.empty()) {
+        SendMessageW(tooltipWindow_, TTM_TRACKACTIVATE, FALSE, reinterpret_cast<LPARAM>(&ti));
+        return;
+    }
+    ti.lpszText = const_cast<LPWSTR>(text.c_str());
+    SendMessageW(tooltipWindow_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    // A few px below-right of the cursor, not directly under it -- the
+    // usual tooltip placement, so it doesn't sit on top of (and get
+    // dismissed by) the very cursor that's hovering the button.
+    SendMessageW(tooltipWindow_, TTM_TRACKPOSITION, 0, MAKELPARAM(cursor.x + 12, cursor.y + 20));
+    SendMessageW(tooltipWindow_, TTM_TRACKACTIVATE, TRUE, reinterpret_cast<LPARAM>(&ti));
 }
 
 RECT GroupChromeWindow::ContentRectInScreenCoords() const {
@@ -1610,6 +1733,28 @@ void GroupChromeWindow::Show(const std::vector<std::wstring>& memberTitles, Grou
             const int height = Scale(kDefaultChromeHeight, dpi);
             SetWindowPos(window_, nullptr, 0, 0, width, height,
                          SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+
+            // One manually-tracked tool covering all five title-bar
+            // buttons -- text and position are set fresh in
+            // UpdateTooltip on every hover change, so a single tool
+            // works instead of one per button. TTF_TRACK put it under
+            // this code's own control (TTM_TRACKACTIVATE/
+            // TTM_TRACKPOSITION) rather than the tooltip's own automatic
+            // mouse-relay tracking, which only understands ordinary
+            // client-area mouse messages, not the caption buttons'
+            // WM_NCMOUSEMOVE.
+            tooltipWindow_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                              WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT,
+                                              CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance_, nullptr);
+            if (tooltipWindow_ != nullptr) {
+                TOOLINFOW ti{};
+                ti.cbSize = sizeof(ti);
+                ti.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+                ti.hwnd = window_;
+                ti.uId = 1;
+                ti.lpszText = const_cast<LPWSTR>(L"");
+                SendMessageW(tooltipWindow_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+            }
         }
     }
     if (window_ == nullptr) {

@@ -283,8 +283,28 @@ private:
     RECT ModeToggleButtonRect(const RECT& clientRect, UINT dpi) const;
     RECT ManageWindowsButtonRect(const RECT& clientRect, UINT dpi) const;
 
+    // Shows/hides/repositions tooltipWindow_ for whichever title-bar
+    // button (caption or client-area) is currently hovered -- called
+    // from every place hoveredTitleBarButton_/hoveredActionButton_
+    // changes (WM_NCMOUSEMOVE/WM_NCMOUSELEAVE, the client-area hover
+    // block in WM_MOUSEMOVE, WM_MOUSELEAVE), plus right after a button's
+    // action fires so text that depends on the new state (Maximize vs
+    // Restore, Switch to Tile vs Switch to Tab) is correct immediately
+    // if the cursor is still sitting on the same button post-click.
+    void UpdateTooltip();
+
     HINSTANCE instance_;
     HWND window_ = nullptr;
+    // A manually-tracked (TTF_TRACK) tooltip, not the common controls'
+    // usual auto-relay-mouse-messages mode -- this window's own hover
+    // state already gets tracked for the hover-fill paint, so driving
+    // the tooltip from those same state changes (see UpdateTooltip) is
+    // simpler than trying to relay non-client mouse messages (the
+    // caption buttons') into the tooltip's own automatic tracking,
+    // which isn't designed for WM_NCMOUSEMOVE at all. Owned by window_
+    // (a WS_POPUP with window_ as its CreateWindowExW owner param), so
+    // it's destroyed automatically when window_ is.
+    HWND tooltipWindow_ = nullptr;
     std::vector<std::wstring> memberTitles_;
     std::vector<HICON> memberIcons_;  // borrowed handles, never destroyed here
     GroupMode mode_ = GroupMode::Tab;

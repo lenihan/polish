@@ -74,13 +74,17 @@ current todo list.
 - Groups: add a third layout mode between Tab and full Tile — a single
   row or single column of tiles (1×N) — name still undecided ("row/col"
   changes meaning depending on orientation, which doesn't sit right).
-- Groups: rename to "Polish Groups" and make it pinnable to the Start
+- Groups: rename too "Polish Groups" and make it pinnable to the Start
   menu.
 - Groups: support nested groups (a group containing other groups).
 - Groups: add Alt+backtick MRU switching scoped to one group's members.
 - Groups: add a per-process exclusion list.
 - Add a "Restart as Administrator" tray item so elevated windows become
   manageable.
+- Add an "easy move/resize" mode: while active, the whole window is a
+  move target (not just the title bar), and resizing snaps to screen/
+  other-window edges. Resizing area should be finger friendly. 
+  Slick ui that flips windows around with move/resize controls
 - Taskbar: clicking a taskbar app icon should cycle through that app's
   windows in MRU order (native Windows does this by Z-order, not MRU) —
   same MRU-ordering idea as the Alt+backtick item above.
@@ -90,9 +94,15 @@ current todo list.
   close each window directly, without switching to it first.
 - Add theme-aware window shadows: white/light shadows in dark mode, dark
   shadows in light mode, so windows stand out against the background.
+- Virtual desktops: remember which apps were on a desktop and offer to
+  reload them.
+- Virtual desktops: an app pinned to show on all desktops should keep
+  that setting (persist it, not just apply it once).
+- Virtual desktops: show an indicator of which desktop you're currently
+  on.
+- Virtual desktops: use visuals generally to make the whole concept
+  easier to understand (exact treatment still unscoped).
 - Do a full `docs/LIMITATIONS.md` pass and manual test matrix.
 - Backlog, not yet scoped: clipboard copy flash, paste history popup,
   Quick Access rename without renaming the file, radial start menu,
-  reorder windows within a taskbar group, consider a WinUI3 rewrite,
-  improve virtual desktops (persist layout, pin an app to all desktops,
-  show current desktop indicator).
+  reorder windows within a taskbar group, consider a WinUI3 rewrite.
