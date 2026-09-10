@@ -26,21 +26,42 @@ namespace polish {
 // hollow shape possible.)
 class AltTabHighlightBorder {
 public:
-    explicit AltTabHighlightBorder(HINSTANCE instance);
+    // `alwaysOnTop` (default true): the real Alt+Tab switcher overlay
+    // needs to stay above literally every other window for the life of
+    // the switcher session, matching Windows' own Alt+Tab -- this is
+    // what WS_EX_TOPMOST is for. Pass false for any other reuse of this
+    // class (e.g. a group's active-tile ring), where the highlight
+    // should behave like an ordinary window: covered by whatever the
+    // user brings to the front, not floating above unrelated apps
+    // forever. See ShowAroundTarget's `zOrderAnchor` for how a
+    // non-topmost instance stays visually attached to its owner instead.
+    explicit AltTabHighlightBorder(HINSTANCE instance, bool alwaysOnTop = true);
     ~AltTabHighlightBorder();
 
     AltTabHighlightBorder(const AltTabHighlightBorder&) = delete;
     AltTabHighlightBorder& operator=(const AltTabHighlightBorder&) = delete;
 
     // Positions the glow directly on target's current screen rect,
-    // renders it, and makes it visible.
-    void ShowAroundTarget(HWND target);
+    // renders it, and makes it visible. `owner`, when non-null, keeps
+    // the glow directly in front of that window in the Z order instead
+    // of in the topmost band -- only meaningful for an instance
+    // constructed with alwaysOnTop=false (ignored otherwise, since a
+    // topmost instance always belongs in the topmost band). Pass the
+    // window the glow is meant to sit on top of, not a raw
+    // SetWindowPos insertion point -- SetWindowPos's own
+    // hWndInsertAfter places a window *behind* the handle you give it,
+    // the opposite of "in front of", so this resolves the correct
+    // insertion point (whatever currently sits directly in front of
+    // `owner`) internally rather than exposing that inversion to
+    // callers.
+    void ShowAroundTarget(HWND target, HWND owner = nullptr);
 
     // Hides the glow.
     void Hide();
 
 private:
     HWND window_ = nullptr;
+    bool alwaysOnTop_ = true;
 };
 
 }  // namespace polish

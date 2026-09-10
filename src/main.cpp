@@ -741,7 +741,13 @@ void EnsureAltTabHighlightBorder() {
 
 void EnsureGroupActiveTileHighlight() {
     if (!g_groupActiveTileHighlight) {
-        g_groupActiveTileHighlight = std::make_unique<polish::AltTabHighlightBorder>(GetModuleHandleW(nullptr));
+        // alwaysOnTop=false -- unlike the real Alt+Tab overlay, this
+        // ring must not float above unrelated windows (e.g. covering
+        // VS Code) once the group loses focus; see ShowAroundTarget's
+        // `owner` param, used below to keep it anchored just in front
+        // of the group's own chrome instead.
+        g_groupActiveTileHighlight =
+            std::make_unique<polish::AltTabHighlightBorder>(GetModuleHandleW(nullptr), /*alwaysOnTop=*/false);
     }
 }
 
@@ -763,14 +769,17 @@ void UpdateGroupActiveTileHighlight(polish::GroupId id) {
         return;
     }
     const auto active = group->ActiveWindow();
-    if (!active.has_value() || !IsWindow(*active)) {
+    auto chromeIt = g_groupChromeWindows.find(id);
+    if (!active.has_value() || !IsWindow(*active) || chromeIt == g_groupChromeWindows.end()) {
         if (g_groupActiveTileHighlight) {
             g_groupActiveTileHighlight->Hide();
         }
         return;
     }
     EnsureGroupActiveTileHighlight();
-    g_groupActiveTileHighlight->ShowAroundTarget(*active);
+    // Anchored just in front of the group's own chrome in Z order (not
+    // the topmost band) -- see EnsureGroupActiveTileHighlight's comment.
+    g_groupActiveTileHighlight->ShowAroundTarget(*active, chromeIt->second->Handle());
 }
 
 // Called when the active tile changes via something other than the

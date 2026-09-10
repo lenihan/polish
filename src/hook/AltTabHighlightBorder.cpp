@@ -132,11 +132,14 @@ void PremultiplyAlpha(BYTE* pixels, int pixelCount) {
 
 }  // namespace
 
-AltTabHighlightBorder::AltTabHighlightBorder(HINSTANCE instance) {
+AltTabHighlightBorder::AltTabHighlightBorder(HINSTANCE instance, bool alwaysOnTop) : alwaysOnTop_(alwaysOnTop) {
     EnsureGdiplusStarted();
     EnsureClassRegistered(instance);
-    window_ = CreateWindowExW(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOPMOST,
-                               kClassName, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
+    DWORD exStyle = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+    if (alwaysOnTop_) {
+        exStyle |= WS_EX_TOPMOST;
+    }
+    window_ = CreateWindowExW(exStyle, kClassName, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
 }
 
 AltTabHighlightBorder::~AltTabHighlightBorder() {
@@ -145,7 +148,7 @@ AltTabHighlightBorder::~AltTabHighlightBorder() {
     }
 }
 
-void AltTabHighlightBorder::ShowAroundTarget(HWND target) {
+void AltTabHighlightBorder::ShowAroundTarget(HWND target, HWND owner) {
     if (window_ == nullptr) {
         return;
     }
@@ -223,16 +226,35 @@ void AltTabHighlightBorder::ShowAroundTarget(HWND target) {
         }
     }
 
-    // Ensure topmost + visible without touching position/size here --
-    // that happens atomically together with the content update, in the
-    // single UpdateLayeredWindow call below. Doing position/size via a
-    // separate SetWindowPos first (as an earlier version of this
+    // Ensure correctly-layered + visible without touching position/size
+    // here -- that happens atomically together with the content update,
+    // in the single UpdateLayeredWindow call below. Doing position/size
+    // via a separate SetWindowPos first (as an earlier version of this
     // function did) left a visible gap between "window moved/resized to
     // the new target" and "content repainted for the new size", showing
     // up as the previous target's rendered content briefly stretched
     // into the new window bounds before catching up.
-    SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    //
+    // A topmost instance always belongs in the topmost band, regardless
+    // of whatever `owner` the caller passed (or didn't). A non-topmost
+    // instance with no owner falls back to HWND_TOP -- still just "in
+    // front of everything else in the normal band" at the moment of
+    // this call, not floating above unrelated windows indefinitely the
+    // way HWND_TOPMOST would. A non-topmost instance *with* an owner
+    // resolves to whatever currently sits directly in front of that
+    // owner (GW_HWNDPREV) -- SetWindowPos's hWndInsertAfter places a
+    // window *behind* the handle passed to it, so inserting after
+    // `owner` itself would put the glow behind its owner instead of on
+    // top of it; falls back to HWND_TOP the same as "no owner" when
+    // `owner` is already frontmost (GW_HWNDPREV returns null, which is
+    // also HWND_TOP's own value).
+    HWND insertAfter = HWND_TOP;
+    if (alwaysOnTop_) {
+        insertAfter = HWND_TOPMOST;
+    } else if (owner != nullptr) {
+        insertAfter = GetWindow(owner, GW_HWNDPREV);
+    }
+    SetWindowPos(window_, insertAfter, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
     BITMAPINFO bmi{};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
