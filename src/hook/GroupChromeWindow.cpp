@@ -1551,11 +1551,18 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
     }
 
     {
-        // Alignment: a small rectangle outline with a thin filled bar
-        // along whichever edge the tab strip currently occupies -- top
-        // for Horizontal, left for Vertical -- reusing this file's
-        // existing line/rectangle vocabulary rather than inventing new
-        // iconography, same as every other button here.
+        // Alignment glyph depends on mode, since what this button
+        // actually reorients differs: in Tab mode, a small rectangle
+        // outline with a thin filled bar along whichever edge the tab
+        // strip currently occupies -- top for Horizontal, left for
+        // Vertical. Tile mode has no tab strip to depict, so instead
+        // this shows the rectangle split by a single divider line
+        // matching the tile grid's own bias -- a vertical divider
+        // (side-by-side halves) for Horizontal's wide-biased grid, a
+        // horizontal divider (stacked halves) for Vertical's tall-
+        // biased grid -- reusing this file's existing line/rectangle
+        // vocabulary rather than inventing new iconography, same as
+        // every other button here.
         const RECT alignmentRect = AlignmentButtonRect(clientRect, dpi);
         const bool alignmentHovered = hoveredActionButton_ == TitleBarActionButton::Alignment;
         if (alignmentHovered) {
@@ -1565,16 +1572,28 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
         }
         const RECT alignmentGlyph = glyphRect(alignmentRect);
         Rectangle(hdc, alignmentGlyph.left, alignmentGlyph.top, alignmentGlyph.right, alignmentGlyph.bottom);
-        const int barThickness =
-            std::max(1, static_cast<int>(alignmentGlyph.bottom - alignmentGlyph.top) / 4);
-        HBRUSH barBrush = CreateSolidBrush(glyphColor);
-        const RECT bar = (alignment_ == GroupAlignment::Vertical)
-                              ? RECT{alignmentGlyph.left, alignmentGlyph.top, alignmentGlyph.left + barThickness,
-                                     alignmentGlyph.bottom}
-                              : RECT{alignmentGlyph.left, alignmentGlyph.top, alignmentGlyph.right,
-                                     alignmentGlyph.top + barThickness};
-        FillRect(hdc, &bar, barBrush);
-        DeleteObject(barBrush);
+        if (mode_ == GroupMode::Tile) {
+            if (alignment_ == GroupAlignment::Vertical) {
+                const int midY = (alignmentGlyph.top + alignmentGlyph.bottom) / 2;
+                MoveToEx(hdc, alignmentGlyph.left, midY, nullptr);
+                LineTo(hdc, alignmentGlyph.right, midY);
+            } else {
+                const int midX = (alignmentGlyph.left + alignmentGlyph.right) / 2;
+                MoveToEx(hdc, midX, alignmentGlyph.top, nullptr);
+                LineTo(hdc, midX, alignmentGlyph.bottom);
+            }
+        } else {
+            const int barThickness =
+                std::max(1, static_cast<int>(alignmentGlyph.bottom - alignmentGlyph.top) / 4);
+            HBRUSH barBrush = CreateSolidBrush(glyphColor);
+            const RECT bar = (alignment_ == GroupAlignment::Vertical)
+                                  ? RECT{alignmentGlyph.left, alignmentGlyph.top, alignmentGlyph.left + barThickness,
+                                         alignmentGlyph.bottom}
+                                  : RECT{alignmentGlyph.left, alignmentGlyph.top, alignmentGlyph.right,
+                                         alignmentGlyph.top + barThickness};
+            FillRect(hdc, &bar, barBrush);
+            DeleteObject(barBrush);
+        }
     }
 
     SelectObject(hdc, glyphPen);
@@ -1616,8 +1635,13 @@ void GroupChromeWindow::UpdateTooltip() {
                 text = tileMaximized_ ? L"Restore tile" : L"Maximize tile";
                 break;
             case TitleBarActionButton::Alignment:
-                text = alignment_ == GroupAlignment::Horizontal ? L"Switch to vertical tabs"
-                                                                  : L"Switch to horizontal tabs";
+                if (mode_ == GroupMode::Tile) {
+                    text = alignment_ == GroupAlignment::Horizontal ? L"Switch to vertical tiles"
+                                                                      : L"Switch to horizontal tiles";
+                } else {
+                    text = alignment_ == GroupAlignment::Horizontal ? L"Switch to vertical tabs"
+                                                                      : L"Switch to horizontal tabs";
+                }
                 break;
         }
     }
