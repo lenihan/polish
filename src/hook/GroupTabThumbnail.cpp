@@ -90,7 +90,7 @@ GroupTabThumbnail::~GroupTabThumbnail() {
     }
 }
 
-void GroupTabThumbnail::ShowFor(HBITMAP snapshot, const RECT& tabScreenRect) {
+void GroupTabThumbnail::ShowFor(HBITMAP snapshot, const RECT& tabScreenRect, bool preferRightSide) {
     if (window_ == nullptr) {
         // WS_EX_NOACTIVATE so hovering a tab never steals focus from
         // whatever the user is actually working in. GWLP_USERDATA is
@@ -137,10 +137,24 @@ void GroupTabThumbnail::ShowFor(HBITMAP snapshot, const RECT& tabScreenRect) {
     const int width = Scale(kWidth, dpi);
     const int height = Scale(kHeight, dpi);
 
-    // Centered under the tab, clamped to the tab's own monitor's work
-    // area so it can't be positioned partly off-screen near an edge.
-    int x = tabScreenRect.left + ((tabScreenRect.right - tabScreenRect.left) - width) / 2;
-    int y = tabScreenRect.bottom + Scale(4, dpi);
+    // Centered under the tab (Horizontal alignment) or centered to its
+    // right (Vertical), per the caller-supplied `preferRightSide` --
+    // the tab rect's own shape can't tell these apart (a Vertical tab
+    // row is a fixed-width column that's wide and short, not narrow
+    // and tall). "Under" a specific vertical tab row would risk
+    // overlapping the next row down, which is why Vertical needs its
+    // own branch rather than reusing the horizontal formula as-is.
+    int x;
+    int y;
+    if (preferRightSide) {
+        x = tabScreenRect.right + Scale(4, dpi);
+        y = tabScreenRect.top + ((tabScreenRect.bottom - tabScreenRect.top) - height) / 2;
+    } else {
+        x = tabScreenRect.left + ((tabScreenRect.right - tabScreenRect.left) - width) / 2;
+        y = tabScreenRect.bottom + Scale(4, dpi);
+    }
+    // Clamped to the tab's own monitor's work area so it can't be
+    // positioned partly off-screen near an edge.
     MONITORINFO monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
     if (GetMonitorInfoW(MonitorFromRect(&tabScreenRect, MONITOR_DEFAULTTONEAREST), &monitorInfo)) {

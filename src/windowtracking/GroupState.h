@@ -56,8 +56,18 @@ public:
     // user-triggered from the chrome's context menu). Pure bookkeeping
     // -- membership/active-index are untouched; the caller is
     // responsible for re-applying layout (GroupManager::ApplyLayout)
-    // and updating the chrome's own rendering afterward.
-    void SetMode(GroupMode mode) { mode_ = mode; }
+    // and updating the chrome's own rendering afterward. Leaving Tile
+    // mode also clears tileMaximized_ -- "maximized" only means
+    // anything relative to the tile grid it was maximized out of; it
+    // wouldn't ever get shown while in Tab mode, but silently carrying
+    // it forward would ambush the next Tile-mode switch with a
+    // maximize the user never (re-)asked for this time.
+    void SetMode(GroupMode mode) {
+        mode_ = mode;
+        if (mode_ != GroupMode::Tile) {
+            tileMaximized_ = false;
+        }
+    }
 
     // Changes tab-strip/tile-grid orientation. Same pure-bookkeeping
     // contract as SetMode -- the caller re-applies layout and updates
@@ -117,6 +127,21 @@ public:
     // (e.g. Alt+Tab). No-op if hwnd isn't a member.
     void SetActiveWindow(HWND hwnd);
 
+    // Tile mode only: whether the active member is currently expanded
+    // to fill the whole content area instead of sharing the grid with
+    // every other member (a per-tile analog of the *window's* own
+    // maximize/restore, scoped to just one tile). Same pure-bookkeeping
+    // contract as SetMode -- the caller re-applies layout and updates
+    // the chrome's own rendering afterward. Defaults false; also reset
+    // to false whenever membership drops to <=1 (see Remove/SetMembers)
+    // since a single tile already fills the whole area on its own --
+    // "maximized" wouldn't mean anything different from the normal
+    // state, and silently carrying a stale true through to whenever a
+    // second member gets added again would ambush the user with an
+    // unexpected maximized tile they never asked for this time.
+    bool IsTileMaximized() const { return tileMaximized_; }
+    void SetTileMaximized(bool maximized) { tileMaximized_ = maximized; }
+
     // Tile mode only: user-adjustable column widths / row heights, each
     // a fraction of the content area's total width/height (a vector
     // sums to 1.0). Empty means "not yet customized" --
@@ -138,6 +163,7 @@ private:
     std::optional<size_t> activeIndex_;
     std::vector<double> tileColumnFractions_;
     std::vector<double> tileRowFractions_;
+    bool tileMaximized_ = false;
 };
 
 }  // namespace polish

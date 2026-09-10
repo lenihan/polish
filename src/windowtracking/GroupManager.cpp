@@ -347,9 +347,54 @@ SIZE GroupManager::ApplyTileLayout(GroupState& group, HWND /*chromeWindow*/, con
         return SIZE{requestedWidth, requestedHeight};
     }
 
+    if (group.IsTileMaximized()) {
+        const std::optional<HWND> active = group.ActiveWindow();
+        if (active.has_value() && IsWindow(*active)) {
+            // Every member gets the *same* full-content rect and stays
+            // shown -- the active one is simply Z-ordered on top,
+            // exactly ApplyTabLayout's own "one covers the rest, nothing
+            // ever hidden" technique (see its own comment for why: an
+            // earlier hide-inactive/show-active design here visibly
+            // flashed a member's own header on every switch, confirmed
+            // real). Using SW_HIDE for the non-maximized tiles here
+            // would risk the identical class of bug for no real benefit
+            // -- they're fully covered either way.
+            int neededWidth = requestedWidth;
+            int neededHeight = requestedHeight;
+            for (HWND hwnd : windows) {
+                const RECT actual = PositionMember(hwnd, contentRect, true);
+                neededWidth = std::max(neededWidth, static_cast<int>(actual.right - actual.left));
+                neededHeight = std::max(neededHeight, static_cast<int>(actual.bottom - actual.top));
+            }
+            SetWindowPos(*active, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            // No grid while maximized -- same "nothing to render/hit-
+            // test" contract as the 0-1-member case above.
+            tileColumnBoundaries_.erase(group.Id());
+            tileRowBoundaries_.erase(group.Id());
+            return SIZE{neededWidth, neededHeight};
+        }
+        // No valid active window (e.g. it closed) -- fall through to
+        // the normal grid below rather than leaving every member
+        // full-size with nothing chosen to be on top.
+    }
+
+    // Horizontal (default): biased wide (cols >= rows) -- ceil(sqrt(n))
+    // columns, however many rows that leaves. Vertical: the same
+    // formula with columns/rows swapped, biasing tall instead -- for
+    // exactly 2 members this is the difference between side-by-side
+    // and stacked; for any other count it's the general "grid biased
+    // wide vs. tall" behavior GroupState.h's own GroupAlignment comment
+    // documents.
     const int count = static_cast<int>(windows.size());
-    const int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
-    const int rows = (count + cols - 1) / cols;
+    int cols;
+    int rows;
+    if (group.Alignment() == GroupAlignment::Vertical) {
+        rows = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
+        cols = (count + rows - 1) / rows;
+    } else {
+        cols = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
+        rows = (count + cols - 1) / cols;
+    }
 
     // User-adjustable column widths/row heights (each a fraction of the
     // content area's total width/height), falling back to an equal

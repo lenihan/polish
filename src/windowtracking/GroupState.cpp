@@ -33,6 +33,11 @@ void GroupState::Remove(HWND hwnd) {
     const size_t removedIndex = static_cast<size_t>(it - members_.begin());
     members_.erase(it);
 
+    if (members_.size() <= 1) {
+        // See SetTileMaximized's own comment -- a single (or no) tile
+        // has nothing left to be "maximized" relative to.
+        tileMaximized_ = false;
+    }
     if (members_.empty()) {
         activeIndex_.reset();
         return;
@@ -87,6 +92,10 @@ void GroupState::SetMembers(const std::vector<HWND>& windows) {
     }
     members_ = std::move(newMembers);
 
+    if (members_.size() <= 1) {
+        // See SetTileMaximized's own comment.
+        tileMaximized_ = false;
+    }
     if (members_.empty()) {
         activeIndex_.reset();
         return;

@@ -39,12 +39,19 @@ public:
     // Shows a copy of `snapshot` (borrowed -- not taken ownership of;
     // copied internally so it's safe even if the caller's own copy is
     // later replaced/freed), positioned just below `tabScreenRect`
-    // (screen coordinates -- the hovered tab's own rect). A null
-    // `snapshot` (e.g. no capture exists yet for this member) leaves
-    // whatever was previously shown in place, or a plain placeholder
-    // background if nothing has ever been shown. Safe to call
-    // repeatedly for a different member while already showing one.
-    void ShowFor(HBITMAP snapshot, const RECT& tabScreenRect);
+    // (screen coordinates -- the hovered tab's own rect), or to its
+    // right when `preferRightSide` is true (the caller's own
+    // Vertical-alignment tab strip runs down the left edge, so
+    // "below" would risk overlapping the next tab row down -- the
+    // tab rect's own shape can't be used to infer this: a vertical
+    // tab row is a fixed-width column that's wide and short, not
+    // narrow and tall, so it looks "horizontal" by shape alone). A
+    // null `snapshot` (e.g. no capture exists yet for this member)
+    // leaves whatever was previously shown in place, or a plain
+    // placeholder background if nothing has ever been shown. Safe to
+    // call repeatedly for a different member while already showing
+    // one.
+    void ShowFor(HBITMAP snapshot, const RECT& tabScreenRect, bool preferRightSide);
 
     // Hides the preview. Safe to call when already hidden.
     void Hide();

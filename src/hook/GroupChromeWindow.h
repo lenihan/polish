@@ -92,6 +92,25 @@ public:
     // re-applying layout (GroupManager::ApplyLayout) afterward.
     void SetMode(GroupMode mode);
 
+    // Mirrors GroupState::IsTileMaximized() into the chrome's own
+    // rendering (the tile-maximize button's glyph flips between
+    // "maximize" and "restore", and the button itself is only ever
+    // shown at all in Tile mode with 2+ members -- see
+    // TileMaximizeButtonRect). Purely visual, same contract as SetMode:
+    // the caller updates GroupState and re-applies layout separately.
+    void SetTileMaximized(bool maximized);
+
+    // Switches the tab strip between a horizontal row (top) and a
+    // vertical column (left edge) -- see ComputeTabRects/PaintTabStrip's
+    // own Vertical branches. Also changes Tile mode's grid-shape bias
+    // (GroupManager::ApplyTileLayout reads GroupState::Alignment()
+    // directly, unrelated to this chrome-local copy) -- same one-
+    // setting-drives-both contract GroupState.h's own GroupAlignment
+    // comment describes. Purely visual/input-handling here, same
+    // contract as SetMode: the caller updates GroupState and re-applies
+    // layout separately.
+    void SetAlignment(GroupAlignment alignment);
+
     // The area below the tab strip, in screen coordinates -- used by
     // GrowContentAreaTo to measure the chrome's current content size.
     RECT ContentRectInScreenCoords() const;
@@ -149,6 +168,23 @@ public:
     // context menu, or the title bar's manage-windows button is clicked.
     void SetOnEditWindowsRequested(std::function<void()> callback) {
         onEditWindowsRequested_ = std::move(callback);
+    }
+
+    // Called when the title bar's tile-maximize button is clicked (only
+    // ever shown/hit-testable in Tile mode with 2+ members -- see
+    // TileMaximizeButtonRect). The owner flips GroupState's own
+    // IsTileMaximized(), re-applies layout, and calls SetTileMaximized
+    // back, same request/response shape as mode-toggle.
+    void SetOnTileMaximizeToggleRequested(std::function<void()> callback) {
+        onTileMaximizeToggleRequested_ = std::move(callback);
+    }
+
+    // Called when the title bar's horizontal/vertical alignment button
+    // is clicked. The owner flips GroupState's own Alignment(), re-
+    // applies layout, and calls SetAlignment back -- same request/
+    // response shape as mode-toggle/tile-maximize.
+    void SetOnAlignmentToggleRequested(std::function<void()> callback) {
+        onAlignmentToggleRequested_ = std::move(callback);
     }
 
     // Called synchronously on WM_CLOSE, before the default handling
@@ -283,6 +319,29 @@ private:
     RECT ModeToggleButtonRect(const RECT& clientRect, UINT dpi) const;
     RECT ManageWindowsButtonRect(const RECT& clientRect, UINT dpi) const;
 
+    // A third client-area button, immediately left of the other two --
+    // maximizes/restores whichever tile is currently active (see
+    // GroupState::IsTileMaximized). Only meaningful in Tile mode with
+    // 2+ members (a single tile already fills the whole area on its
+    // own); TileMaximizeButtonVisible() is the one place that decision
+    // is made, consulted by painting, hit-testing, and the title text's
+    // own right-boundary math alike so all three can never disagree
+    // about whether this button is showing right now.
+    bool TileMaximizeButtonVisible() const;
+    RECT TileMaximizeButtonRect(const RECT& clientRect, UINT dpi) const;
+
+    // A fourth client-area button, immediately left of the other
+    // three -- toggles alignment_ between Horizontal/Vertical. Always
+    // shown (unlike TileMaximize, this is meaningful in both modes).
+    RECT AlignmentButtonRect(const RECT& clientRect, UINT dpi) const;
+
+    // 0 in Tile mode or Horizontal alignment; the reserved left-column
+    // width in Tab mode with Vertical alignment (see kTabStripWidth).
+    // The Vertical counterpart to HeaderHeight's top-band reservation --
+    // consulted everywhere HeaderHeight is, so content/splitter geometry
+    // always accounts for whichever axis the tab strip currently uses.
+    int TabStripLeftWidth(UINT dpi) const;
+
     // Shows/hides/repositions tooltipWindow_ for whichever title-bar
     // button (caption or client-area) is currently hovered -- called
     // from every place hoveredTitleBarButton_/hoveredActionButton_
@@ -314,6 +373,12 @@ private:
     std::function<void(size_t, size_t)> onTabReordered_;
     std::function<void()> onModeToggleRequested_;
     std::function<void()> onEditWindowsRequested_;
+    std::function<void()> onTileMaximizeToggleRequested_;
+    // Mirrors GroupState::IsTileMaximized() -- see SetTileMaximized.
+    bool tileMaximized_ = false;
+    std::function<void()> onAlignmentToggleRequested_;
+    // Mirrors GroupState::Alignment() -- see SetAlignment.
+    GroupAlignment alignment_ = GroupAlignment::Horizontal;
     std::function<void()> onResized_;
     std::function<void()> onClosing_;
     std::function<void(std::optional<size_t>, const RECT&)> onTabHovered_;
@@ -350,7 +415,7 @@ private:
     // separate pressed-state tracking, matching the caption buttons'
     // own commit-on-down choice, and simpler than tabs' drag/capture
     // handling for something that's just a one-shot command.
-    enum class TitleBarActionButton { ModeToggle, ManageWindows };
+    enum class TitleBarActionButton { ModeToggle, ManageWindows, TileMaximize, Alignment };
     std::optional<TitleBarActionButton> hoveredActionButton_;
 
     // Tile mode splitters -- content-rect-relative pixel positions, set

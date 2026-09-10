@@ -74,6 +74,7 @@ HWINEVENTHOOK g_moveSizeStartHook = nullptr;
 HWINEVENTHOOK g_moveSizeEndHook = nullptr;
 HWINEVENTHOOK g_destroyHook = nullptr;
 HWINEVENTHOOK g_nameChangeHook = nullptr;
+HWINEVENTHOOK g_objectFocusHook = nullptr;
 UINT g_taskbarCreatedMessage = 0;
 
 std::unique_ptr<polish::TrayIcon> g_trayIcon;
@@ -162,6 +163,15 @@ polish::ActivationHistory g_activationHistory;
 polish::GroupManager g_groupManager;
 std::map<polish::GroupId, std::unique_ptr<polish::GroupChromeWindow>> g_groupChromeWindows;
 
+// Which tile is "active" in a Tile-mode group -- a separate instance
+// from g_altTabHighlightBorder (same class, reused as-is: nothing in
+// AltTabHighlightBorder assumes its target is top-level, and a
+// reparented member's GetWindowRect/DwmGetWindowAttribute both still
+// return real screen coordinates) so Alt+Tab cycling and a group's
+// active-tile ring can never fight over one window. See
+// OnObjectFocusChanged/UpdateGroupActiveTileHighlight.
+std::unique_ptr<polish::AltTabHighlightBorder> g_groupActiveTileHighlight;
+
 // One shared hover-preview popup, reused across every group's tab strip
 // (only one can ever be hovered at a time app-wide) -- created lazily
 // on first hover, not at startup, since most sessions may never hover
@@ -175,6 +185,7 @@ std::unique_ptr<polish::GroupTabThumbnail> g_groupTabThumbnail;
 // own comment for why a single capture isn't trusted.
 HWND g_hoveredThumbnailMember = nullptr;
 RECT g_hoveredThumbnailTabRect{};
+bool g_hoveredThumbnailPreferRight = false;
 int g_thumbnailStabilizeAttemptsLeft = 0;
 
 // Forward-declared: defined near the rest of the group-management code
@@ -185,6 +196,13 @@ int g_thumbnailStabilizeAttemptsLeft = 0;
 // group's tab label until something else (a tab click, a
 // drag) happened to trigger a repaint.
 void OnMemberTitleChanged(HWND hwnd);
+
+// Forward-declared for the same reason as OnMemberTitleChanged above:
+// called from OnWinEvent's new EVENT_OBJECT_FOCUS case, defined further
+// down near ActivateGroupTile. hwnd is whatever just received keyboard
+// focus, system-wide -- a no-op unless it turns out to be (or be nested
+// inside) a Tile-mode group's member window.
+void OnObjectFocusChanged(HWND hwnd);
 
 // Defined further below (near the group-related icon helpers) -- forward
 // declared here so BuildAltTabListRows (Alt+Tab section) can reuse it
@@ -504,6 +522,21 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
             }
             break;
 
+        case EVENT_OBJECT_FOCUS:
+            // Deliberately *not* filtered by idObject/idChild the way
+            // the cases above are -- a real click almost always lands
+            // on some nested control several levels inside a member's
+            // own window tree (an edit control, a list view, ...), not
+            // the member's own top-level client area, and this is
+            // exactly the signal meant to catch focus at any depth (see
+            // OnObjectFocusChanged's forward declaration). Its own
+            // GetParent walk + small map lookup is cheap enough to run
+            // unfiltered; the early exit for "not inside any group
+            // chrome" handles the overwhelming majority of focus
+            // changes system-wide.
+            OnObjectFocusChanged(hwnd);
+            break;
+
         default:
             break;
     }
@@ -703,6 +736,84 @@ void EnsureAltTabOverlayPoolSize(size_t count) {
 void EnsureAltTabHighlightBorder() {
     if (!g_altTabHighlightBorder) {
         g_altTabHighlightBorder = std::make_unique<polish::AltTabHighlightBorder>(GetModuleHandleW(nullptr));
+    }
+}
+
+void EnsureGroupActiveTileHighlight() {
+    if (!g_groupActiveTileHighlight) {
+        g_groupActiveTileHighlight = std::make_unique<polish::AltTabHighlightBorder>(GetModuleHandleW(nullptr));
+    }
+}
+
+// Shows/hides/repositions the active-tile ring for group `id` to match
+// its current state -- called any time something might have changed
+// which tile is active, whether it's still Tile mode, or where the
+// active member's own rect now is (a mode switch, a reflow, closing
+// the group, ...). Always safe to call speculatively; a cheap no-op
+// whenever there's nothing to show.
+void UpdateGroupActiveTileHighlight(polish::GroupId id) {
+    polish::GroupState* group = g_groupManager.FindGroup(id);
+    if (group == nullptr || group->Mode() != polish::GroupMode::Tile || group->MemberCount() <= 1) {
+        // A single-member Tile "grid" already fills the whole content
+        // area -- nothing to distinguish it from, so no point ringing
+        // it.
+        if (g_groupActiveTileHighlight) {
+            g_groupActiveTileHighlight->Hide();
+        }
+        return;
+    }
+    const auto active = group->ActiveWindow();
+    if (!active.has_value() || !IsWindow(*active)) {
+        if (g_groupActiveTileHighlight) {
+            g_groupActiveTileHighlight->Hide();
+        }
+        return;
+    }
+    EnsureGroupActiveTileHighlight();
+    g_groupActiveTileHighlight->ShowAroundTarget(*active);
+}
+
+// Called when the active tile changes via something other than the
+// (Tab-mode-only) tab strip -- specifically, keyboard focus landing
+// somewhere inside a Tile-mode member (see OnObjectFocusChanged).
+// Mirrors ActivateGroupTab's own GroupState-then-chrome update, minus
+// the reflow/refocus steps that only make sense for Tab mode (every
+// Tile-mode member is already shown and already has focus -- that's
+// the whole reason this fired in the first place).
+void ActivateGroupTile(polish::GroupId id, HWND hwnd) {
+    polish::GroupState* group = g_groupManager.FindGroup(id);
+    auto chromeIt = g_groupChromeWindows.find(id);
+    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
+        return;
+    }
+    group->SetActiveWindow(hwnd);
+    if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
+        chromeIt->second->SetActiveIndex(*activeIndex);
+    }
+    UpdateGroupActiveTileHighlight(id);
+}
+
+void OnObjectFocusChanged(HWND hwnd) {
+    if (hwnd == nullptr || !IsWindow(hwnd) || g_groupChromeWindows.empty()) {
+        return;
+    }
+    // Walk up from whatever just received focus until either running
+    // out of ancestors or finding a window whose *own* parent is a
+    // known group chrome -- that window is the specific member (now
+    // WS_CHILD) the focus landed inside, however many levels down the
+    // actual focused control (an edit control, a list view, ...) sits
+    // within that member's own window tree. Bounded by the real (small)
+    // depth of a typical window hierarchy, not by anything under this
+    // app's control, so no separate iteration cap is needed.
+    HWND candidate = hwnd;
+    for (HWND parent = GetParent(candidate); parent != nullptr; parent = GetParent(candidate)) {
+        for (const auto& [id, chrome] : g_groupChromeWindows) {
+            if (chrome->Handle() == parent) {
+                ActivateGroupTile(id, candidate);
+                return;
+            }
+        }
+        candidate = parent;
     }
 }
 
@@ -1543,19 +1654,24 @@ void ReflowGroupTo(polish::GroupId id) {
 
     const int requestedWidth = contentRect.right - contentRect.left;
     const int requestedHeight = contentRect.bottom - contentRect.top;
-    if (needed.cx <= requestedWidth && needed.cy <= requestedHeight) {
-        return;
+    if (needed.cx > requestedWidth || needed.cy > requestedHeight) {
+        polish::LogDebug(std::format(
+            L"[Polish] Group: member(s) wouldn't fit group id={} (requested {}x{}, needed {}x{}) -- growing chrome",
+            id, requestedWidth, requestedHeight, needed.cx, needed.cy));
+        g_reflowGrowInProgress = true;
+        chromeIt->second->GrowContentAreaTo(needed);
+        g_reflowGrowInProgress = false;
+        g_groupManager.ApplyLayout(*group, chromeHandle, chromeIt->second->ContentRectInClientCoords(),
+                                    chromeIt->second->TileSplitterWidthPx());
+        chromeIt->second->SetTileSplitters(g_groupManager.TileColumnBoundaries(id),
+                                            g_groupManager.TileRowBoundaries(id));
     }
 
-    polish::LogDebug(std::format(
-        L"[Polish] Group: member(s) wouldn't fit group id={} (requested {}x{}, needed {}x{}) -- growing chrome",
-        id, requestedWidth, requestedHeight, needed.cx, needed.cy));
-    g_reflowGrowInProgress = true;
-    chromeIt->second->GrowContentAreaTo(needed);
-    g_reflowGrowInProgress = false;
-    g_groupManager.ApplyLayout(*group, chromeHandle, chromeIt->second->ContentRectInClientCoords(),
-                                chromeIt->second->TileSplitterWidthPx());
-    chromeIt->second->SetTileSplitters(g_groupManager.TileColumnBoundaries(id), g_groupManager.TileRowBoundaries(id));
+    // The active member's screen rect may have just moved (a new tile
+    // grid shape, a resize, ...) -- keep the active-tile ring (if
+    // showing at all) glued to it. A cheap no-op when there's nothing
+    // to update (wrong mode, ≤1 member, etc. -- see its own comment).
+    UpdateGroupActiveTileHighlight(id);
 }
 
 // Called live while a Tile-mode splitter is being dragged
@@ -1766,8 +1882,9 @@ void OnGroupTabHovered(polish::GroupId id, std::optional<size_t> index, const RE
     // *live* capture of an already-hidden member doesn't reliably work
     // on its own -- CaptureThumbnail's own message-flush/redraw
     // handling is still what makes this call meaningful.
+    const bool preferRight = group->Alignment() == polish::GroupAlignment::Vertical;
     g_groupManager.RefreshThumbnail(member.window);
-    g_groupTabThumbnail->ShowFor(g_groupManager.CachedThumbnail(member.window), tabScreenRect);
+    g_groupTabThumbnail->ShowFor(g_groupManager.CachedThumbnail(member.window), tabScreenRect, preferRight);
 
     // Keep silently improving the shown preview for a bit in case its
     // content was still mid-load -- see kThumbnailStabilizeTimerId's
@@ -1775,6 +1892,7 @@ void OnGroupTabHovered(polish::GroupId id, std::optional<size_t> index, const RE
     // exists to just check once instead).
     g_hoveredThumbnailMember = member.window;
     g_hoveredThumbnailTabRect = tabScreenRect;
+    g_hoveredThumbnailPreferRight = preferRight;
     g_thumbnailStabilizeAttemptsLeft = kThumbnailStabilizeMaxAttempts;
     SetTimer(g_messageWindow, kThumbnailStabilizeTimerId, kThumbnailStabilizeIntervalMs, nullptr);
 }
@@ -1795,7 +1913,7 @@ void StabilizeHoveredThumbnail() {
     const bool changed = g_groupManager.RefreshThumbnail(g_hoveredThumbnailMember);
     if (changed && g_groupTabThumbnail) {
         g_groupTabThumbnail->ShowFor(g_groupManager.CachedThumbnail(g_hoveredThumbnailMember),
-                                      g_hoveredThumbnailTabRect);
+                                      g_hoveredThumbnailTabRect, g_hoveredThumbnailPreferRight);
     }
     if (!changed || g_thumbnailStabilizeAttemptsLeft <= 0) {
         KillTimer(g_messageWindow, kThumbnailStabilizeTimerId);
@@ -1878,6 +1996,47 @@ void ToggleGroupMode(polish::GroupId id) {
                                   newMode == polish::GroupMode::Tile ? L"Tile" : L"Tab", id));
 }
 
+// Called from GroupChromeWindow's title-bar tile-maximize button
+// (only ever clickable in Tile mode with 2+ members -- the button
+// itself isn't shown otherwise, see TileMaximizeButtonVisible). Same
+// flip-state-then-reflow shape as ToggleGroupMode.
+void ToggleTileMaximize(polish::GroupId id) {
+    polish::GroupState* group = g_groupManager.FindGroup(id);
+    auto chromeIt = g_groupChromeWindows.find(id);
+    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
+        return;
+    }
+    const bool newMaximized = !group->IsTileMaximized();
+    group->SetTileMaximized(newMaximized);
+    chromeIt->second->SetTileMaximized(newMaximized);
+    ReflowGroupTo(id);
+    polish::LogDebug(std::format(L"[Polish] Group: tile {} for group id={}",
+                                  newMaximized ? L"maximized" : L"restored", id));
+}
+
+// Called from GroupChromeWindow's title-bar alignment button. Same
+// flip-state-then-reflow shape as ToggleGroupMode/ToggleTileMaximize --
+// ReflowGroupTo re-derives everything from GroupState::Alignment()
+// itself (GroupManager::ApplyTileLayout's grid-shape bias,
+// GroupChromeWindow's own tab-strip axis via SetAlignment below), so
+// flipping the one flag and reflowing is the whole job.
+void ToggleGroupAlignment(polish::GroupId id) {
+    polish::GroupState* group = g_groupManager.FindGroup(id);
+    auto chromeIt = g_groupChromeWindows.find(id);
+    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
+        return;
+    }
+    const polish::GroupAlignment newAlignment = (group->Alignment() == polish::GroupAlignment::Horizontal)
+                                                     ? polish::GroupAlignment::Vertical
+                                                     : polish::GroupAlignment::Horizontal;
+    group->SetAlignment(newAlignment);
+    chromeIt->second->SetAlignment(newAlignment);
+    ReflowGroupTo(id);
+    polish::LogDebug(std::format(L"[Polish] Group: alignment switched to {} for group id={}",
+                                  newAlignment == polish::GroupAlignment::Vertical ? L"Vertical" : L"Horizontal",
+                                  id));
+}
+
 // Called from GroupChromeWindow's "Edit windows..." context-menu item:
 // reopens the picker pre-checked with the group's current membership
 // and mode, then diffs the confirmed selection against current
@@ -1926,6 +2085,12 @@ void EditGroupWindows(polish::GroupId id) {
     if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
         chromeIt->second->SetActiveIndex(*activeIndex);
     }
+    // SetMembers above may have just reset IsTileMaximized() to false
+    // (membership dropped to <=1 -- see its own comment) -- re-sync the
+    // chrome's copy either way so the tile-maximize button's glyph/
+    // visibility reflects whatever GroupState actually landed on, not
+    // whatever it was before this edit.
+    chromeIt->second->SetTileMaximized(group->IsTileMaximized());
     SetWindowTextW(chromeIt->second->Handle(), group->Name().c_str());
     ReflowGroupTo(id);
     polish::LogDebug(std::format(L"[Polish] Group: edited group id={}, now {} window(s), name=\"{}\"", id,
@@ -1951,6 +2116,12 @@ void CloseGroup(polish::GroupId id) {
     polish::GroupState* group = g_groupManager.FindGroup(id);
     if (group == nullptr) {
         return;
+    }
+    // The ring is a separate top-level popup, not a child of this
+    // group's chrome -- it doesn't get cleaned up for free just because
+    // the chrome is about to be destroyed.
+    if (g_groupActiveTileHighlight) {
+        g_groupActiveTileHighlight->Hide();
     }
     g_groupManager.ReleaseGroup(*group);
     polish::LogDebug(std::format(L"[Polish] Group: closed group id={}, {} member(s) released to top-level", id,
@@ -2003,6 +2174,8 @@ void TriggerNewGroup(HWND owner) {
     chrome->SetOnTabClicked([id](size_t index) { ActivateGroupTab(id, index); });
     chrome->SetOnTabReordered([id](size_t from, size_t to) { ReorderGroupTab(id, from, to); });
     chrome->SetOnModeToggleRequested([id]() { ToggleGroupMode(id); });
+    chrome->SetOnTileMaximizeToggleRequested([id]() { ToggleTileMaximize(id); });
+    chrome->SetOnAlignmentToggleRequested([id]() { ToggleGroupAlignment(id); });
     chrome->SetOnEditWindowsRequested([id]() { EditGroupWindows(id); });
     chrome->SetOnResized([id]() { ReflowGroupTo(id); });
     chrome->SetOnClosing([id]() { CloseGroup(id); });
@@ -2164,10 +2337,14 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             if (g_nameChangeHook != nullptr) {
                 UnhookWinEvent(g_nameChangeHook);
             }
+            if (g_objectFocusHook != nullptr) {
+                UnhookWinEvent(g_objectFocusHook);
+            }
             g_trayIcon.reset();
             g_altTabHook.reset();
             g_altTabOverlays.clear();
             g_altTabHighlightBorder.reset();
+            g_groupActiveTileHighlight.reset();
             // Every remaining group's members must be released back to
             // top-level *before* their chrome windows are destroyed
             // below -- unlike a single group's own WM_CLOSE path
@@ -2247,6 +2424,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                                      WINEVENT_OUTOFCONTEXT);
     g_nameChangeHook = SetWinEventHook(EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_NAMECHANGE, nullptr, OnWinEvent, 0, 0,
                                         WINEVENT_OUTOFCONTEXT);
+    g_objectFocusHook = SetWinEventHook(EVENT_OBJECT_FOCUS, EVENT_OBJECT_FOCUS, nullptr, OnWinEvent, 0, 0,
+                                         WINEVENT_OUTOFCONTEXT);
 
     g_trayIcon = std::make_unique<polish::TrayIcon>(g_messageWindow, PopulateTrayMenu, HandleTrayCommand);
 
