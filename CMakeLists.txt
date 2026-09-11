@@ -42,10 +42,12 @@ add_library(polish_core STATIC
     src/hook/AltTabListWindow.cpp
     src/hook/GroupChromeWindow.cpp
     src/hook/GroupPickerWindow.cpp
+    src/hook/GroupPickerListWindow.cpp
     src/hook/GroupHotkeyDialog.cpp
     src/hook/GroupTabThumbnail.cpp
     src/settings/Settings.cpp
     src/util/DarkMode.cpp
+    src/util/WindowIcon.cpp
 )
 
 target_include_directories(polish_core PUBLIC src resources)

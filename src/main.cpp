@@ -22,6 +22,7 @@
 #include "settings/Settings.h"
 #include "tray/TrayIcon.h"
 #include "util/Logging.h"
+#include "util/WindowIcon.h"
 #include "windowtracking/ActivationHistory.h"
 #include "windowtracking/GroupManager.h"
 #include "windowtracking/RectUtils.h"
@@ -203,11 +204,6 @@ void OnMemberTitleChanged(HWND hwnd);
 // focus, system-wide -- a no-op unless it turns out to be (or be nested
 // inside) a Tile-mode group's member window.
 void OnObjectFocusChanged(HWND hwnd);
-
-// Defined further below (near the group-related icon helpers) -- forward
-// declared here so BuildAltTabListRows (Alt+Tab section) can reuse it
-// instead of duplicating the WM_GETICON/GCLP_HICONSM lookup.
-HICON GetWindowIconHandle(HWND hwnd);
 
 // The window currently being live-tracked for settle events -- i.e. the
 // foreground window, whenever it's a candidate window (see
@@ -899,7 +895,7 @@ MonitorRowsResult BuildAltTabListRowsForMonitor(HMONITOR monitor) {
         }
         wchar_t title[256] = L"";
         GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
-        result.rows.push_back(polish::AltTabListRow{hwnd, title, GetWindowIconHandle(hwnd), /*minimized=*/false});
+        result.rows.push_back(polish::AltTabListRow{hwnd, title, polish::GetWindowIconHandle(hwnd), /*minimized=*/false});
     }
     // Minimized section, appended after every active row so it always
     // renders below them (AltTabListWindow's divider logic assumes
@@ -913,7 +909,7 @@ MonitorRowsResult BuildAltTabListRowsForMonitor(HMONITOR monitor) {
         }
         wchar_t title[256] = L"";
         GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
-        result.rows.push_back(polish::AltTabListRow{hwnd, title, GetWindowIconHandle(hwnd), /*minimized=*/true});
+        result.rows.push_back(polish::AltTabListRow{hwnd, title, polish::GetWindowIconHandle(hwnd), /*minimized=*/true});
     }
     return result;
 }
@@ -1773,28 +1769,6 @@ std::vector<std::wstring> CollectMemberTitles(const polish::GroupState& group) {
     return titles;
 }
 
-// The small icon a window itself advertises via WM_GETICON (falling
-// back to the window class's icon, then to the large icon if no small
-// one exists) -- the same lookup order Explorer/the taskbar use.
-// Returned handles are borrowed from their owning window/class; never
-// destroy them.
-HICON GetWindowIconHandle(HWND hwnd) {
-    HICON icon = reinterpret_cast<HICON>(SendMessageW(hwnd, WM_GETICON, ICON_SMALL, 0));
-    if (icon == nullptr) {
-        icon = reinterpret_cast<HICON>(SendMessageW(hwnd, WM_GETICON, ICON_SMALL2, 0));
-    }
-    if (icon == nullptr) {
-        icon = reinterpret_cast<HICON>(GetClassLongPtrW(hwnd, GCLP_HICONSM));
-    }
-    if (icon == nullptr) {
-        icon = reinterpret_cast<HICON>(SendMessageW(hwnd, WM_GETICON, ICON_BIG, 0));
-    }
-    if (icon == nullptr) {
-        icon = reinterpret_cast<HICON>(GetClassLongPtrW(hwnd, GCLP_HICON));
-    }
-    return icon;
-}
-
 // Current member icons, in the same membership order as
 // CollectMemberTitles -- shared by every call site that refreshes tab
 // labels, so titles and icons never drift out of sync with each other.
@@ -1804,7 +1778,7 @@ std::vector<HICON> CollectMemberIcons(const polish::GroupState& group) {
         if (member.kind != polish::GroupMemberKind::Window || member.window == nullptr) {
             continue;  // nested-group case -- v1 never populates this
         }
-        icons.push_back(GetWindowIconHandle(member.window));
+        icons.push_back(polish::GetWindowIconHandle(member.window));
     }
     return icons;
 }
@@ -2173,7 +2147,7 @@ void TriggerNewGroup(HWND owner) {
 
     std::vector<HICON> memberIcons;
     for (HWND hwnd : selection->windows) {
-        memberIcons.push_back(GetWindowIconHandle(hwnd));
+        memberIcons.push_back(polish::GetWindowIconHandle(hwnd));
     }
 
     auto chrome = std::make_unique<polish::GroupChromeWindow>(GetModuleHandleW(nullptr));

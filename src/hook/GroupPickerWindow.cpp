@@ -1,8 +1,7 @@
 #include "hook/GroupPickerWindow.h"
 
-#include <commctrl.h>
+#include <dwmapi.h>
 #include <uxtheme.h>
-#include <windowsx.h>
 
 #include <algorithm>
 #include <format>
@@ -15,31 +14,52 @@ namespace polish {
 
 namespace {
 
+// Not necessarily defined by the SDK's own dwmapi.h (added in the
+// Windows 11 SDK) -- same local-fallback-constant pattern
+// util/DarkMode.cpp already uses for DWMWA_USE_IMMERSIVE_DARK_MODE.
+// Harmless no-ops via DwmSetWindowAttribute on a pre-Win11 host either
+// way, so no separate OS-version check is needed.
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+constexpr DWORD DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+#endif
+#ifndef DWMWCP_ROUND
+constexpr DWORD DWMWCP_ROUND = 2;
+#endif
+#ifndef DWMWA_SYSTEMBACKDROP_TYPE
+constexpr DWORD DWMWA_SYSTEMBACKDROP_TYPE = 38;
+#endif
+#ifndef DWMSBT_TRANSIENTWINDOW
+constexpr DWORD DWMSBT_TRANSIENTWINDOW = 3;  // "Mica Alt" -- for short-lived flyout/dialog surfaces
+#endif
+
 constexpr wchar_t kWindowClassName[] = L"PolishGroupPickerWindow";
-constexpr int kAddButtonId = 1001;
-constexpr int kRemoveButtonId = 1002;
 constexpr int kCreateButtonId = 1003;
 constexpr int kCancelButtonId = 1004;
-constexpr int kMoveUpButtonId = 1005;
-constexpr int kMoveDownButtonId = 1006;
 
 // Logical (96 DPI) layout constants -- scaled by the window's actual DPI
-// in LayoutControls/before CreateWindowExW.
-constexpr int kWindowWidth = 640;
-constexpr int kWindowHeight = 320;
-constexpr int kMargin = 12;
-constexpr int kButtonHeight = 28;
+// in LayoutControls/before CreateWindowExW. Width/height re-tuned for a
+// single list (no longer needs to fit two lists + two button columns
+// side by side) -- narrower, and taller so ~6-7 rows show without
+// scrolling on a typical display; margin/button height bumped up for
+// the airier spacing Windows 11 dialogs use versus this dialog's
+// original, denser layout.
+constexpr int kWindowWidth = 460;
+constexpr int kWindowHeight = 460;
+constexpr int kMargin = 20;
+constexpr int kButtonHeight = 32;
 constexpr int kButtonWidth = 110;
 constexpr int kNameRowHeight = 24;
 constexpr int kNameLabelWidth = 50;
-constexpr int kListLabelHeight = 18;
-constexpr int kListLabelGap = 4;
-constexpr int kMidColumnWidth = 100;
-constexpr int kMidButtonHeight = 26;
-constexpr int kMidButtonGap = 4;
-constexpr int kMoveColumnWidth = 90;
+constexpr int kButtonCornerRadius = 6;
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
+
+COLORREF DarkenColor(COLORREF color, double factor) {
+    const int r = static_cast<int>(GetRValue(color) * factor);
+    const int g = static_cast<int>(GetGValue(color) * factor);
+    const int b = static_cast<int>(GetBValue(color) * factor);
+    return RGB(std::clamp(r, 0, 255), std::clamp(g, 0, 255), std::clamp(b, 0, 255));
+}
 
 // A single-line EDIT control does not reliably auto-center its text
 // vertically when given a client rect taller than one line -- text just
@@ -48,8 +68,7 @@ int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USE
 // non-client area (WM_NCCALCSIZE), the simpler fix used here is to
 // give the control only the height text actually needs and center
 // *that* short control within its layout row -- no subclassing, no
-// WM_NCPAINT interaction with the WS_EX_CLIENTEDGE border to worry
-// about.
+// WM_NCPAINT interaction with the WS_BORDER border to worry about.
 int MeasureLineHeight(HWND hwnd, HFONT font) {
     HDC hdc = GetDC(hwnd);
     HGDIOBJ oldFont = SelectObject(hdc, font);
@@ -69,16 +88,7 @@ BOOL CALLBACK EnumPickerCandidatesProc(HWND hwnd, LPARAM lParam) {
 
 }  // namespace
 
-GroupPickerWindow::GroupPickerWindow(HINSTANCE instance) : instance_(instance) {
-    static bool commonControlsInitialized = false;
-    if (!commonControlsInitialized) {
-        INITCOMMONCONTROLSEX icc{};
-        icc.dwSize = sizeof(icc);
-        icc.dwICC = ICC_LISTVIEW_CLASSES;
-        InitCommonControlsEx(&icc);
-        commonControlsInitialized = true;
-    }
-
+GroupPickerWindow::GroupPickerWindow(HINSTANCE instance) : instance_(instance), list_(instance) {
     static bool classRegistered = false;
     if (!classRegistered) {
         WNDCLASSEXW windowClass{};
@@ -87,7 +97,15 @@ GroupPickerWindow::GroupPickerWindow(HINSTANCE instance) : instance_(instance) {
         windowClass.hInstance = instance_;
         windowClass.lpszClassName = kWindowClassName;
         windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-        windowClass.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_3DFACE + 1);
+        // No class-level hbrBackground -- WM_ERASEBKGND handles every
+        // case itself (an opaque fill when Mica isn't applied, or none
+        // at all when it is, see WM_ERASEBKGND's own comment), so
+        // DefWindowProcW's own default erase using this brush is never
+        // reached. A class brush here would still pre-fill the surface
+        // before that decision ever runs, though -- confirmed live as
+        // the actual cause of a flat, legacy-light-gray (COLOR_3DFACE
+        // isn't dark-mode-aware) margin visible behind Mica instead of
+        // the real backdrop.
         RegisterClassExW(&windowClass);
         classRegistered = true;
     }
@@ -118,7 +136,7 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
     switch (message) {
         case WM_CREATE:
             CreateControls(hwnd);
-            PopulateLists();
+            PopulateList();
             return 0;
 
         case WM_SIZE:
@@ -128,18 +146,6 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         case WM_COMMAND:
             if (HIWORD(wParam) == BN_CLICKED) {
                 switch (LOWORD(wParam)) {
-                    case kAddButtonId:
-                        MoveSelection(activeListView_, activeWindows_, groupWindows_);
-                        break;
-                    case kRemoveButtonId:
-                        MoveSelection(groupListView_, groupWindows_, activeWindows_);
-                        break;
-                    case kMoveUpButtonId:
-                        MoveSelectedInGroupList(-1);
-                        break;
-                    case kMoveDownButtonId:
-                        MoveSelectedInGroupList(1);
-                        break;
                     case kCreateButtonId:
                         Commit();
                         break;
@@ -153,29 +159,21 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             }
             return 0;
 
-        case WM_NOTIFY:
-            return HandleNotify(reinterpret_cast<NMHDR*>(lParam));
-
-        case WM_MOUSEMOVE:
-            if (dragging_) {
-                POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-                ClientToScreen(hwnd, &pt);
-                UpdateDrag(pt);
-            }
-            return 0;
-
-        case WM_LBUTTONUP:
-            if (dragging_) {
-                EndDrag();
-            }
-            return 0;
-
-        case WM_CAPTURECHANGED:
-            dragging_ = false;
-            dragItemIndex_ = -1;
-            return 0;
-
         case WM_ERASEBKGND: {
+            // Always an opaque themed fill, regardless of micaEnabled_.
+            // A transparent erase (to let a real Mica backdrop show
+            // through the margins) was tried first -- DwmSetWindowAttribute
+            // reports success (see ApplyDarkMode's own log line) but no
+            // translucent backdrop actually renders on this host, just a
+            // flat, undifferentiated light fill behind everything, which
+            // reads as a visual bug (a stray white margin around an
+            // otherwise fully dark-themed dialog) rather than a subtle
+            // backdrop. A correctly opaque, consistent dialog beats a
+            // broken-looking one chasing an effect that isn't visibly
+            // paying off in practice -- micaEnabled_ (and the
+            // DwmSetWindowAttribute calls themselves) are left in place
+            // in case a future Windows/driver combination renders it
+            // correctly, but nothing here currently depends on that.
             HDC hdc = reinterpret_cast<HDC>(wParam);
             RECT client{};
             GetClientRect(hwnd, &client);
@@ -195,9 +193,16 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         }
 
         case WM_CTLCOLORSTATIC: {
-            // The Name/list labels -- blend into the dialog's own
-            // background (no border/fill of their own) rather than
-            // keeping the light system STATIC background.
+            // The Name label always keeps its own small opaque
+            // background (never lets Mica show through here, unlike the
+            // bare margins WM_ERASEBKGND leaves transparent) -- Mica
+            // samples the real desktop wallpaper behind the window, so
+            // it can render lighter than this dialog's own dark text
+            // color would have contrast against; confirmed live as a
+            // real, human-reported readability problem with a
+            // NULL_BRUSH/transparent version of this that was tried
+            // first. A few px of non-bleeding label background is a
+            // better trade than unreadable text.
             HDC hdcStatic = reinterpret_cast<HDC>(wParam);
             const bool dark = IsDarkModeEnabled();
             SetTextColor(hdcStatic, dark ? RGB(0xE8, 0xE8, 0xE8) : GetSysColor(COLOR_WINDOWTEXT));
@@ -215,9 +220,9 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
 
         case WM_SETTINGCHANGE:
             // Re-applies everything (title bar, control theming, cached
-            // brushes, list-view colors) if the user flips Settings >
-            // Personalization > Colors while this dialog is already
-            // open, rather than only taking effect on next launch.
+            // brushes) if the user flips Settings > Personalization >
+            // Colors while this dialog is already open, rather than
+            // only taking effect on next launch.
             ApplyDarkMode();
             return DefWindowProcW(hwnd, message, wParam, lParam);
 
@@ -231,40 +236,7 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
     }
 }
 
-LRESULT GroupPickerWindow::HandleNotify(NMHDR* header) {
-    if (header == nullptr) {
-        return 0;
-    }
-    if (header->code == LVN_BEGINDRAG && header->hwndFrom == groupListView_) {
-        const auto* nmlv = reinterpret_cast<const NMLISTVIEW*>(header);
-        BeginDrag(nmlv->iItem);
-    } else if (header->code == LVN_ITEMACTIVATE) {
-        const auto* activate = reinterpret_cast<const NMITEMACTIVATE*>(header);
-        if (activate->iItem < 0) {
-            return 0;
-        }
-        const size_t index = static_cast<size_t>(activate->iItem);
-        if (header->hwndFrom == activeListView_ && index < activeWindows_.size()) {
-            MoveSingle(activeWindows_, groupWindows_, index);
-        } else if (header->hwndFrom == groupListView_ && index < groupWindows_.size()) {
-            MoveSingle(groupWindows_, activeWindows_, index);
-        }
-    } else if (header->code == LVN_ITEMCHANGED &&
-               (header->hwndFrom == groupListView_ || header->hwndFrom == activeListView_)) {
-        // Covers selection changes RefreshListView's own call to
-        // UpdateButtonStates doesn't -- the user clicking a different
-        // row directly, not via Add/Remove/Move.
-        const auto* changed = reinterpret_cast<const NMLISTVIEW*>(header);
-        if ((changed->uChanged & LVIF_STATE) != 0) {
-            UpdateButtonStates();
-        }
-    }
-    return 0;
-}
-
 void GroupPickerWindow::CreateControls(HWND hwnd) {
-    const UINT dpi = GetDpiForWindow(hwnd);
-
     // SS_CENTERIMAGE vertically centers a STATIC control's own text
     // within whatever rect it's given -- needed since the label spans
     // the full (taller-than-one-line) name row, to stay visually
@@ -272,71 +244,20 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
     // MeasureLineHeight's comment).
     nameLabel_ = CreateWindowExW(0, L"STATIC", L"Name:", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, 0, 0, 0,
                                   0, hwnd, nullptr, instance_, nullptr);
-    nameEdit_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", initialName_.c_str(),
-                                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0, hwnd, nullptr, instance_,
-                                 nullptr);
+    // WS_BORDER, not WS_EX_CLIENTEDGE -- a flat 1px border reads as
+    // Windows 11 (Settings/File Explorer's own text fields); the sunken
+    // 3D WS_EX_CLIENTEDGE look is the dated-looking style this pass
+    // exists to replace.
+    nameEdit_ = CreateWindowExW(0, L"EDIT", initialName_.c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
+                                 0, 0, 0, 0, hwnd, nullptr, instance_, nullptr);
 
-    // The list names are separate STATIC labels sitting above each list
-    // (outside its border), not the list view's own built-in column
-    // header -- LVS_NOCOLUMNHEADER hides that entirely, so there's no
-    // redundant/awkward header row baked into the control itself.
-    // "Open windows," not "Active windows" -- "active" reads as "the
-    // window with focus" to a user, not "currently open," which is
-    // what this list actually means.
-    activeListLabel_ = CreateWindowExW(0, L"STATIC", L"Open windows", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd,
-                                        nullptr, instance_, nullptr);
-    groupListLabel_ = CreateWindowExW(0, L"STATIC", L"Group", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, nullptr,
-                                       instance_, nullptr);
+    list_.Create(hwnd);
+    list_.SetOnChanged([this]() { UpdateButtonStates(); });
 
-    // LVS_SHOWSELALWAYS -- without it, a list view hides its selection
-    // highlight entirely as soon as it loses keyboard focus (standard
-    // Win32 default), which happens the instant Move Up/Down/Add/
-    // Remove is clicked -- looked exactly like the selection was lost,
-    // even though it wasn't.
-    activeListView_ = CreateWindowExW(
-        WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SHOWSELALWAYS, 0, 0, 0, 0, hwnd, nullptr,
-        instance_, nullptr);
-    ListView_SetExtendedListViewStyle(activeListView_, LVS_EX_FULLROWSELECT);
-
-    groupListView_ = CreateWindowExW(
-        WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
-        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SHOWSELALWAYS, 0, 0, 0, 0, hwnd, nullptr,
-        instance_, nullptr);
-    ListView_SetExtendedListViewStyle(groupListView_, LVS_EX_FULLROWSELECT);
-
-    LVCOLUMNW activeColumn{};
-    activeColumn.mask = LVCF_WIDTH;
-    activeColumn.cx = Scale(200, dpi);
-    ListView_InsertColumn(activeListView_, 0, &activeColumn);
-
-    LVCOLUMNW groupColumn{};
-    groupColumn.mask = LVCF_WIDTH;
-    groupColumn.cx = Scale(200, dpi);
-    ListView_InsertColumn(groupListView_, 0, &groupColumn);
-
-    // BS_OWNERDRAW on every button (drawn in WM_DRAWITEM/DrawOwnerButton)
-    // -- confirmed live via a screenshot spike that SetWindowTheme
-    // alone (which does correctly theme the list views' and edit
+    // BS_OWNERDRAW -- confirmed live via a screenshot spike that
+    // SetWindowTheme alone (which does correctly theme the edit
     // field's chrome) does not reliably darken BS_PUSHBUTTON on this
     // Windows build; owner-drawing is the only guaranteed-correct path.
-    addButton_ = CreateWindowExW(0, L"BUTTON", L"Add >", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
-                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(kAddButtonId)), instance_, nullptr);
-    removeButton_ = CreateWindowExW(0, L"BUTTON", L"< Remove", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0,
-                                     hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kRemoveButtonId)),
-                                     instance_, nullptr);
-
-    // Drag-to-reorder within the Group list works but isn't
-    // discoverable on its own -- these are the primary, always-visible
-    // way to reorder (act on whatever's currently selected in the
-    // Group list).
-    moveUpButton_ = CreateWindowExW(0, L"BUTTON", L"Move Up", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0,
-                                     hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kMoveUpButtonId)),
-                                     instance_, nullptr);
-    moveDownButton_ = CreateWindowExW(0, L"BUTTON", L"Move Down", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0,
-                                       0, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kMoveDownButtonId)),
-                                       instance_, nullptr);
-
     createButton_ = CreateWindowExW(0, L"BUTTON", editing_ ? L"Update Group" : L"Create Group",
                                      WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCreateButtonId)), instance_,
@@ -355,9 +276,7 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
     LayoutControls();
 
     HFONT dialogFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-    for (HWND control : {nameLabel_, nameEdit_, activeListLabel_, groupListLabel_, activeListView_, groupListView_,
-                          addButton_, removeButton_, moveUpButton_, moveDownButton_, createButton_,
-                          cancelButton_}) {
+    for (HWND control : {nameLabel_, nameEdit_, createButton_, cancelButton_}) {
         SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(dialogFont), TRUE);
     }
 
@@ -367,18 +286,30 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
 // Applies (or re-applies, on a live WM_SETTINGCHANGE) the current OS
 // theme to the whole dialog: the native title bar, cached background
 // brushes backing WM_ERASEBKGND/WM_CTLCOLORSTATIC/WM_CTLCOLOREDIT, and
-// every themeable child control (SetWindowTheme's "DarkMode_*" class
-// names -- undocumented, but the same ones Explorer's own dialogs use;
-// there's still no public API for this).
+// every themeable child control. The list child reads IsDarkModeEnabled()
+// fresh at its own paint time (see GroupPickerListWindow::Paint), so it
+// just needs a repaint here, not separate state pushed down to it.
 void GroupPickerWindow::ApplyDarkMode() {
     // window_ isn't assigned yet the first time this runs (called from
     // CreateControls, itself called from WM_CREATE, which fires before
-    // CreateWindowExW returns) -- activeListView_'s parent is the same
-    // real window handle, already valid at this point (same fallback
-    // LayoutControls already relies on for the same reason).
-    HWND dialogHwnd = window_ != nullptr ? window_ : GetParent(activeListView_);
+    // CreateWindowExW returns) -- nameEdit_'s parent is the same real
+    // window handle, already valid at this point.
+    HWND dialogHwnd = window_ != nullptr ? window_ : GetParent(nameEdit_);
     const bool dark = IsDarkModeEnabled();
     ApplyDarkTitleBar(dialogHwnd, dark);
+
+    // Rounded corners + Mica backdrop -- idempotent to re-apply on every
+    // call, since neither depends on dark/light state. DWMSBT_
+    // TRANSIENTWINDOW ("Mica Alt"), not DWMSBT_MAINWINDOW ("Mica") --
+    // Microsoft's own guidance reserves the latter for long-lived
+    // primary app windows; this dialog is explicitly short-lived (see
+    // this class's own header comment).
+    DWORD cornerPreference = DWMWCP_ROUND;
+    DwmSetWindowAttribute(dialogHwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &cornerPreference, sizeof(cornerPreference));
+    DWORD backdropType = DWMSBT_TRANSIENTWINDOW;
+    const HRESULT backdropResult =
+        DwmSetWindowAttribute(dialogHwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdropType, sizeof(backdropType));
+    micaEnabled_ = SUCCEEDED(backdropResult);
 
     if (backgroundBrush_ != nullptr) {
         DeleteObject(backgroundBrush_);
@@ -391,30 +322,17 @@ void GroupPickerWindow::ApplyDarkMode() {
 
     // Buttons are owner-drawn (DrawOwnerButton), not themed via
     // SetWindowTheme -- see their creation comment for why. Only the
-    // edit field needs it here, for its WS_EX_CLIENTEDGE sunken border.
+    // edit field needs it here, so its scrollbar/selection colors (not
+    // its border, which is now a plain WS_BORDER -- see its creation
+    // comment) follow dark mode too.
     if (nameEdit_ != nullptr) {
         SetWindowTheme(nameEdit_, dark ? L"DarkMode_Explorer" : nullptr, nullptr);
-    }
-    for (HWND listView : {activeListView_, groupListView_}) {
-        if (listView == nullptr) {
-            continue;
-        }
-        // "DarkMode_Explorer", not "DarkMode_ItemsView" -- confirmed
-        // live: ItemsView left the scrollbar track/thumb light even
-        // though the list's own background/text/selection colors were
-        // already correctly dark (those come from the ListView_Set*
-        // calls below, not the theme name). Explorer is the class that
-        // actually darkens a common control's scrollbar.
-        SetWindowTheme(listView, dark ? L"DarkMode_Explorer" : nullptr, nullptr);
-        ListView_SetBkColor(listView, dark ? RGB(0x20, 0x20, 0x20) : CLR_DEFAULT);
-        ListView_SetTextColor(listView, dark ? RGB(0xE8, 0xE8, 0xE8) : CLR_DEFAULT);
-        ListView_SetTextBkColor(listView, dark ? RGB(0x20, 0x20, 0x20) : CLR_DEFAULT);
     }
 
     // RDW_ALLCHILDREN, not a plain InvalidateRect -- invalidating just
     // the dialog itself doesn't propagate to child windows (each has
     // its own update region), which would leave the owner-drawn
-    // buttons stuck showing the old theme's colors after a live
+    // buttons/list stuck showing the old theme's colors after a live
     // WM_SETTINGCHANGE until something else happened to repaint them.
     RedrawWindow(dialogHwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE);
 }
@@ -432,23 +350,40 @@ void GroupPickerWindow::DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     const bool focused = (item.itemState & ODS_FOCUS) != 0;
     const bool isDefault = item.hwndItem == createButton_;
 
-    const COLORREF fill = dark ? (pressed ? RGB(0x3A, 0x3A, 0x3A) : RGB(0x2B, 0x2B, 0x2B))
-                                : (pressed ? RGB(0xD0, 0xD0, 0xD0) : RGB(0xE1, 0xE1, 0xE1));
-    const COLORREF border = isDefault ? (dark ? RGB(0x6B, 0xA5, 0xE8) : RGB(0x00, 0x5F, 0xB8))
-                                       : (dark ? RGB(0x50, 0x50, 0x50) : RGB(0xAD, 0xAD, 0xAD));
-    const COLORREF text = dark ? (disabled ? RGB(0x70, 0x70, 0x70) : RGB(0xE8, 0xE8, 0xE8))
-                                : (disabled ? RGB(0x9E, 0x9E, 0x9E) : RGB(0x00, 0x00, 0x00));
+    COLORREF fill;
+    COLORREF border;
+    COLORREF text;
+    if (isDefault) {
+        // Solid accent fill, matching Windows 11's own filled-accent
+        // primary-button style (e.g. Settings' "Save"/"Apply") -- not
+        // just an accent-colored border on an otherwise ordinary gray
+        // button, as before.
+        const COLORREF accent = GetAccentColor();
+        fill = pressed ? DarkenColor(accent, 0.85) : accent;
+        border = fill;
+        text = RGB(0xFF, 0xFF, 0xFF);
+    } else {
+        fill = dark ? (pressed ? RGB(0x3A, 0x3A, 0x3A) : RGB(0x2B, 0x2B, 0x2B))
+                    : (pressed ? RGB(0xD0, 0xD0, 0xD0) : RGB(0xE1, 0xE1, 0xE1));
+        border = dark ? RGB(0x50, 0x50, 0x50) : RGB(0xAD, 0xAD, 0xAD);
+        text = dark ? RGB(0xE8, 0xE8, 0xE8) : RGB(0x00, 0x00, 0x00);
+    }
+    if (disabled) {
+        text = dark ? RGB(0x70, 0x70, 0x70) : RGB(0x9E, 0x9E, 0x9E);
+    }
+
+    const UINT dpi = GetDpiForWindow(item.hwndItem);
+    const int cornerRadius = Scale(kButtonCornerRadius, dpi);
 
     HBRUSH fillBrush = CreateSolidBrush(fill);
-    FillRect(item.hDC, &item.rcItem, fillBrush);
-    DeleteObject(fillBrush);
-
     HPEN borderPen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ oldBrush = SelectObject(item.hDC, fillBrush);
     HGDIOBJ oldPen = SelectObject(item.hDC, borderPen);
-    HGDIOBJ oldBrush = SelectObject(item.hDC, GetStockObject(NULL_BRUSH));
-    Rectangle(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom);
+    RoundRect(item.hDC, item.rcItem.left, item.rcItem.top, item.rcItem.right, item.rcItem.bottom, cornerRadius,
+              cornerRadius);
     SelectObject(item.hDC, oldBrush);
     SelectObject(item.hDC, oldPen);
+    DeleteObject(fillBrush);
     DeleteObject(borderPen);
 
     wchar_t buttonText[128] = L"";
@@ -467,28 +402,22 @@ void GroupPickerWindow::DrawOwnerButton(const DRAWITEMSTRUCT& item) {
 }
 
 void GroupPickerWindow::LayoutControls() {
-    if (activeListView_ == nullptr) {
+    if (nameEdit_ == nullptr) {
         return;
     }
     // window_ isn't assigned yet the first time this runs (it's called
     // from WM_CREATE, which fires before CreateWindowExW returns) --
-    // activeListView_ is already a real child window by that point, so
-    // it's a safe DPI-query fallback.
-    const UINT dpi = GetDpiForWindow(window_ != nullptr ? window_ : activeListView_);
+    // nameEdit_ is already a real child window by that point, so it's a
+    // safe DPI-query fallback.
+    const UINT dpi = GetDpiForWindow(window_ != nullptr ? window_ : nameEdit_);
     RECT client{};
-    GetClientRect(GetParent(activeListView_), &client);
+    GetClientRect(GetParent(nameEdit_), &client);
 
     const int margin = Scale(kMargin, dpi);
     const int nameRowHeight = Scale(kNameRowHeight, dpi);
     const int nameLabelWidth = Scale(kNameLabelWidth, dpi);
-    const int listLabelHeight = Scale(kListLabelHeight, dpi);
-    const int listLabelGap = Scale(kListLabelGap, dpi);
     const int buttonHeight = Scale(kButtonHeight, dpi);
     const int buttonWidth = Scale(kButtonWidth, dpi);
-    const int midColumnWidth = Scale(kMidColumnWidth, dpi);
-    const int midButtonHeight = Scale(kMidButtonHeight, dpi);
-    const int midButtonGap = Scale(kMidButtonGap, dpi);
-    const int moveColumnWidth = Scale(kMoveColumnWidth, dpi);
 
     MoveWindow(nameLabel_, margin, margin, nameLabelWidth, nameRowHeight, TRUE);
 
@@ -505,213 +434,43 @@ void GroupPickerWindow::LayoutControls() {
                editHeight, TRUE);
 
     const int buttonsTop = client.bottom - margin - buttonHeight;
-    const int listsBottom = buttonsTop - margin;
-    const int listLabelsTop = margin + nameRowHeight + margin;
-    const int listsTop = listLabelsTop + listLabelHeight + listLabelGap;
-
-    const int listWidth =
-        (client.right - 3 * margin - midColumnWidth - moveColumnWidth - 2 * margin) / 2;
-    const int leftListLeft = margin;
-    const int leftListRight = leftListLeft + listWidth;
-    const int midLeft = leftListRight + margin;
-    const int midRight = midLeft + midColumnWidth;
-    const int rightListLeft = midRight + margin;
-    const int rightListRight = rightListLeft + listWidth;
-    const int moveColumnLeft = rightListRight + margin;
-
-    MoveWindow(activeListLabel_, leftListLeft, listLabelsTop, listWidth, listLabelHeight, TRUE);
-    MoveWindow(groupListLabel_, rightListLeft, listLabelsTop, rightListRight - rightListLeft, listLabelHeight,
-               TRUE);
-
-    MoveWindow(activeListView_, leftListLeft, listsTop, listWidth, listsBottom - listsTop, TRUE);
-    MoveWindow(groupListView_, rightListLeft, listsTop, rightListRight - rightListLeft, listsBottom - listsTop,
-               TRUE);
-
-    const int midCenterY = listsTop + (listsBottom - listsTop) / 2;
-    MoveWindow(addButton_, midLeft, midCenterY - midButtonHeight - midButtonGap, midColumnWidth, midButtonHeight,
-               TRUE);
-    MoveWindow(removeButton_, midLeft, midCenterY + midButtonGap, midColumnWidth, midButtonHeight, TRUE);
-
-    MoveWindow(moveUpButton_, moveColumnLeft, midCenterY - midButtonHeight - midButtonGap, moveColumnWidth,
-               midButtonHeight, TRUE);
-    MoveWindow(moveDownButton_, moveColumnLeft, midCenterY + midButtonGap, moveColumnWidth, midButtonHeight, TRUE);
+    const int listTop = margin + nameRowHeight + margin;
+    const int listBottom = buttonsTop - margin;
+    MoveWindow(list_.WindowHandle(), margin, listTop, client.right - 2 * margin, listBottom - listTop, TRUE);
 
     // Standard dialog pairing: Cancel at the far right, the primary
-    // action immediately to its left -- aligning Create Group to the
-    // Group list instead (tried previously) stopped making sense once
-    // the Move Up/Down column shifted where that list actually sits.
+    // action immediately to its left.
     MoveWindow(cancelButton_, client.right - margin - buttonWidth, buttonsTop, buttonWidth, buttonHeight, TRUE);
     MoveWindow(createButton_, client.right - 2 * margin - 2 * buttonWidth, buttonsTop, buttonWidth, buttonHeight,
                TRUE);
 }
 
-void GroupPickerWindow::PopulateLists() {
+void GroupPickerWindow::PopulateList() {
     std::vector<HWND> candidates;
     EnumWindows(EnumPickerCandidatesProc, reinterpret_cast<LPARAM>(&candidates));
 
-    // Existing group members are always kept in the Group list even if
-    // they'd normally be filtered out of "Open windows" (e.g.
-    // currently minimized) -- editing membership should never silently
-    // drop a member just because of a transient state at edit time.
-    groupWindows_.clear();
+    // Existing group members are always kept checked even if they'd
+    // normally be filtered out of `candidates` (e.g. currently
+    // minimized) -- editing membership should never silently drop a
+    // member just because of a transient state at edit time (see
+    // GroupPickerListWindow::SetWindows).
+    std::vector<HWND> validInitial;
     for (HWND hwnd : initialSelection_) {
         if (IsWindow(hwnd)) {
-            groupWindows_.push_back(hwnd);
+            validInitial.push_back(hwnd);
         }
     }
-
-    activeWindows_.clear();
-    for (HWND hwnd : candidates) {
-        if (std::find(groupWindows_.begin(), groupWindows_.end(), hwnd) == groupWindows_.end()) {
-            activeWindows_.push_back(hwnd);
-        }
-    }
-
-    RefreshListView(activeListView_, activeWindows_);
-    RefreshListView(groupListView_, groupWindows_);
+    list_.SetWindows(candidates, validInitial);
 }
 
-void GroupPickerWindow::RefreshListView(HWND listView, const std::vector<HWND>& windows) {
-    ListView_DeleteAllItems(listView);
-    for (size_t i = 0; i < windows.size(); ++i) {
-        wchar_t title[256] = L"";
-        GetWindowTextW(windows[i], title, static_cast<int>(sizeof(title) / sizeof(title[0])));
-        if (title[0] == L'\0') {
-            continue;
-        }
-        LVITEMW item{};
-        item.mask = LVIF_TEXT;
-        item.iItem = static_cast<int>(i);
-        item.pszText = title;
-        ListView_InsertItem(listView, &item);
-    }
-    ListView_SetColumnWidth(listView, 0, LVSCW_AUTOSIZE_USEHEADER);
-
-    // A refresh (Add/Remove/Move/double-click) always clears selection
-    // in whichever list it touched, unless something explicitly
-    // reselects afterward -- recompute every button's state rather than
-    // trusting whatever it was before.
-    UpdateButtonStates();
-}
-
-void GroupPickerWindow::MoveSelection(HWND fromListView, std::vector<HWND>& from, std::vector<HWND>& to) {
-    std::vector<int> selectedIndices;
-    int index = -1;
-    while ((index = ListView_GetNextItem(fromListView, index, LVNI_SELECTED)) != -1) {
-        selectedIndices.push_back(index);
-    }
-    if (selectedIndices.empty()) {
-        return;
-    }
-    std::sort(selectedIndices.begin(), selectedIndices.end());
-
-    // Erase in descending order so earlier removals don't shift indices
-    // still to be processed; collect into `moved` in that same
-    // descending order, then reverse once so the append preserves the
-    // original relative (ascending) order.
-    std::vector<HWND> moved;
-    for (auto it = selectedIndices.rbegin(); it != selectedIndices.rend(); ++it) {
-        const size_t idx = static_cast<size_t>(*it);
-        if (idx < from.size()) {
-            moved.push_back(from[idx]);
-            from.erase(from.begin() + static_cast<std::ptrdiff_t>(idx));
-        }
-    }
-    std::reverse(moved.begin(), moved.end());
-    to.insert(to.end(), moved.begin(), moved.end());
-
-    RefreshListView(activeListView_, activeWindows_);
-    RefreshListView(groupListView_, groupWindows_);
-}
-
-void GroupPickerWindow::MoveSingle(std::vector<HWND>& from, std::vector<HWND>& to, size_t index) {
-    to.push_back(from[index]);
-    from.erase(from.begin() + static_cast<std::ptrdiff_t>(index));
-    RefreshListView(activeListView_, activeWindows_);
-    RefreshListView(groupListView_, groupWindows_);
-}
-
-// Swaps the Group list's currently-selected row with its neighbor
-// (`direction` -1 = up, +1 = down) -- the discoverable alternative to
-// drag-to-reorder (which still works, see LVN_BEGINDRAG in
-// HandleNotify). No-op if nothing is selected or the move would go out
-// of range.
-void GroupPickerWindow::MoveSelectedInGroupList(int direction) {
-    const int index = ListView_GetNextItem(groupListView_, -1, LVNI_SELECTED);
-    if (index < 0) {
-        return;
-    }
-    const int newIndex = index + direction;
-    if (newIndex < 0 || static_cast<size_t>(newIndex) >= groupWindows_.size()) {
-        return;
-    }
-    std::swap(groupWindows_[static_cast<size_t>(index)], groupWindows_[static_cast<size_t>(newIndex)]);
-    RefreshListView(groupListView_, groupWindows_);
-    ListView_SetItemState(groupListView_, newIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-    ListView_EnsureVisible(groupListView_, newIndex, FALSE);
-}
-
-// Every button whose usefulness depends on current selection/list
-// state, recomputed together: Add/Remove need something selected in
-// the list they'd move *from*; Move Up/Down additionally need
-// somewhere left to go; Create Group needs at least one member. All
-// disabled otherwise so each button's own state communicates whether
-// clicking it would do anything, rather than it being a silent no-op.
+// Create Group needs at least one checked window; disabled otherwise so
+// the button's own state communicates whether clicking it would do
+// anything, rather than it being a silent no-op.
 void GroupPickerWindow::UpdateButtonStates() {
-    if (activeListView_ == nullptr || groupListView_ == nullptr) {
+    if (createButton_ == nullptr) {
         return;
     }
-    EnableWindow(addButton_, ListView_GetSelectedCount(activeListView_) > 0);
-    EnableWindow(removeButton_, ListView_GetSelectedCount(groupListView_) > 0);
-
-    const int index = ListView_GetNextItem(groupListView_, -1, LVNI_SELECTED);
-    const bool hasSelection = index >= 0;
-    EnableWindow(moveUpButton_, hasSelection && index > 0);
-    EnableWindow(moveDownButton_,
-                 hasSelection && static_cast<size_t>(index) + 1 < groupWindows_.size());
-
-    EnableWindow(createButton_, !groupWindows_.empty());
-}
-
-void GroupPickerWindow::BeginDrag(int itemIndex) {
-    if (itemIndex < 0 || static_cast<size_t>(itemIndex) >= groupWindows_.size()) {
-        return;
-    }
-    dragging_ = true;
-    dragItemIndex_ = itemIndex;
-    SetCapture(window_);
-}
-
-void GroupPickerWindow::UpdateDrag(POINT screenPt) {
-    POINT clientPt = screenPt;
-    ScreenToClient(groupListView_, &clientPt);
-    RECT listRect{};
-    GetClientRect(groupListView_, &listRect);
-    if (!PtInRect(&listRect, clientPt)) {
-        return;  // outside the Group list -- leave the dragged row where it is
-    }
-
-    LVHITTESTINFO hitTest{};
-    hitTest.pt = clientPt;
-    const int hitIndex = ListView_HitTest(groupListView_, &hitTest);
-    if (hitIndex < 0 || hitIndex == dragItemIndex_ || static_cast<size_t>(hitIndex) >= groupWindows_.size()) {
-        return;
-    }
-
-    // Live reorder on crossing -- same pattern as GroupChromeWindow's
-    // own tab drag-reorder, not a separate insert-mark line.
-    const HWND moved = groupWindows_[static_cast<size_t>(dragItemIndex_)];
-    groupWindows_.erase(groupWindows_.begin() + dragItemIndex_);
-    groupWindows_.insert(groupWindows_.begin() + hitIndex, moved);
-    dragItemIndex_ = hitIndex;
-    RefreshListView(groupListView_, groupWindows_);
-    ListView_SetItemState(groupListView_, hitIndex, LVIS_SELECTED | LVIS_FOCUSED, LVIS_SELECTED | LVIS_FOCUSED);
-}
-
-void GroupPickerWindow::EndDrag() {
-    ReleaseCapture();
-    dragging_ = false;
-    dragItemIndex_ = -1;
+    EnableWindow(createButton_, !list_.CheckedWindows().empty());
 }
 
 void GroupPickerWindow::Commit() {
@@ -721,9 +480,9 @@ void GroupPickerWindow::Commit() {
     if (name.empty()) {
         name = editing_ ? initialName_ : L"New Group";  // never confirm an empty name
     }
-    LogDebug(std::format(L"[Polish] GroupPicker: confirmed with {} window(s), name=\"{}\"", groupWindows_.size(),
-                          name));
-    result_ = GroupPickerResult{groupWindows_, name};
+    const std::vector<HWND> windows = list_.CheckedWindows();
+    LogDebug(std::format(L"[Polish] GroupPicker: confirmed with {} window(s), name=\"{}\"", windows.size(), name));
+    result_ = GroupPickerResult{windows, name};
     done_ = true;
 }
 
@@ -732,8 +491,6 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
     initialSelection_ = initialSelection;
     initialName_ = initialName;
     editing_ = editing;
-    dragging_ = false;
-    dragItemIndex_ = -1;
 
     const UINT dpi = GetDpiForSystem();
     const int width = Scale(kWindowWidth, dpi);
@@ -782,16 +539,13 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
         DispatchMessageW(&msg);
     }
 
+    // DestroyWindow recursively destroys every child, including list_'s
+    // own window -- GroupPickerListWindow's WM_NCDESTROY handler clears
+    // its own window_ back to nullptr as part of that, so list_ is
+    // already safely reset by the time this returns (see its own
+    // comment); nothing extra needed here for it.
     DestroyWindow(window_);
     window_ = nullptr;
-    activeListLabel_ = nullptr;
-    groupListLabel_ = nullptr;
-    activeListView_ = nullptr;
-    groupListView_ = nullptr;
-    addButton_ = nullptr;
-    removeButton_ = nullptr;
-    moveUpButton_ = nullptr;
-    moveDownButton_ = nullptr;
     nameLabel_ = nullptr;
     nameEdit_ = nullptr;
     createButton_ = nullptr;
