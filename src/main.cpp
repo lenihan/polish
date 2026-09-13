@@ -755,7 +755,7 @@ void EnsureGroupActiveTileHighlight() {
 // whenever there's nothing to show.
 void UpdateGroupActiveTileHighlight(polish::GroupId id) {
     polish::GroupState* group = g_groupManager.FindGroup(id);
-    if (group == nullptr || group->Mode() != polish::GroupMode::Tile || group->MemberCount() <= 1) {
+    if (group == nullptr || !polish::IsTiledMode(group->Mode()) || group->MemberCount() <= 1) {
         // A single-member Tile "grid" already fills the whole content
         // area -- nothing to distinguish it from, so no point ringing
         // it.
@@ -1956,33 +1956,68 @@ void ReorderGroupTab(polish::GroupId id, size_t fromIndex, size_t toIndex) {
         std::format(L"[Polish] Group: tab reordered {} -> {} for group id={}", fromIndex, toIndex, id));
 }
 
-// Called from GroupChromeWindow's "Switch to Tab"/"Switch to Tile"
-// context-menu item: flips the group's mode, updates the chrome's own
-// rendering to match, and reflows -- ApplyLayout already branches on
-// GroupState::Mode(), so switching modes needs no special-casing beyond
-// that single flag flip plus a reflow. v1 has no per-mode saved
-// geometry (a tiled member just gets repositioned into the shared tab
-// rect if switching to Tab, and vice versa) -- acceptable for v1, not
-// worth the complexity of remembering "where it would have been."
-void ToggleGroupMode(polish::GroupId id) {
+// Names a mode for the debug log below.
+const wchar_t* ModeName(polish::GroupMode mode) {
+    switch (mode) {
+        case polish::GroupMode::Tab:
+            return L"Tab";
+        case polish::GroupMode::Tile:
+            return L"Tile";
+        case polish::GroupMode::Stack:
+            return L"Stack";
+    }
+    return L"Tab";
+}
+
+// Applies a new mode to group `id`: updates GroupState, mirrors it into
+// the chrome's own rendering, and reflows -- ApplyLayout already
+// branches on GroupState::Mode(), so switching modes needs no special-
+// casing beyond that single flag flip plus a reflow. v1 has no per-mode
+// saved geometry (a tiled member just gets repositioned into the shared
+// tab rect if switching to Tab, and vice versa) -- acceptable for v1,
+// not worth the complexity of remembering "where it would have been."
+// Shared by ToggleGroupMode (title-bar button, cycles) and
+// GroupChromeWindow's context-menu mode selection (picks directly).
+void SetGroupMode(polish::GroupId id, polish::GroupMode mode) {
     polish::GroupState* group = g_groupManager.FindGroup(id);
     auto chromeIt = g_groupChromeWindows.find(id);
     if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
         return;
     }
-    const polish::GroupMode newMode =
-        (group->Mode() == polish::GroupMode::Tab) ? polish::GroupMode::Tile : polish::GroupMode::Tab;
-    group->SetMode(newMode);
-    chromeIt->second->SetMode(newMode);
+    group->SetMode(mode);
+    chromeIt->second->SetMode(mode);
     ReflowGroupTo(id);
-    polish::LogDebug(std::format(L"[Polish] Group: mode switched to {} for group id={}",
-                                  newMode == polish::GroupMode::Tile ? L"Tile" : L"Tab", id));
+    polish::LogDebug(std::format(L"[Polish] Group: mode switched to {} for group id={}", ModeName(mode), id));
 }
 
-// Called from GroupChromeWindow's title-bar tile-maximize button
-// (only ever clickable in Tile mode with 2+ members -- the button
-// itself isn't shown otherwise, see TileMaximizeButtonVisible). Same
-// flip-state-then-reflow shape as ToggleGroupMode.
+// Called from GroupChromeWindow's title-bar mode-toggle button: cycles
+// Tab -> Tile -> Stack -> Tab (see the chrome's own ModeToggle tooltip,
+// which names whichever of these three is next).
+void ToggleGroupMode(polish::GroupId id) {
+    const polish::GroupState* group = g_groupManager.FindGroup(id);
+    if (group == nullptr) {
+        return;
+    }
+    polish::GroupMode newMode = polish::GroupMode::Tab;
+    switch (group->Mode()) {
+        case polish::GroupMode::Tab:
+            newMode = polish::GroupMode::Tile;
+            break;
+        case polish::GroupMode::Tile:
+            newMode = polish::GroupMode::Stack;
+            break;
+        case polish::GroupMode::Stack:
+            newMode = polish::GroupMode::Tab;
+            break;
+    }
+    SetGroupMode(id, newMode);
+}
+
+// Called from GroupChromeWindow's title-bar tile-maximize button (only
+// ever clickable in a tiled mode -- Tile or Stack -- with 2+ members --
+// the button itself isn't shown otherwise, see
+// TileMaximizeButtonVisible). Same flip-state-then-reflow shape as
+// ToggleGroupMode.
 void ToggleTileMaximize(polish::GroupId id) {
     polish::GroupState* group = g_groupManager.FindGroup(id);
     auto chromeIt = g_groupChromeWindows.find(id);
@@ -2157,6 +2192,7 @@ void TriggerNewGroup(HWND owner) {
     chrome->SetOnTabClicked([id](size_t index) { ActivateGroupTab(id, index); });
     chrome->SetOnTabReordered([id](size_t from, size_t to) { ReorderGroupTab(id, from, to); });
     chrome->SetOnModeToggleRequested([id]() { ToggleGroupMode(id); });
+    chrome->SetOnModeSelected([id](polish::GroupMode mode) { SetGroupMode(id, mode); });
     chrome->SetOnTileMaximizeToggleRequested([id]() { ToggleTileMaximize(id); });
     chrome->SetOnAlignmentToggleRequested([id]() { ToggleGroupAlignment(id); });
     chrome->SetOnEditWindowsRequested([id]() { EditGroupWindows(id); });

@@ -38,27 +38,30 @@ constexpr int kTabStripLeftPadding = 8;  // logical px, before the first tab
 // join to the connector band (DrawConcaveFillet) reaches
 // kTabCornerRadius px to each side of it. A gap narrower than that --
 // confirmed real, a 4px gap against an 8px radius -- let the fillet
-// bleed into the *neighboring* tab's own bottom corner.
+// bleed into the *neighboring* tab's own bottom corner. Applies on both
+// axes: Vertical's fillets reach the same distance above and below the
+// active tab, into the same gap, so the one constant covers both.
 constexpr int kTabGap = 8;               // logical px, between adjacent tabs
 constexpr int kTabCornerRadius = 8;      // logical px -- tabs' rounded top corners
 
-// Tab mode only: a permanent full-width band between the tab strip and
+// Tab mode only: a permanent full-length band between the tab strip and
 // the member's own content, colored to match the active tab -- File
 // Explorer's own command-bar area does the same thing. Real reserved
 // space (subtracted from the content rect, not just painted over it),
 // so it stays visible regardless of what the member itself renders.
-constexpr int kTabConnectorHeight = 10;  // logical px
+// Height in Horizontal (a band under the top row), width in Vertical (a
+// column right of the left-edge strip) -- same role on either axis, see
+// PaintTabStrip's two branches.
+constexpr int kTabConnectorThickness = 10;  // logical px
 
 // Vertical alignment only: the tab strip becomes a left-edge column of
 // this fixed width instead of a top row auto-sized to each label (a
 // vertical tab list conventionally uses a fixed column, e.g. Firefox's
 // own vertical tabs -- simpler than trying to auto-size a column's
-// width to whichever label is longest). No connector-band equivalent
-// in this orientation (see PaintTabStrip's Vertical branch) -- content
-// starts immediately to the column's right.
+// width to whichever label is longest).
 constexpr int kTabStripWidth = 200;  // logical px
 
-// Tile mode: the draggable resize splitters between tiles. Real space
+// Tile/Stack: the draggable resize splitters between tiles. Real space
 // is reserved for these in GroupManager's own grid math (members never
 // overlap them) -- kSplitterWidth is that reserved width, and also the
 // rendered bar's width once hovered/dragged. kSplitterRestWidth is the
@@ -119,37 +122,44 @@ constexpr int kTitleBarSeparatorInset = 8;  // logical px
 
 // Local to this window's own context menu -- TrackPopupMenu's returned
 // command isn't routed through WM_COMMAND, so these don't need to be
-// unique app-wide.
-constexpr UINT kContextMenuSwitchMode = 1;
-constexpr UINT kContextMenuEditWindows = 2;
+// unique app-wide. The three mode ids are contiguous (kContextMenuModeTab
+// first) so CheckMenuRadioItem can address them as one radio group by
+// range.
+constexpr UINT kContextMenuModeTab = 1;
+constexpr UINT kContextMenuModeTile = 2;
+constexpr UINT kContextMenuModeStack = 3;
+constexpr UINT kContextMenuEditWindows = 4;
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
 // Draws the concave quarter-circle join where a narrower element (the
-// active tab) meets a wider surface below it (the full-width connector
-// band) -- the exact transition Windows 11 File Explorer uses between
-// its active tab and its command bar, rather than a sharp 90-degree
-// corner. `cornerX/cornerY` is the outer point where the tab's side
-// meets the band's top edge; `leftSide` selects the tab's bottom-left
-// vs. bottom-right corner (the two are mirror images of each other).
+// active tab) meets a wider surface beside it (the full-length connector
+// band/column) -- the exact transition Windows 11 File Explorer uses
+// between its active tab and its command bar, rather than a sharp
+// 90-degree corner. Axis-agnostic: `square` is the radius x radius block
+// adjacent to the corner where the tab's edge meets the connector's edge
+// (one of the tab's four corners, whichever one this call is bridging);
+// `arcCenter` is that square's own corner diagonally opposite the
+// meeting corner -- the quarter circle carved out in `outerColor` is
+// centered there. Horizontal's two calls (tab bottom-left/bottom-right
+// meeting the band below) and Vertical's two calls (tab top-right/
+// bottom-right meeting the column to its right) are just different
+// square/arcCenter pairs into the same shared logic.
 //
-// Method: near cornerX/cornerY, everything is `innerColor` (continuing
-// both the tab's side and the band's top edge as one shape); a quarter
-// circle of radius `radius`, centered on the *outer* far corner of that
-// square, is then carved out in `outerColor` -- leaving a concave arc
-// that curves from the tab's straight side into the band's straight top
-// edge instead of meeting at a hard corner.
-void DrawConcaveFillet(HDC hdc, int cornerX, int cornerY, int radius, COLORREF innerColor, COLORREF outerColor,
-                       bool leftSide) {
-    const RECT square = leftSide ? RECT{cornerX - radius, cornerY - radius, cornerX, cornerY}
-                                  : RECT{cornerX, cornerY - radius, cornerX + radius, cornerY};
+// Method: `square` starts out entirely `innerColor` (continuing both the
+// tab's straight edge and the connector's own straight edge as one
+// shape); a quarter circle of radius `radius`, centered on `arcCenter`,
+// is then carved out of it in `outerColor` -- leaving a concave arc that
+// curves from the tab's edge into the connector's edge instead of
+// meeting at a hard corner.
+void DrawConcaveFillet(HDC hdc, const RECT& square, POINT arcCenter, COLORREF innerColor, COLORREF outerColor) {
     HBRUSH innerBrush = CreateSolidBrush(innerColor);
     FillRect(hdc, &square, innerBrush);
     DeleteObject(innerBrush);
 
-    const int farX = leftSide ? square.left : square.right;
-    const int farY = square.top;
-    HRGN circleRgn = CreateEllipticRgn(farX - radius, farY - radius, farX + radius, farY + radius);
+    const int radius = square.right - square.left;
+    HRGN circleRgn =
+        CreateEllipticRgn(arcCenter.x - radius, arcCenter.y - radius, arcCenter.x + radius, arcCenter.y + radius);
     HRGN squareRgn = CreateRectRgn(square.left, square.top, square.right, square.bottom);
     CombineRgn(squareRgn, squareRgn, circleRgn, RGN_AND);
     HBRUSH outerBrush = CreateSolidBrush(outerColor);
@@ -450,7 +460,7 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             // default handling, so only intercept the plain client-area
             // case and only when a splitter is actually under the
             // cursor.
-            if (mode_ == GroupMode::Tile && LOWORD(lParam) == HTCLIENT) {
+            if (IsTiledMode(mode_) && LOWORD(lParam) == HTCLIENT) {
                 POINT pt;
                 GetCursorPos(&pt);
                 ScreenToClient(hwnd, &pt);
@@ -569,7 +579,7 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                     return 0;
                 }
             }
-            if (mode_ == GroupMode::Tile) {
+            if (IsTiledMode(mode_)) {
                 if (const auto hit = HitTestSplitter(pt)) {
                     draggingSplitter_ = *hit;
                     SetCapture(hwnd);
@@ -646,8 +656,8 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                     UpdateTooltip();
                 }
             }
-            if (mode_ == GroupMode::Tile) {
-                // Splitter hover highlight -- Tile mode has no tabs, so
+            if (IsTiledMode(mode_)) {
+                // Splitter hover highlight -- Tile/Stack has no tabs, so
                 // this stands in for (doesn't compete with) the tab
                 // hover-preview tracking below, which only ever applies
                 // in Tab mode anyway (ComputeTabRects is always empty
@@ -778,7 +788,7 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             return 0;
 
         case WM_LBUTTONDBLCLK: {
-            if (mode_ == GroupMode::Tile) {
+            if (IsTiledMode(mode_)) {
                 const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
                 auto hit = HitTestSplitter(pt);
                 if (hit.has_value() && onTileSplitterDoubleClicked_) {
@@ -909,8 +919,8 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
 
 std::vector<RECT> GroupChromeWindow::ComputeTabRects(const RECT& clientRect) const {
     std::vector<RECT> rects;
-    if (memberTitles_.empty() || mode_ == GroupMode::Tile) {
-        return rects;  // Tile mode has no clickable tabs -- see Show()'s comment
+    if (memberTitles_.empty() || IsTiledMode(mode_)) {
+        return rects;  // Tile/Stack has no clickable tabs -- see Show()'s comment
     }
     const UINT dpi = GetDpiForWindow(window_);
 
@@ -925,7 +935,7 @@ std::vector<RECT> GroupChromeWindow::ComputeTabRects(const RECT& clientRect) con
         // kTabStripHeight doing double duty as each tab's fixed row
         // height here instead of the strip's own height).
         const int stripLeft = clientRect.left;
-        const int stripWidth = Scale(kTabStripWidth, dpi);
+        const int stripWidth = TabColumnWidth(dpi);
         const int rowHeight = Scale(kTabStripHeight, dpi);
         const int topPadding = Scale(kTabStripLeftPadding, dpi);
         const int rowGap = Scale(kTabGap, dpi);
@@ -998,8 +1008,8 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     DeleteObject(titleBarBrush);
     PaintTitleBar(hdc, clientRect);
 
-    if (mode_ == GroupMode::Tile) {
-        // No tab strip in Tile mode -- there are no tabs to render
+    if (IsTiledMode(mode_)) {
+        // No tab strip in Tile/Stack -- there are no tabs to render
         // (every member is simultaneously visible instead, positioned by
         // GroupManager's grid layout). Content fills everything below
         // the title bar band.
@@ -1053,21 +1063,35 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     }
 
     const int tabHeight = Scale(kTabStripHeight, dpi);
+    const int tabColumnWidth = TabColumnWidth(dpi);        // 0 unless Vertical
     const int tabStripLeftWidth = TabStripLeftWidth(dpi);  // 0 unless Vertical
 
     if (alignment_ == GroupAlignment::Vertical) {
         // Left-column counterpart of the horizontal strip's own base
         // fill below -- same "leftover space reads as more inactive
         // tab, not a visually distinct empty band" reasoning, along the
-        // column instead of the row. No connector-band equivalent here
-        // (see kTabStripWidth's own comment) -- content starts
-        // immediately to the column's right, so there's no separate
-        // notch-cover strip to paint.
-        RECT columnRect{clientRect.left, clientRect.top + titleBarHeight, clientRect.left + tabStripLeftWidth,
+        // column instead of the row. Active/hover tabs draw their own
+        // fill on top, same as the horizontal strip.
+        RECT columnRect{clientRect.left, clientRect.top + titleBarHeight, clientRect.left + tabColumnWidth,
                          clientRect.bottom};
         HBRUSH columnBrush = CreateSolidBrush(kInactiveTabColor);
         FillRect(hdc, &columnRect, columnBrush);
         DeleteObject(columnBrush);
+
+        // Vertical counterpart of the horizontal connector band below --
+        // a permanent full-height column, colored to match the active
+        // tab, between the tab column and the member's own content (see
+        // kTabConnectorThickness's comment). Straight edges top and
+        // bottom for the same reason the horizontal band's are straight
+        // left and right -- only the tab-to-column join itself
+        // (DrawConcaveFillet, below) needs a curve.
+        if (mode_ == GroupMode::Tab) {
+            RECT connectorRect{clientRect.left + tabColumnWidth, clientRect.top + titleBarHeight, clientRect.left + tabStripLeftWidth,
+                                clientRect.bottom};
+            HBRUSH connectorBrush = CreateSolidBrush(kActiveTabColor);
+            FillRect(hdc, &connectorRect, connectorBrush);
+            DeleteObject(connectorBrush);
+        }
     } else {
         // The strip's own base fill is the inactive-tab color, not a
         // separate "strip background" color -- so the left padding
@@ -1084,7 +1108,7 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
         // Tab mode only: a permanent full-width band, colored to match
         // the active tab, between the strip and the member's own
         // content -- File Explorer's own command-bar area does the
-        // same thing (see kTabConnectorHeight's comment). Straight
+        // same thing (see kTabConnectorThickness's comment). Straight
         // edges all the way to the window's own left/right edges --
         // rounding those corners (tried first) left an unpainted notch
         // outside the round arc but inside the clipped rect, showing
@@ -1093,7 +1117,7 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
         // join itself (DrawConcaveFillet, below) needs a curve.
         if (mode_ == GroupMode::Tab) {
             RECT bandRect{clientRect.left, stripRect.bottom, clientRect.right,
-                           stripRect.bottom + Scale(kTabConnectorHeight, dpi)};
+                           stripRect.bottom + Scale(kTabConnectorThickness, dpi)};
             HBRUSH bandBrush = CreateSolidBrush(kActiveTabColor);
             FillRect(hdc, &bandRect, bandBrush);
             DeleteObject(bandBrush);
@@ -1137,7 +1161,7 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
             HGDIOBJ oldBrush = SelectObject(hdc, tabBrush);
             HPEN tabPen = active ? CreatePen(PS_SOLID, 1, kActiveBorderColor) : CreatePen(PS_NULL, 0, 0);
             HGDIOBJ oldPen = SelectObject(hdc, tabPen);
-            // Rounded top corners only (Horizontal) / rounded right
+            // Rounded top corners only (Horizontal) / rounded left
             // corners only (Vertical): RoundRect rounds all four
             // corners of whatever rect it's given, so the *other* two
             // corners are pushed outside the visible tab before
@@ -1147,15 +1171,17 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
             // the clip, a non-active tab's fill color -- unlike the
             // active tab's, which matches the content area exactly --
             // would visibly bleed a sliver into the content area
-            // alongside it. Vertical rounds the *right* edge (where the
-            // tab borders content, the side it visually "grows toward")
-            // and leaves the left edge -- flush against the window's
-            // own border -- square, the same relationship Horizontal's
-            // top-rounded/bottom-square tabs have to the title bar
-            // above them.
+            // alongside it. Vertical rounds the *left* edge -- flush
+            // against the window's own border -- and leaves the right
+            // edge (where the tab borders the connector column) square
+            // and unbordered, the same relationship Horizontal's
+            // top-rounded/bottom-square tabs have to the connector band
+            // below them: the content-facing edge is always the square,
+            // pen-free one, so the active tab merges into the content
+            // rather than reading as a bordered pill beside it.
             IntersectClipRect(hdc, tabRect.left, tabRect.top, tabRect.right, tabRect.bottom);
             if (alignment_ == GroupAlignment::Vertical) {
-                RoundRect(hdc, tabRect.left - cornerRadius, tabRect.top, tabRect.right, tabRect.bottom, cornerRadius,
+                RoundRect(hdc, tabRect.left, tabRect.top, tabRect.right + cornerRadius, tabRect.bottom, cornerRadius,
                           cornerRadius);
             } else {
                 RoundRect(hdc, tabRect.left, tabRect.top, tabRect.right, tabRect.bottom + cornerRadius, cornerRadius,
@@ -1170,23 +1196,38 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
             }
         }
 
-        if (active && alignment_ != GroupAlignment::Vertical) {
-            // Bridges the active tab into the connector band below it
-            // (painted earlier, above) with the same concave join File
-            // Explorer uses, instead of the sharp corner a plain
-            // rectangle-meets-rectangle join would leave. Also covers
-            // the active tab's own border-pen line at that seam (drawn
-            // above, clipped exactly to tabRect.bottom). Horizontal
-            // only -- Vertical has no connector band to bridge into
-            // (see kTabStripWidth's own comment); its active tab reads
-            // as active purely via the same background-contrast the
-            // fillet is layered *on top of* here, a known, accepted
-            // simplification for v1's vertical tabs rather than full
-            // visual parity with Horizontal's separately-tuned polish.
-            DrawConcaveFillet(hdc, tabRect.left, tabRect.bottom, cornerRadius, kActiveTabColor, kInactiveTabColor,
-                               /*leftSide=*/true);
-            DrawConcaveFillet(hdc, tabRect.right, tabRect.bottom, cornerRadius, kActiveTabColor, kInactiveTabColor,
-                               /*leftSide=*/false);
+        if (active) {
+            // Bridges the active tab into the connector band/column
+            // beside it (painted earlier, above) with the same concave
+            // join File Explorer uses, instead of the sharp corner a
+            // plain rectangle-meets-rectangle join would leave. Also
+            // covers the active tab's own border-pen line at that seam
+            // (drawn above, clipped exactly to the content-facing edge).
+            // Horizontal bridges the tab's bottom-left/bottom-right
+            // corners into the band below; Vertical is the same idea
+            // rotated 90 degrees -- it bridges the tab's top-right/
+            // bottom-right corners into the column to its right (the
+            // mirror image, since Vertical's content-facing edge is the
+            // right one, not the bottom one).
+            if (alignment_ == GroupAlignment::Vertical) {
+                const RECT topSquare{tabRect.right - cornerRadius, tabRect.top - cornerRadius, tabRect.right,
+                                     tabRect.top};
+                DrawConcaveFillet(hdc, topSquare, POINT{topSquare.left, topSquare.top}, kActiveTabColor,
+                                   kInactiveTabColor);
+                const RECT bottomSquare{tabRect.right - cornerRadius, tabRect.bottom, tabRect.right,
+                                        tabRect.bottom + cornerRadius};
+                DrawConcaveFillet(hdc, bottomSquare, POINT{bottomSquare.left, bottomSquare.bottom}, kActiveTabColor,
+                                   kInactiveTabColor);
+            } else {
+                const RECT leftSquare{tabRect.left - cornerRadius, tabRect.bottom - cornerRadius, tabRect.left,
+                                      tabRect.bottom};
+                DrawConcaveFillet(hdc, leftSquare, POINT{leftSquare.left, leftSquare.top}, kActiveTabColor,
+                                   kInactiveTabColor);
+                const RECT rightSquare{tabRect.right, tabRect.bottom - cornerRadius, tabRect.right + cornerRadius,
+                                       tabRect.bottom};
+                DrawConcaveFillet(hdc, rightSquare, POINT{rightSquare.right, rightSquare.top}, kActiveTabColor,
+                                   kInactiveTabColor);
+            }
         }
 
         RECT textRect = tabRect;
@@ -1208,18 +1249,18 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
 }
 
 int GroupChromeWindow::HeaderHeight(UINT dpi) const {
-    // The title bar band is reserved in both modes -- it's now the only
+    // The title bar band is reserved in every mode -- it's now the only
     // place the group's name and window controls are shown at all (see
-    // TitleBarHeight's own comment). Tile mode has no tab strip beyond
+    // TitleBarHeight's own comment). Tile/Stack have no tab strip beyond
     // that (nothing to click, every member is simultaneously visible).
     // Vertical alignment's tab strip also adds nothing *here* -- it
     // reserves a left column instead (see TabStripLeftWidth), not extra
-    // top height, so this is the same TitleBarHeight-only case as Tile
-    // mode.
+    // top height, so this is the same TitleBarHeight-only case as
+    // Tile/Stack.
     if (mode_ != GroupMode::Tab || alignment_ == GroupAlignment::Vertical) {
         return TitleBarHeight(dpi);
     }
-    return TitleBarHeight(dpi) + Scale(kTabStripHeight, dpi) + Scale(kTabConnectorHeight, dpi);
+    return TitleBarHeight(dpi) + Scale(kTabStripHeight, dpi) + Scale(kTabConnectorThickness, dpi);
 }
 
 int GroupChromeWindow::TitleBarHeight(UINT dpi) const { return Scale(kTitleBarHeight, dpi); }
@@ -1262,12 +1303,12 @@ RECT GroupChromeWindow::ModeToggleButtonRect(const RECT& clientRect, UINT dpi) c
 bool GroupChromeWindow::TileMaximizeButtonVisible() const {
     // A single tile already fills the whole content area on its own --
     // "maximized" wouldn't mean anything different from the normal
-    // state, so there's nothing for this button to do outside Tile
-    // mode with 2+ members. Mirrors GroupState's own
+    // state, so there's nothing for this button to do outside a tiled
+    // mode (Tile or Stack) with 2+ members. Mirrors GroupState's own
     // SetTileMaximized-reset condition (see its comment) so the button
     // is never shown in a state IsTileMaximized() itself would refuse
     // to stay true in.
-    return mode_ == GroupMode::Tile && memberTitles_.size() > 1;
+    return IsTiledMode(mode_) && memberTitles_.size() > 1;
 }
 
 RECT GroupChromeWindow::TileMaximizeButtonRect(const RECT& clientRect, UINT dpi) const {
@@ -1289,11 +1330,19 @@ RECT GroupChromeWindow::AlignmentButtonRect(const RECT& clientRect, UINT dpi) co
     return RECT{leftNeighbor.left - w, leftNeighbor.top, leftNeighbor.left, leftNeighbor.bottom};
 }
 
-int GroupChromeWindow::TabStripLeftWidth(UINT dpi) const {
+int GroupChromeWindow::TabColumnWidth(UINT dpi) const {
     if (mode_ != GroupMode::Tab || alignment_ != GroupAlignment::Vertical) {
         return 0;
     }
     return Scale(kTabStripWidth, dpi);
+}
+
+int GroupChromeWindow::TabStripLeftWidth(UINT dpi) const {
+    const int columnWidth = TabColumnWidth(dpi);
+    if (columnWidth == 0) {
+        return 0;
+    }
+    return columnWidth + Scale(kTabConnectorThickness, dpi);
 }
 
 void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
@@ -1498,6 +1547,26 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
                 Rectangle(hdc, left, top, left + cellW, top + cellH);
             }
         }
+    } else if (mode_ == GroupMode::Stack) {
+        // Stack-mode glyph: three small bars laid out along the stack's
+        // own axis -- three side-by-side vertical bars for Horizontal
+        // (a single row of tiles), three stacked horizontal bars for
+        // Vertical (a single column) -- same "depicts the current
+        // layout" convention as Tile's 2x2 grid above.
+        constexpr int kBarGap = 2;
+        if (alignment_ == GroupAlignment::Vertical) {
+            const int barHeight = (modeToggleGlyph.bottom - modeToggleGlyph.top - 2 * kBarGap) / 3;
+            for (int i = 0; i < 3; ++i) {
+                const int top = modeToggleGlyph.top + i * (barHeight + kBarGap);
+                Rectangle(hdc, modeToggleGlyph.left, top, modeToggleGlyph.right, top + barHeight);
+            }
+        } else {
+            const int barWidth = (modeToggleGlyph.right - modeToggleGlyph.left - 2 * kBarGap) / 3;
+            for (int i = 0; i < 3; ++i) {
+                const int left = modeToggleGlyph.left + i * (barWidth + kBarGap);
+                Rectangle(hdc, left, modeToggleGlyph.top, left + barWidth, modeToggleGlyph.bottom);
+            }
+        }
     } else {
         // Tab-mode glyph: a small tab notch overlapping the top-left of
         // a page outline -- same overlapping-rectangle occlusion
@@ -1557,14 +1626,16 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
         // actually reorients differs: in Tab mode, a small rectangle
         // outline with a thin filled bar along whichever edge the tab
         // strip currently occupies -- top for Horizontal, left for
-        // Vertical. Tile mode has no tab strip to depict, so instead
-        // this shows the rectangle split by a single divider line
-        // matching the tile grid's own bias -- a vertical divider
-        // (side-by-side halves) for Horizontal's wide-biased grid, a
-        // horizontal divider (stacked halves) for Vertical's tall-
-        // biased grid -- reusing this file's existing line/rectangle
-        // vocabulary rather than inventing new iconography, same as
-        // every other button here.
+        // Vertical. Tile/Stack have no tab strip to depict, so instead
+        // these show the rectangle split by divider line(s) matching
+        // the grid's own bias -- a vertical divider (side-by-side
+        // halves) for Horizontal's wide-biased grid, a horizontal
+        // divider (stacked halves) for Vertical's tall-biased grid.
+        // Stack draws two dividers along that same axis instead of one
+        // -- reading as "many" (1xN) rather than Tile's single split --
+        // reusing this file's existing line/rectangle vocabulary rather
+        // than inventing new iconography, same as every other button
+        // here.
         const RECT alignmentRect = AlignmentButtonRect(clientRect, dpi);
         const bool alignmentHovered = hoveredActionButton_ == TitleBarActionButton::Alignment;
         if (alignmentHovered) {
@@ -1583,6 +1654,22 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
                 const int midX = (alignmentGlyph.left + alignmentGlyph.right) / 2;
                 MoveToEx(hdc, midX, alignmentGlyph.top, nullptr);
                 LineTo(hdc, midX, alignmentGlyph.bottom);
+            }
+        } else if (mode_ == GroupMode::Stack) {
+            if (alignment_ == GroupAlignment::Vertical) {
+                const int step = (alignmentGlyph.bottom - alignmentGlyph.top) / 3;
+                for (int i = 1; i <= 2; ++i) {
+                    const int y = alignmentGlyph.top + i * step;
+                    MoveToEx(hdc, alignmentGlyph.left, y, nullptr);
+                    LineTo(hdc, alignmentGlyph.right, y);
+                }
+            } else {
+                const int step = (alignmentGlyph.right - alignmentGlyph.left) / 3;
+                for (int i = 1; i <= 2; ++i) {
+                    const int x = alignmentGlyph.left + i * step;
+                    MoveToEx(hdc, x, alignmentGlyph.top, nullptr);
+                    LineTo(hdc, x, alignmentGlyph.bottom);
+                }
             }
         } else {
             const int barThickness =
@@ -1628,7 +1715,21 @@ void GroupChromeWindow::UpdateTooltip() {
     } else if (hoveredActionButton_.has_value()) {
         switch (*hoveredActionButton_) {
             case TitleBarActionButton::ModeToggle:
-                text = mode_ == GroupMode::Tab ? L"Switch to Tile" : L"Switch to Tab";
+                // Names the *next* mode in the button's Tab -> Tile ->
+                // Stack -> Tab cycle (see ToggleGroupMode), not the
+                // current one -- matches every other tooltip on this
+                // button ("Switch to X" always names the target state).
+                switch (mode_) {
+                    case GroupMode::Tab:
+                        text = L"Switch to Tile";
+                        break;
+                    case GroupMode::Tile:
+                        text = L"Switch to Stack";
+                        break;
+                    case GroupMode::Stack:
+                        text = L"Switch to Tabs";
+                        break;
+                }
                 break;
             case TitleBarActionButton::ManageWindows:
                 text = L"Edit Group Windows...";
@@ -1640,6 +1741,8 @@ void GroupChromeWindow::UpdateTooltip() {
                 if (mode_ == GroupMode::Tile) {
                     text = alignment_ == GroupAlignment::Horizontal ? L"Switch to vertical tiles"
                                                                       : L"Switch to horizontal tiles";
+                } else if (mode_ == GroupMode::Stack) {
+                    text = alignment_ == GroupAlignment::Horizontal ? L"Stack vertically" : L"Stack horizontally";
                 } else {
                     text = alignment_ == GroupAlignment::Horizontal ? L"Switch to vertical tabs"
                                                                       : L"Switch to horizontal tabs";
@@ -1765,7 +1868,7 @@ int GroupChromeWindow::TileSplitterWidthPx() const {
 }
 
 std::optional<std::pair<bool, size_t>> GroupChromeWindow::HitTestSplitter(POINT clientPt) const {
-    if (mode_ != GroupMode::Tile || window_ == nullptr) {
+    if (!IsTiledMode(mode_) || window_ == nullptr) {
         return std::nullopt;
     }
     const RECT contentRect = ContentRectInClientCoords();
@@ -1961,8 +2064,19 @@ void GroupChromeWindow::ShowContextMenu(int screenX, int screenY) {
         return;
     }
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, kContextMenuSwitchMode,
-                mode_ == GroupMode::Tab ? L"Switch to Tile" : L"Switch to Tab");
+    // Three mutually-exclusive mode items (a radio group, not a single
+    // cycling "Switch to X" item -- that stopped reading sensibly once
+    // there were three modes to name instead of two) plus a separator
+    // before the unrelated "Edit windows..." item.
+    AppendMenuW(menu, MF_STRING, kContextMenuModeTab, L"Tabs");
+    AppendMenuW(menu, MF_STRING, kContextMenuModeTile, L"Tiles");
+    AppendMenuW(menu, MF_STRING, kContextMenuModeStack, L"Stack");
+    CheckMenuRadioItem(menu, kContextMenuModeTab, kContextMenuModeStack,
+                        mode_ == GroupMode::Tab   ? kContextMenuModeTab
+                        : mode_ == GroupMode::Tile ? kContextMenuModeTile
+                                                    : kContextMenuModeStack,
+                        MF_BYCOMMAND);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kContextMenuEditWindows, L"Edit Group Windows...");
 
     ApplyDarkModeToMenu(window_);
@@ -1977,8 +2091,12 @@ void GroupChromeWindow::ShowContextMenu(int screenX, int screenY) {
     PostMessageW(window_, WM_NULL, 0, 0);
     DestroyMenu(menu);
 
-    if (cmd == kContextMenuSwitchMode && onModeToggleRequested_) {
-        onModeToggleRequested_();
+    if (cmd == kContextMenuModeTab && onModeSelected_) {
+        onModeSelected_(GroupMode::Tab);
+    } else if (cmd == kContextMenuModeTile && onModeSelected_) {
+        onModeSelected_(GroupMode::Tile);
+    } else if (cmd == kContextMenuModeStack && onModeSelected_) {
+        onModeSelected_(GroupMode::Stack);
     } else if (cmd == kContextMenuEditWindows && onEditWindowsRequested_) {
         onEditWindowsRequested_();
     }
@@ -1995,8 +2113,8 @@ void GroupChromeWindow::Show(const std::vector<std::wstring>& memberTitles, Grou
         // was bubbling up into this window's own client area, forcing a
         // full-client WM_PAINT that happened to cover the active
         // member's rect too -- the parent never intentionally paints
-        // there (both Tab and Tile mode only ever draw in the header/
-        // gap space around members, never over them), so without this
+        // there (every mode only ever draws in the header/gap space
+        // around members, never over them), so without this
         // style there was nothing stopping that from visually
         // interfering with the active member's own on-screen content.
         // This is the standard Win32 fix for a parent with child

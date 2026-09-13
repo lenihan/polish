@@ -60,21 +60,33 @@ current todo list.
   verified live that both fire correctly and never start a window drag.
   Alignment button still deferred until tab/tile orientation-aware
   layout lands.
+- Groups: vertical-alignment tab strip now gets the same Win11 "grows
+  out of the body" treatment as horizontal — a full-height connector
+  column (mirroring the horizontal connector band), the active tab's
+  content-facing edge square/unbordered instead of rounded, and concave
+  fillets joining the tab to the column on both sides. Tab placement and
+  tile-grid growth direction were already orientation-aware; this closed
+  the one remaining visual gap (`DrawConcaveFillet` generalized to work
+  on either axis).
+- Groups: added a third layout mode, **Stack** — every member visible at
+  once like Tile, but forced to a single row (Horizontal alignment) or
+  single column (Vertical alignment) instead of a roughly-square grid.
+  Cycles in with the title-bar mode button (Tab → Tile → Stack → Tab);
+  the right-click context menu now shows all three as a radio group
+  instead of one cycling item. Reuses Tile's splitter/tile-maximize/
+  active-tile-ring machinery (`GroupMode::Tile`/`Stack` share
+  `IsTiledMode`) — only the grid shape itself differs
+  (`ComputeGridShape`).
 
 ## Left to do
 
-= Need a more unique icon...current icon looks like Google Gemini
+- Need a more unique icon...current icon looks like Google Gemini
 - Add Alt+` to cycle a single app's own windows by most-recently-used
   order (native Windows does this by Z-order, not MRU).
 - Groups: handle a member window closing while backgrounded or tiled.
 - Groups: test and fix multi-monitor / mixed-DPI support (never tried on
   real hardware).
 - Groups: clamp tile auto-grow-to-fit to monitor bounds.
-- Groups: make tab placement and tile-grid growth direction
-  orientation-aware.
-- Groups: add a third layout mode between Tab and full Tile — a single
-  row or single column of tiles (1×N) — name still undecided ("row/col"
-  changes meaning depending on orientation, which doesn't sit right).
 - Groups: rename too "Polish Groups" and make it pinnable to the Start
   menu.
 - Groups: support nested groups (a group containing other groups).

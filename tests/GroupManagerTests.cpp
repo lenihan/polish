@@ -50,3 +50,34 @@ TEST_CASE("GroupManager: FindGroup returns nullptr for an unknown id") {
     manager.CreateGroup({});
     CHECK(manager.FindGroup(999) == nullptr);
 }
+
+TEST_CASE("ComputeGridShape: Tile biases wide (Horizontal) or tall (Vertical)") {
+    const GridShape horizontal = ComputeGridShape(GroupMode::Tile, GroupAlignment::Horizontal, 5);
+    CHECK(horizontal.cols == 3);
+    CHECK(horizontal.rows == 2);
+
+    const GridShape vertical = ComputeGridShape(GroupMode::Tile, GroupAlignment::Vertical, 5);
+    CHECK(vertical.cols == 2);
+    CHECK(vertical.rows == 3);
+}
+
+TEST_CASE("ComputeGridShape: Stack forces a single row (Horizontal) or column (Vertical)") {
+    const GridShape horizontal = ComputeGridShape(GroupMode::Stack, GroupAlignment::Horizontal, 4);
+    CHECK(horizontal.cols == 4);
+    CHECK(horizontal.rows == 1);
+
+    const GridShape vertical = ComputeGridShape(GroupMode::Stack, GroupAlignment::Vertical, 4);
+    CHECK(vertical.cols == 1);
+    CHECK(vertical.rows == 4);
+}
+
+TEST_CASE("ComputeGridShape: a single member is always a 1x1 grid") {
+    CHECK(ComputeGridShape(GroupMode::Tile, GroupAlignment::Horizontal, 1).cols == 1);
+    CHECK(ComputeGridShape(GroupMode::Tile, GroupAlignment::Horizontal, 1).rows == 1);
+    CHECK(ComputeGridShape(GroupMode::Tile, GroupAlignment::Vertical, 1).cols == 1);
+    CHECK(ComputeGridShape(GroupMode::Tile, GroupAlignment::Vertical, 1).rows == 1);
+    CHECK(ComputeGridShape(GroupMode::Stack, GroupAlignment::Horizontal, 1).cols == 1);
+    CHECK(ComputeGridShape(GroupMode::Stack, GroupAlignment::Horizontal, 1).rows == 1);
+    CHECK(ComputeGridShape(GroupMode::Stack, GroupAlignment::Vertical, 1).cols == 1);
+    CHECK(ComputeGridShape(GroupMode::Stack, GroupAlignment::Vertical, 1).rows == 1);
+}

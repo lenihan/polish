@@ -5,6 +5,33 @@
 
 namespace polish {
 
+GridShape ComputeGridShape(GroupMode mode, GroupAlignment alignment, int count) {
+    if (mode == GroupMode::Stack) {
+        // Forced to a single row (Horizontal) or single column
+        // (Vertical) -- the "third layout mode" between Tab and full
+        // Tile, rather than the biased-square shape below.
+        if (alignment == GroupAlignment::Vertical) {
+            return GridShape{1, count};
+        }
+        return GridShape{count, 1};
+    }
+    // Tile. Horizontal (default): biased wide (cols >= rows) --
+    // ceil(sqrt(n)) columns, however many rows that leaves. Vertical:
+    // the same formula with columns/rows swapped, biasing tall instead
+    // -- for exactly 2 members this is the difference between
+    // side-by-side and stacked; for any other count it's the general
+    // "grid biased wide vs. tall" behavior GroupState.h's own
+    // GroupAlignment comment documents.
+    if (alignment == GroupAlignment::Vertical) {
+        const int rows = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
+        const int cols = (count + rows - 1) / rows;
+        return GridShape{cols, rows};
+    }
+    const int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
+    const int rows = (count + cols - 1) / cols;
+    return GridShape{cols, rows};
+}
+
 namespace {
 // PW_RENDERFULLCONTENT (Windows 8.1+) -- captures a window's actual
 // rendered content (including hardware-accelerated/DirectComposition
@@ -286,7 +313,7 @@ SIZE GroupManager::ApplyLayout(GroupState& group, HWND chromeWindow, const RECT&
         }
     }
 
-    if (group.Mode() == GroupMode::Tile) {
+    if (IsTiledMode(group.Mode())) {
         return ApplyTileLayout(group, chromeWindow, contentRectClientCoords, tileSplitterWidthPx);
     }
     return ApplyTabLayout(group, chromeWindow, contentRectClientCoords);
@@ -388,23 +415,10 @@ SIZE GroupManager::ApplyTileLayout(GroupState& group, HWND /*chromeWindow*/, con
         // full-size with nothing chosen to be on top.
     }
 
-    // Horizontal (default): biased wide (cols >= rows) -- ceil(sqrt(n))
-    // columns, however many rows that leaves. Vertical: the same
-    // formula with columns/rows swapped, biasing tall instead -- for
-    // exactly 2 members this is the difference between side-by-side
-    // and stacked; for any other count it's the general "grid biased
-    // wide vs. tall" behavior GroupState.h's own GroupAlignment comment
-    // documents.
     const int count = static_cast<int>(windows.size());
-    int cols;
-    int rows;
-    if (group.Alignment() == GroupAlignment::Vertical) {
-        rows = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
-        cols = (count + rows - 1) / rows;
-    } else {
-        cols = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
-        rows = (count + cols - 1) / cols;
-    }
+    const GridShape shape = ComputeGridShape(group.Mode(), group.Alignment(), count);
+    const int cols = shape.cols;
+    const int rows = shape.rows;
 
     // User-adjustable column widths/row heights (each a fraction of the
     // content area's total width/height), falling back to an equal

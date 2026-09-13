@@ -28,13 +28,27 @@ struct GroupMember {
     bool operator==(const GroupMember&) const = default;
 };
 
-enum class GroupMode { Tab, Tile };
+// Tab: one member shown at a time, switched via the chrome's tab strip.
+// Tile: every member shown at once in a grid, sized to roughly fill a
+// square (biased wide/tall by GroupAlignment below).
+// Stack: every member shown at once like Tile, but forced to a single
+// row or column instead of a grid -- see GroupAlignment for which.
+enum class GroupMode { Tab, Tile, Stack };
 
-// Horizontal (default): tabs across the top, tile grid biased wide.
-// Vertical: tabs down the left edge, tile grid biased tall. Affects
+// Tile and Stack are both grids of simultaneously-visible members --
+// Stack is just Tile with the grid forced to a single row/column --
+// so anything that means "no tab strip, has a tile grid" (splitters,
+// tile fractions, tile-maximize) applies to both, and Tab is the only
+// mode that's actually different.
+constexpr bool IsTiledMode(GroupMode mode) { return mode == GroupMode::Tile || mode == GroupMode::Stack; }
+
+// Horizontal (default): tabs across the top; Tile's grid biased wide;
+// Stack forced to a single row. Vertical: tabs down the left edge;
+// Tile's grid biased tall; Stack forced to a single column. Affects
 // both GroupChromeWindow's tab-strip placement and
-// GroupManager::ApplyTileLayout's grid shape -- kept as one setting
-// rather than two so they can never disagree with each other.
+// GroupManager::ApplyTileLayout's/ComputeGridShape's grid shape --
+// kept as one setting rather than two so they can never disagree with
+// each other.
 enum class GroupAlignment { Horizontal, Vertical };
 
 // Pure state for one group: its ordered membership, which member is
@@ -52,19 +66,22 @@ public:
     GroupAlignment Alignment() const { return alignment_; }
     const std::wstring& Name() const { return name_; }
 
-    // Changes the group's display mode at runtime (v1: Tab <-> Tile,
-    // user-triggered from the chrome's context menu). Pure bookkeeping
-    // -- membership/active-index are untouched; the caller is
-    // responsible for re-applying layout (GroupManager::ApplyLayout)
-    // and updating the chrome's own rendering afterward. Leaving Tile
-    // mode also clears tileMaximized_ -- "maximized" only means
-    // anything relative to the tile grid it was maximized out of; it
-    // wouldn't ever get shown while in Tab mode, but silently carrying
-    // it forward would ambush the next Tile-mode switch with a
-    // maximize the user never (re-)asked for this time.
+    // Changes the group's display mode at runtime (Tab/Tile/Stack,
+    // user-triggered from the title bar's mode button or the chrome's
+    // context menu). Pure bookkeeping -- membership/active-index are
+    // untouched; the caller is responsible for re-applying layout
+    // (GroupManager::ApplyLayout) and updating the chrome's own
+    // rendering afterward. Leaving both tiled modes (see IsTiledMode)
+    // also clears tileMaximized_ -- "maximized" only means anything
+    // relative to the tile grid it was maximized out of; it wouldn't
+    // ever get shown in Tab mode, but silently carrying it forward
+    // would ambush the next tiled-mode switch with a maximize the user
+    // never (re-)asked for this time. Switching between Tile and Stack
+    // keeps it, same as it already keeps tile column/row fractions
+    // whenever the grid's shape happens not to change.
     void SetMode(GroupMode mode) {
         mode_ = mode;
-        if (mode_ != GroupMode::Tile) {
+        if (!IsTiledMode(mode_)) {
             tileMaximized_ = false;
         }
     }
@@ -127,7 +144,7 @@ public:
     // (e.g. Alt+Tab). No-op if hwnd isn't a member.
     void SetActiveWindow(HWND hwnd);
 
-    // Tile mode only: whether the active member is currently expanded
+    // Tile/Stack only: whether the active member is currently expanded
     // to fill the whole content area instead of sharing the grid with
     // every other member (a per-tile analog of the *window's* own
     // maximize/restore, scoped to just one tile). Same pure-bookkeeping
@@ -142,7 +159,7 @@ public:
     bool IsTileMaximized() const { return tileMaximized_; }
     void SetTileMaximized(bool maximized) { tileMaximized_ = maximized; }
 
-    // Tile mode only: user-adjustable column widths / row heights, each
+    // Tile/Stack only: user-adjustable column widths / row heights, each
     // a fraction of the content area's total width/height (a vector
     // sums to 1.0). Empty means "not yet customized" --
     // GroupManager::ApplyTileLayout falls back to an equal split, and

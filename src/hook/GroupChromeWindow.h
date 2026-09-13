@@ -62,7 +62,7 @@ public:
 
     // Creates the window (first call only) and (re)renders its header
     // from `memberTitles`, then shows it. In Tab mode, the header is a
-    // clickable/draggable tab strip, one tab per entry. In Tile mode
+    // clickable/draggable tab strip, one tab per entry. In Tile/Stack
     // there's nothing to click (every member is simultaneously visible,
     // positioned by GroupManager's grid layout instead) -- the header
     // is just a plain label, and ComputeTabRects/hit-testing naturally
@@ -86,29 +86,30 @@ public:
     // Purely visual -- does not itself move/promote any member window.
     void SetActiveIndex(size_t index);
 
-    // Switches the header between a Tab-mode tab strip and a Tile-mode
-    // plain label, and repaints. Purely visual/input-handling -- the
-    // caller is responsible for updating GroupState's own mode and
+    // Switches the header between a Tab-mode tab strip and a Tile/
+    // Stack plain label, and repaints. Purely visual/input-handling --
+    // the caller is responsible for updating GroupState's own mode and
     // re-applying layout (GroupManager::ApplyLayout) afterward.
     void SetMode(GroupMode mode);
 
     // Mirrors GroupState::IsTileMaximized() into the chrome's own
     // rendering (the tile-maximize button's glyph flips between
     // "maximize" and "restore", and the button itself is only ever
-    // shown at all in Tile mode with 2+ members -- see
-    // TileMaximizeButtonRect). Purely visual, same contract as SetMode:
-    // the caller updates GroupState and re-applies layout separately.
+    // shown at all in a tiled mode -- Tile or Stack -- with 2+ members
+    // -- see TileMaximizeButtonRect). Purely visual, same contract as
+    // SetMode: the caller updates GroupState and re-applies layout
+    // separately.
     void SetTileMaximized(bool maximized);
 
     // Switches the tab strip between a horizontal row (top) and a
     // vertical column (left edge) -- see ComputeTabRects/PaintTabStrip's
-    // own Vertical branches. Also changes Tile mode's grid-shape bias
-    // (GroupManager::ApplyTileLayout reads GroupState::Alignment()
-    // directly, unrelated to this chrome-local copy) -- same one-
-    // setting-drives-both contract GroupState.h's own GroupAlignment
-    // comment describes. Purely visual/input-handling here, same
-    // contract as SetMode: the caller updates GroupState and re-applies
-    // layout separately.
+    // own Vertical branches. Also changes Tile/Stack's grid-shape bias
+    // (GroupManager::ApplyTileLayout/ComputeGridShape reads
+    // GroupState::Alignment() directly, unrelated to this chrome-local
+    // copy) -- same one-setting-drives-both contract GroupState.h's own
+    // GroupAlignment comment describes. Purely visual/input-handling
+    // here, same contract as SetMode: the caller updates GroupState and
+    // re-applies layout separately.
     void SetAlignment(GroupAlignment alignment);
 
     // The area below the tab strip, in screen coordinates -- used by
@@ -157,12 +158,18 @@ public:
     // and this window's own label order stay in sync throughout.
     void SetOnTabReordered(std::function<void(size_t, size_t)> callback) { onTabReordered_ = std::move(callback); }
 
-    // Called when "Switch to Tab"/"Switch to Tile" is chosen from the
-    // right-click context menu, or the title bar's mode-toggle button is
-    // clicked -- same request either way. The owner decides the actual
-    // new mode (GroupState::Mode() is the source of truth) and calls
-    // SetMode back.
+    // Called when the title bar's mode button is clicked -- cycles
+    // Tab -> Tile -> Stack -> Tab. The owner decides the actual new mode
+    // (GroupState::Mode() is the source of truth) and calls SetMode
+    // back.
     void SetOnModeToggleRequested(std::function<void()> callback) { onModeToggleRequested_ = std::move(callback); }
+
+    // Called with the chosen mode when one of the right-click context
+    // menu's three mode radio items ("Tabs"/"Tiles"/"Stack") is picked
+    // -- a direct selection rather than a cycle, since the menu shows
+    // all three at once. Same "owner decides, calls SetMode back"
+    // contract as SetOnModeToggleRequested.
+    void SetOnModeSelected(std::function<void(GroupMode)> callback) { onModeSelected_ = std::move(callback); }
 
     // Called when "Edit windows..." is chosen from the right-click
     // context menu, or the title bar's manage-windows button is clicked.
@@ -171,10 +178,10 @@ public:
     }
 
     // Called when the title bar's tile-maximize button is clicked (only
-    // ever shown/hit-testable in Tile mode with 2+ members -- see
-    // TileMaximizeButtonRect). The owner flips GroupState's own
-    // IsTileMaximized(), re-applies layout, and calls SetTileMaximized
-    // back, same request/response shape as mode-toggle.
+    // ever shown/hit-testable in a tiled mode -- Tile or Stack -- with
+    // 2+ members -- see TileMaximizeButtonRect). The owner flips
+    // GroupState's own IsTileMaximized(), re-applies layout, and calls
+    // SetTileMaximized back, same request/response shape as mode-toggle.
     void SetOnTileMaximizeToggleRequested(std::function<void()> callback) {
         onTileMaximizeToggleRequested_ = std::move(callback);
     }
@@ -216,7 +223,7 @@ public:
         onTabHovered_ = std::move(callback);
     }
 
-    // Tile mode only: the draggable resize splitters' positions --
+    // Tile/Stack only: the draggable resize splitters' positions --
     // content-rect-relative pixels, matching
     // GroupManager::TileColumnBoundaries/TileRowBoundaries exactly (call
     // this again after every reflow, since a member added/removed or a
@@ -243,7 +250,7 @@ public:
         onTileSplitterDoubleClicked_ = std::move(callback);
     }
 
-    // Tile mode only: this window's current DPI-scaled splitter width,
+    // Tile/Stack only: this window's current DPI-scaled splitter width,
     // in real pixels -- pass to GroupManager::ApplyLayout's
     // tileSplitterWidthPx and SetTileBoundary's splitterWidthPx so the
     // reserved-gap math on both sides always agrees. 0 before the
@@ -258,7 +265,7 @@ private:
     std::vector<RECT> ComputeTabRects(const RECT& clientRect) const;
     void ShowContextMenu(int screenX, int screenY);
 
-    // Tile mode only. Returns (isColumn, index) for the splitter within
+    // Tile/Stack only. Returns (isColumn, index) for the splitter within
     // hit-test slop of `clientPt` (client coordinates), or nullopt.
     std::optional<std::pair<bool, size_t>> HitTestSplitter(POINT clientPt) const;
     // Clamps a dragged splitter's new position so neither of its two
@@ -278,11 +285,11 @@ private:
 
     // Total space reserved above the member content: the custom title
     // bar band (see TitleBarHeight) always, plus -- Tab mode only -- the
-    // tab strip and its connector band below that. Tile mode has no tab
-    // strip (nothing to click, every member is simultaneously visible)
-    // but still needs the title bar band itself, since that's now the
-    // only place the group's name and window controls are shown at all
-    // (the native caption that used to show them is gone -- see
+    // tab strip and its connector band below that. Tile/Stack have no
+    // tab strip (nothing to click, every member is simultaneously
+    // visible) but still need the title bar band itself, since that's
+    // now the only place the group's name and window controls are shown
+    // at all (the native caption that used to show them is gone -- see
     // TitleBarHeight's own comment).
     int HeaderHeight(UINT dpi) const;
 
@@ -290,7 +297,7 @@ private:
     // OS caption (removed via WM_NCCALCSIZE shrinking the real
     // non-client caption down to a thin resize-border sliver -- see
     // HandleMessage's WM_NCCALCSIZE/WM_NCHITTEST cases). Always reserved,
-    // in both Tab and Tile mode.
+    // in every mode (Tab, Tile, Stack).
     int TitleBarHeight(UINT dpi) const;
 
     // Draws the icon, title text, and minimize/maximize-restore/close
@@ -321,12 +328,12 @@ private:
 
     // A third client-area button, immediately left of the other two --
     // maximizes/restores whichever tile is currently active (see
-    // GroupState::IsTileMaximized). Only meaningful in Tile mode with
-    // 2+ members (a single tile already fills the whole area on its
-    // own); TileMaximizeButtonVisible() is the one place that decision
-    // is made, consulted by painting, hit-testing, and the title text's
-    // own right-boundary math alike so all three can never disagree
-    // about whether this button is showing right now.
+    // GroupState::IsTileMaximized). Only meaningful in a tiled mode --
+    // Tile or Stack -- with 2+ members (a single tile already fills the
+    // whole area on its own); TileMaximizeButtonVisible() is the one
+    // place that decision is made, consulted by painting, hit-testing,
+    // and the title text's own right-boundary math alike so all three
+    // can never disagree about whether this button is showing right now.
     bool TileMaximizeButtonVisible() const;
     RECT TileMaximizeButtonRect(const RECT& clientRect, UINT dpi) const;
 
@@ -335,11 +342,20 @@ private:
     // shown (unlike TileMaximize, this is meaningful in both modes).
     RECT AlignmentButtonRect(const RECT& clientRect, UINT dpi) const;
 
-    // 0 in Tile mode or Horizontal alignment; the reserved left-column
-    // width in Tab mode with Vertical alignment (see kTabStripWidth).
-    // The Vertical counterpart to HeaderHeight's top-band reservation --
-    // consulted everywhere HeaderHeight is, so content/splitter geometry
-    // always accounts for whichever axis the tab strip currently uses.
+    // 0 outside Tab mode (Tile/Stack) or in Horizontal alignment; the
+    // reserved left-column width in Tab mode with Vertical alignment --
+    // just the tab column itself (see kTabStripWidth), not the
+    // connector beside it (see TabStripLeftWidth for the combined
+    // reservation). What ComputeTabRects lays tabs out against.
+    int TabColumnWidth(UINT dpi) const;
+
+    // 0 outside Tab mode (Tile/Stack) or in Horizontal alignment;
+    // TabColumnWidth plus the connector column's own thickness
+    // (kTabConnectorThickness) in Tab mode with Vertical alignment --
+    // where content actually starts. The Vertical counterpart to
+    // HeaderHeight's top-band reservation -- consulted everywhere
+    // HeaderHeight is, so content/splitter geometry always accounts for
+    // whichever axis the tab strip currently uses.
     int TabStripLeftWidth(UINT dpi) const;
 
     // Shows/hides/repositions tooltipWindow_ for whichever title-bar
@@ -372,6 +388,7 @@ private:
     std::function<void(size_t)> onTabClicked_;
     std::function<void(size_t, size_t)> onTabReordered_;
     std::function<void()> onModeToggleRequested_;
+    std::function<void(GroupMode)> onModeSelected_;
     std::function<void()> onEditWindowsRequested_;
     std::function<void()> onTileMaximizeToggleRequested_;
     // Mirrors GroupState::IsTileMaximized() -- see SetTileMaximized.
@@ -418,7 +435,7 @@ private:
     enum class TitleBarActionButton { ModeToggle, ManageWindows, TileMaximize, Alignment };
     std::optional<TitleBarActionButton> hoveredActionButton_;
 
-    // Tile mode splitters -- content-rect-relative pixel positions, set
+    // Tile/Stack splitters -- content-rect-relative pixel positions, set
     // by SetTileSplitters after every reflow.
     std::vector<int> tileColumnBoundaries_;
     std::vector<int> tileRowBoundaries_;

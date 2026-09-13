@@ -176,6 +176,26 @@ TEST_CASE("GroupState: SetMode changes the mode without touching membership") {
     CHECK(state.ActiveWindow() == AsHwnd(1));
 }
 
+TEST_CASE("GroupState: SetMode from Tile to Stack preserves IsTileMaximized") {
+    GroupState state(1, GroupMode::Tile);
+    state.AddWindow(AsHwnd(1));
+    state.AddWindow(AsHwnd(2));
+    state.SetTileMaximized(true);
+    state.SetMode(GroupMode::Stack);
+    CHECK(state.Mode() == GroupMode::Stack);
+    CHECK(state.IsTileMaximized());
+}
+
+TEST_CASE("GroupState: SetMode from Stack to Tab clears IsTileMaximized") {
+    GroupState state(1, GroupMode::Stack);
+    state.AddWindow(AsHwnd(1));
+    state.AddWindow(AsHwnd(2));
+    state.SetTileMaximized(true);
+    state.SetMode(GroupMode::Tab);
+    CHECK(state.Mode() == GroupMode::Tab);
+    CHECK_FALSE(state.IsTileMaximized());
+}
+
 TEST_CASE("GroupState: SetAlignment changes the alignment without touching membership") {
     GroupState state(1);
     state.AddWindow(AsHwnd(1));
