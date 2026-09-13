@@ -5,6 +5,8 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cwchar>
+#include <iterator>
 
 #include "resource.h"
 #include "util/DarkMode.h"
@@ -2062,6 +2064,12 @@ void GroupChromeWindow::Show(const std::vector<std::wstring>& memberTitles, Grou
     InvalidateRect(window_, nullptr, TRUE);
     ShowWindow(window_, SW_SHOW);
     UpdateWindow(window_);
+}
+
+bool IsGroupChromeWindow(HWND hwnd) {
+    wchar_t className[64];
+    return GetClassNameW(hwnd, className, static_cast<int>(std::size(className))) > 0 &&
+           wcscmp(className, kWindowClassName) == 0;
 }
 
 }  // namespace polish

@@ -87,6 +87,16 @@ void GroupManager::EnsureReparented(HWND hwnd, HWND chromeWindow) {
     if (reparentBackups_.contains(hwnd)) {
         return;  // already a child of some group chrome
     }
+    // Done here, before the reparent, not via the existing
+    // RestoreIfMaximized calls further down: those all run on a window
+    // that is already WS_CHILD, where SW_RESTORE on a WS_MINIMIZE child
+    // is not meaningful. Needed now that the picker offers minimized
+    // windows as candidates -- ReparentIntoGroup strips the frame bits
+    // but not WS_MINIMIZE, so without this a minimized member joins the
+    // group as a blank tile.
+    if (IsIconic(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    }
     reparentBackups_[hwnd] = ReparentIntoGroup(hwnd, chromeWindow);
 }
 

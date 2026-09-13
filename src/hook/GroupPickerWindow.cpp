@@ -1,11 +1,14 @@
 #include "hook/GroupPickerWindow.h"
 
 #include <dwmapi.h>
+#include <shellscalingapi.h>
 #include <uxtheme.h>
 
 #include <algorithm>
 #include <format>
+#include <iterator>
 
+#include "hook/GroupChromeWindow.h"
 #include "util/DarkMode.h"
 #include "util/Logging.h"
 #include "windowtracking/WindowFilters.h"
@@ -36,21 +39,50 @@ constexpr wchar_t kWindowClassName[] = L"PolishGroupPickerWindow";
 constexpr int kCreateButtonId = 1003;
 constexpr int kCancelButtonId = 1004;
 
+// Polls for windows opening/closing while the dialog sits open (see
+// RefreshCandidates) -- no push-based hook for this exists anywhere in
+// this codebase to reuse instead (confirmed: no EVENT_OBJECT_CREATE/
+// SHOW/HIDE hook exists), so this mirrors the interval this codebase's
+// other idle polling timers already use (kThumbnailRefreshDelayMs = 1200
+// in main.cpp) rather than inventing an unrelated cadence.
+constexpr UINT_PTR kCandidateRefreshTimerId = 1;
+constexpr UINT kCandidateRefreshIntervalMs = 1000;
+
 // Logical (96 DPI) layout constants -- scaled by the window's actual DPI
-// in LayoutControls/before CreateWindowExW. Width/height re-tuned for a
-// single list (no longer needs to fit two lists + two button columns
-// side by side) -- narrower, and taller so ~6-7 rows show without
-// scrolling on a typical display; margin/button height bumped up for
-// the airier spacing Windows 11 dialogs use versus this dialog's
+// in LayoutControls/before CreateWindowExW. Wide and short, like this
+// dialog's original two-list side-by-side layout (see
+// GroupPickerWindow.h's own comment on the side-by-side split) -- not
+// the narrow/tall shape a single stacked list needed; margin/button
+// height still match Windows 11's airier spacing versus this dialog's
 // original, denser layout.
-constexpr int kWindowWidth = 460;
-constexpr int kWindowHeight = 460;
+constexpr int kWindowWidth = 720;
+constexpr int kWindowHeight = 480;
 constexpr int kMargin = 20;
+constexpr int kColumnGap = 16;
 constexpr int kButtonHeight = 32;
 constexpr int kButtonWidth = 110;
-constexpr int kNameRowHeight = 24;
-constexpr int kNameLabelWidth = 50;
 constexpr int kButtonCornerRadius = 6;
+
+// Name field: a small muted caption above a full-width rounded field
+// card, Windows 11 Settings' own "label above the control" convention
+// -- not the label-to-the-left-of-a-boxed-field layout this dialog used
+// before, which read as an older Win32 dialog convention. The real
+// nameEdit_ HWND itself stays small (just its own text height, see
+// MeasureLineHeight's comment) and is centered inside the taller,
+// hand-drawn kNameFieldHeight card (WM_ERASEBKGND draws the
+// rounded-rect card; nameEdit_ has no border/background of its own
+// anymore) -- the same "give the control only the height it needs and
+// center that" trick as before, just now centered within a nicer-
+// looking card instead of a plain bordered rectangle.
+constexpr int kNameCaptionHeight = 16;
+constexpr int kNameCaptionGap = 6;
+constexpr int kNameFieldHeight = 36;
+constexpr int kNameFieldPaddingX = 12;
+
+// Available windows/Group column captions -- same small-muted-label
+// convention as the Name field's own caption.
+constexpr int kSectionCaptionHeight = 16;
+constexpr int kSectionCaptionGap = 6;
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
@@ -67,8 +99,7 @@ COLORREF DarkenColor(COLORREF color, double factor) {
 // didn't change it). Rather than subclass the control to pad its
 // non-client area (WM_NCCALCSIZE), the simpler fix used here is to
 // give the control only the height text actually needs and center
-// *that* short control within its layout row -- no subclassing, no
-// WM_NCPAINT interaction with the WS_BORDER border to worry about.
+// *that* short control within its layout row -- no subclassing needed.
 int MeasureLineHeight(HWND hwnd, HFONT font) {
     HDC hdc = GetDC(hwnd);
     HGDIOBJ oldFont = SelectObject(hdc, font);
@@ -79,8 +110,35 @@ int MeasureLineHeight(HWND hwnd, HFONT font) {
     return metrics.tmHeight + metrics.tmExternalLeading;
 }
 
+// The real font Windows itself uses for dialog body text at this DPI --
+// not GetStockObject(DEFAULT_GUI_FONT), a fixed, pre-DPI-awareness
+// bitmap font that leaves text tiny inside otherwise-correctly-scaled
+// controls at high DPI (confirmed, human-reported). Same technique both
+// list panels already use for their own row text (see
+// GroupPickerListWindow.cpp's identical block) and AltTabListWindow.cpp
+// documents as the right one.
+HFONT MakeDialogFont(UINT dpi) {
+    NONCLIENTMETRICSW metrics{};
+    metrics.cbSize = sizeof(metrics);
+    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi);
+    return CreateFontIndirectW(&metrics.lfMessageFont);
+}
+
 BOOL CALLBACK EnumPickerCandidatesProc(HWND hwnd, LPARAM lParam) {
-    if (IsCandidateWindow(hwnd) && !IsElevatedWindow(hwnd)) {
+    // A group's own chrome container is deliberately excluded here even
+    // though it's a perfectly normal top-level window everywhere else
+    // (see IsGroupChromeWindow's own comment) -- not something a user
+    // would sensibly add as a *member* of any group, including its own.
+    //
+    // IsCandidateWindowShape, not IsCandidateWindow -- this dialog has
+    // no separate "minimized" section the way Alt+Tab does, so it can't
+    // afford to drop minimized windows from its one and only list the
+    // way Alt+Tab's main cycle does (confirmed, human-reported: Notepad/
+    // Explorer/Outlook windows minimized at the time "Open windows" was
+    // opened didn't appear at all). A minimized window is exactly as
+    // groupable as a restored one -- GroupManager::EnsureReparented
+    // restores it on add so it doesn't join as a blank tile.
+    if (IsCandidateWindowShape(hwnd) && !IsElevatedWindow(hwnd) && !IsGroupChromeWindow(hwnd)) {
         reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
     }
     return TRUE;
@@ -88,7 +146,7 @@ BOOL CALLBACK EnumPickerCandidatesProc(HWND hwnd, LPARAM lParam) {
 
 }  // namespace
 
-GroupPickerWindow::GroupPickerWindow(HINSTANCE instance) : instance_(instance), list_(instance) {
+GroupPickerWindow::GroupPickerWindow(HINSTANCE instance) : instance_(instance), selected_(instance), available_(instance) {
     static bool classRegistered = false;
     if (!classRegistered) {
         WNDCLASSEXW windowClass{};
@@ -136,11 +194,33 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
     switch (message) {
         case WM_CREATE:
             CreateControls(hwnd);
-            PopulateList();
+            PopulateLists();
             return 0;
 
         case WM_SIZE:
             LayoutControls();
+            return 0;
+
+        case WM_DPICHANGED: {
+            // Standard MSDN pattern (same as GroupChromeWindow/
+            // AltTabListWindow's own WM_DPICHANGED handlers), plus
+            // rebuilding dialogFont_ -- unlike those two, this dialog's
+            // text doesn't scale on its own via a per-paint DPI query,
+            // so a plain resize alone would leave stale-size text in a
+            // now-correctly-sized window.
+            const auto* suggestedRect = reinterpret_cast<const RECT*>(lParam);
+            ApplyDialogFont(HIWORD(wParam));
+            SetWindowPos(hwnd, nullptr, suggestedRect->left, suggestedRect->top,
+                         suggestedRect->right - suggestedRect->left, suggestedRect->bottom - suggestedRect->top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);  // -> WM_SIZE -> LayoutControls
+            InvalidateRect(hwnd, nullptr, TRUE);
+            return 0;
+        }
+
+        case WM_TIMER:
+            if (wParam == kCandidateRefreshTimerId) {
+                RefreshCandidates();
+            }
             return 0;
 
         case WM_COMMAND:
@@ -163,23 +243,43 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             // Always an opaque themed fill, regardless of micaEnabled_.
             // A transparent erase (to let a real Mica backdrop show
             // through the margins) was tried first -- DwmSetWindowAttribute
-            // reports success (see ApplyDarkMode's own log line) but no
-            // translucent backdrop actually renders on this host, just a
-            // flat, undifferentiated light fill behind everything, which
-            // reads as a visual bug (a stray white margin around an
-            // otherwise fully dark-themed dialog) rather than a subtle
-            // backdrop. A correctly opaque, consistent dialog beats a
-            // broken-looking one chasing an effect that isn't visibly
-            // paying off in practice -- micaEnabled_ (and the
-            // DwmSetWindowAttribute calls themselves) are left in place
-            // in case a future Windows/driver combination renders it
-            // correctly, but nothing here currently depends on that.
+            // reports success (see ApplyDarkMode) but no translucent
+            // backdrop actually renders on this host, just a flat,
+            // undifferentiated light fill behind everything, which reads
+            // as a visual bug (a stray white margin around an otherwise
+            // fully dark-themed dialog) rather than a subtle backdrop. A
+            // correctly opaque, consistent dialog beats a broken-looking
+            // one chasing an effect that isn't visibly paying off in
+            // practice -- micaEnabled_ (and the DwmSetWindowAttribute
+            // calls themselves) are left in place in case a future
+            // Windows/driver combination renders it correctly, but
+            // nothing here currently depends on that.
             HDC hdc = reinterpret_cast<HDC>(wParam);
             RECT client{};
             GetClientRect(hwnd, &client);
             FillRect(hdc, &client,
                       backgroundBrush_ != nullptr ? backgroundBrush_
                                                    : reinterpret_cast<HBRUSH>(COLOR_3DFACE + 1));
+
+            // The Name field's rounded-rect card -- drawn here (not by
+            // nameEdit_ itself, which has no border/background style of
+            // its own) so it can extend past the small real EDIT control
+            // into a comfortably tall, Windows-11-looking field surface;
+            // WM_CTLCOLOREDIT fills nameEdit_'s own rect with the exact
+            // same color so the two read as one seamless surface.
+            if (editBackgroundBrush_ != nullptr && nameFieldRect_.right > nameFieldRect_.left) {
+                const UINT dpi = GetDpiForWindow(hwnd);
+                const int cornerRadius = Scale(kButtonCornerRadius, dpi);
+                const bool dark = IsDarkModeEnabled();
+                HPEN borderPen = CreatePen(PS_SOLID, 1, dark ? RGB(0x50, 0x50, 0x50) : RGB(0xAD, 0xAD, 0xAD));
+                HGDIOBJ oldBrush = SelectObject(hdc, editBackgroundBrush_);
+                HGDIOBJ oldPen = SelectObject(hdc, borderPen);
+                RoundRect(hdc, nameFieldRect_.left, nameFieldRect_.top, nameFieldRect_.right, nameFieldRect_.bottom,
+                          cornerRadius, cornerRadius);
+                SelectObject(hdc, oldBrush);
+                SelectObject(hdc, oldPen);
+                DeleteObject(borderPen);
+            }
             return 1;
         }
 
@@ -193,19 +293,16 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         }
 
         case WM_CTLCOLORSTATIC: {
-            // The Name label always keeps its own small opaque
-            // background (never lets Mica show through here, unlike the
-            // bare margins WM_ERASEBKGND leaves transparent) -- Mica
-            // samples the real desktop wallpaper behind the window, so
-            // it can render lighter than this dialog's own dark text
-            // color would have contrast against; confirmed live as a
-            // real, human-reported readability problem with a
-            // NULL_BRUSH/transparent version of this that was tried
-            // first. A few px of non-bleeding label background is a
-            // better trade than unreadable text.
+            // Muted/secondary text color for every caption (Name,
+            // Selected, Available windows) -- a field label, not body
+            // text, the same visual hierarchy Windows 11 Settings uses
+            // between a section's label and its value/content.
+            // Background matches the dialog's own (captions sit
+            // directly on it, not on the rounded field card below the
+            // Name one).
             HDC hdcStatic = reinterpret_cast<HDC>(wParam);
             const bool dark = IsDarkModeEnabled();
-            SetTextColor(hdcStatic, dark ? RGB(0xE8, 0xE8, 0xE8) : GetSysColor(COLOR_WINDOWTEXT));
+            SetTextColor(hdcStatic, dark ? RGB(0xA0, 0xA0, 0xA0) : RGB(0x60, 0x60, 0x60));
             SetBkMode(hdcStatic, TRANSPARENT);
             return reinterpret_cast<LRESULT>(backgroundBrush_);
         }
@@ -237,22 +334,74 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
 }
 
 void GroupPickerWindow::CreateControls(HWND hwnd) {
-    // SS_CENTERIMAGE vertically centers a STATIC control's own text
-    // within whatever rect it's given -- needed since the label spans
-    // the full (taller-than-one-line) name row, to stay visually
-    // aligned with the shrunk-and-centered edit box next to it (see
-    // MeasureLineHeight's comment).
-    nameLabel_ = CreateWindowExW(0, L"STATIC", L"Name:", WS_CHILD | WS_VISIBLE | SS_LEFT | SS_CENTERIMAGE, 0, 0, 0,
-                                  0, hwnd, nullptr, instance_, nullptr);
-    // WS_BORDER, not WS_EX_CLIENTEDGE -- a flat 1px border reads as
-    // Windows 11 (Settings/File Explorer's own text fields); the sunken
-    // 3D WS_EX_CLIENTEDGE look is the dated-looking style this pass
-    // exists to replace.
-    nameEdit_ = CreateWindowExW(0, L"EDIT", initialName_.c_str(), WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL,
-                                 0, 0, 0, 0, hwnd, nullptr, instance_, nullptr);
+    // A small muted caption above the field, not a colon-suffixed
+    // prompt beside it -- see kNameCaptionHeight's own comment on why.
+    nameLabel_ =
+        CreateWindowExW(0, L"STATIC", L"Name", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, hwnd, nullptr, instance_,
+                         nullptr);
+    // No border/background style of its own -- WM_ERASEBKGND draws a
+    // rounded-rect card behind it (see kNameCaptionHeight's own
+    // comment), and WM_CTLCOLOREDIT fills this control's own small rect
+    // with the exact same color so the two blend seamlessly into one
+    // surface with no visible seam between "card" and "control."
+    nameEdit_ = CreateWindowExW(0, L"EDIT", initialName_.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0,
+                                 hwnd, nullptr, instance_, nullptr);
 
-    list_.Create(hwnd);
-    list_.SetOnChanged([this]() { UpdateButtonStates(); });
+    selectedLabel_ = CreateWindowExW(0, L"STATIC", L"Group", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, hwnd,
+                                      nullptr, instance_, nullptr);
+    selected_.Create(hwnd);
+    // The single source of truth is selectedOrder_ (see class comment);
+    // every callback just mutates it and re-pushes it down to both
+    // lists via RefreshLists.
+    selected_.SetOnReordered([this](std::vector<HWND> newOrder) {
+        selectedOrder_ = std::move(newOrder);
+        RefreshLists();
+    });
+    selected_.SetOnRemoveRequested([this](HWND hwnd2) {
+        const auto it = std::find(selectedOrder_.begin(), selectedOrder_.end(), hwnd2);
+        if (it != selectedOrder_.end()) {
+            selectedOrder_.erase(it);
+        }
+        selectedWindow_ = hwnd2;  // the moved window becomes selected in its new (Available) list
+        RefreshLists();
+        // The window really did just move into this list -- keyboard
+        // focus (and with it, Up/Down/Left/Right) follows it there. Fires
+        // for a mouse-driven Remove click too, not just Left arrow: both
+        // trigger this same callback, and ending up focused on the list
+        // your click just moved something into reads as consistent, not
+        // surprising, so this isn't worth a separate flag to suppress it
+        // for one trigger and not the other.
+        SetFocus(available_.WindowHandle());
+    });
+    // A plain row-body click (not Remove, not the grip) just selects
+    // that row -- selectedWindow_ is the single source of truth for
+    // selection across both lists (see its own comment), so both
+    // callbacks below are identical regardless of which list reported
+    // the click.
+    auto onRowSelected = [this](HWND hwnd2) {
+        selectedWindow_ = hwnd2;
+        available_.SetSelectedHwnd(selectedWindow_);
+        selected_.SetSelectedHwnd(selectedWindow_);
+    };
+    selected_.SetOnRowSelected(onRowSelected);
+
+    // "Open windows," not "Available windows" -- matches this dialog's
+    // original (pre-Windows-11-redesign) wording; "available" and
+    // "open" mean the same thing here, but "open" is the word the
+    // dialog used before and nothing about this rework changes that.
+    availableLabel_ = CreateWindowExW(0, L"STATIC", L"Open windows", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0,
+                                       hwnd, nullptr, instance_, nullptr);
+    available_.Create(hwnd);
+    available_.SetOnAddRequested([this](HWND hwnd2) {
+        if (std::find(selectedOrder_.begin(), selectedOrder_.end(), hwnd2) == selectedOrder_.end()) {
+            selectedOrder_.push_back(hwnd2);
+        }
+        selectedWindow_ = hwnd2;  // the moved window becomes selected in its new (Group) list
+        RefreshLists();
+        // See the symmetric comment on selected_'s own SetOnRemoveRequested.
+        SetFocus(selected_.WindowHandle());
+    });
+    available_.SetOnRowSelected(onRowSelected);
 
     // BS_OWNERDRAW -- confirmed live via a screenshot spike that
     // SetWindowTheme alone (which does correctly theme the edit
@@ -266,29 +415,84 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
                                      hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCancelButtonId)),
                                      instance_, nullptr);
 
-    // Real sizing (LayoutControls) runs before WM_SETFONT, not after --
-    // a single-line EDIT control's internal vertical-text-centering
-    // offset is computed relative to its size at the time it receives
-    // WM_SETFONT, not recomputed on a later resize. Every control here
-    // is created at a placeholder 0x0 size, so sending WM_SETFONT before
-    // the real MoveWindow left the name field's text pinned to the top
-    // instead of centered.
+    // dialogFont_ must exist before LayoutControls runs -- it measures
+    // nameEdit_'s line height against it (see MeasureLineHeight's own
+    // comment). Real sizing (LayoutControls) still runs before
+    // WM_SETFONT, not after -- a single-line EDIT control's internal
+    // vertical-text-centering offset is computed relative to its size at
+    // the time it receives WM_SETFONT, not recomputed on a later resize.
+    // Every control here is created at a placeholder 0x0 size, so
+    // sending WM_SETFONT before the real MoveWindow left the name
+    // field's text pinned to the top instead of centered.
+    dialogFont_ = MakeDialogFont(GetDpiForWindow(hwnd));
     LayoutControls();
 
-    HFONT dialogFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
-    for (HWND control : {nameLabel_, nameEdit_, createButton_, cancelButton_}) {
-        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(dialogFont), TRUE);
+    for (HWND control : {nameLabel_, nameEdit_, selectedLabel_, availableLabel_, createButton_, cancelButton_}) {
+        SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(dialogFont_), TRUE);
     }
 
     ApplyDarkMode();
 }
 
+// Rebuilds dialogFont_ at dpi and re-pushes WM_SETFONT to every control
+// that uses it -- called once from CreateControls (dpi already current)
+// and again on every WM_DPICHANGED (moving to a different-DPI monitor).
+// The new font is created and pushed before the old one is freed: for
+// the moment in between, every control must keep holding a valid HFONT,
+// never a deleted one.
+void GroupPickerWindow::ApplyDialogFont(UINT dpi) {
+    HFONT newFont = MakeDialogFont(dpi);
+    for (HWND control : {nameLabel_, nameEdit_, selectedLabel_, availableLabel_, createButton_, cancelButton_}) {
+        if (control != nullptr) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(newFont), TRUE);
+        }
+    }
+    if (dialogFont_ != nullptr) {
+        DeleteObject(dialogFont_);
+    }
+    dialogFont_ = newFont;
+}
+
+void GroupPickerWindow::CycleFocus(bool backward) {
+    // Order is the dialog's own reading order: the name field, then the
+    // two panels left-to-right, then the two buttons.
+    const HWND stops[] = {nameEdit_, available_.WindowHandle(), selected_.WindowHandle(), createButton_,
+                          cancelButton_};
+    const size_t count = std::size(stops);
+
+    // GetFocus() returning something not in this list (or nothing at all,
+    // before anything has been focused) lands on index 0, so the first Tab
+    // press always has a well-defined destination.
+    const HWND focused = GetFocus();
+    size_t index = 0;
+    for (size_t i = 0; i < count; ++i) {
+        if (stops[i] != nullptr && stops[i] == focused) {
+            index = i;
+            break;
+        }
+    }
+
+    // Create Group is disabled whenever the group is empty
+    // (UpdateButtonStates) -- SetFocus on a disabled window is a silent
+    // no-op, which without this loop would leave Tab stuck unable to
+    // leave whatever stop came before it (confirmed live). Bounded to
+    // `count` steps so a hypothetical future stop that's disabled too
+    // still terminates instead of spinning forever.
+    for (size_t step = 0; step < count; ++step) {
+        index = backward ? (index + count - 1) % count : (index + 1) % count;
+        if (stops[index] != nullptr && IsWindowEnabled(stops[index])) {
+            SetFocus(stops[index]);
+            break;
+        }
+    }
+}
+
 // Applies (or re-applies, on a live WM_SETTINGCHANGE) the current OS
 // theme to the whole dialog: the native title bar, cached background
 // brushes backing WM_ERASEBKGND/WM_CTLCOLORSTATIC/WM_CTLCOLOREDIT, and
-// every themeable child control. The list child reads IsDarkModeEnabled()
-// fresh at its own paint time (see GroupPickerListWindow::Paint), so it
-// just needs a repaint here, not separate state pushed down to it.
+// every themeable child control. Both list panels read
+// IsDarkModeEnabled() fresh at their own paint time, so they just need
+// a repaint here, not separate state pushed down to them.
 void GroupPickerWindow::ApplyDarkMode() {
     // window_ isn't assigned yet the first time this runs (called from
     // CreateControls, itself called from WM_CREATE, which fires before
@@ -321,18 +525,28 @@ void GroupPickerWindow::ApplyDarkMode() {
     editBackgroundBrush_ = CreateSolidBrush(dark ? RGB(0x2B, 0x2B, 0x2B) : GetSysColor(COLOR_WINDOW));
 
     // Buttons are owner-drawn (DrawOwnerButton), not themed via
-    // SetWindowTheme -- see their creation comment for why. Only the
-    // edit field needs it here, so its scrollbar/selection colors (not
-    // its border, which is now a plain WS_BORDER -- see its creation
-    // comment) follow dark mode too.
+    // SetWindowTheme -- see their creation comment for why. The edit
+    // field needs it for its scrollbar/selection colors (not its
+    // border, which is hand-drawn now -- see its creation comment);
+    // both list panels need it for the same reason -- their WS_VSCROLL
+    // scrollbars are native controls that don't follow dark mode on
+    // their own (their rows are hand-painted and already do, via
+    // IsDarkModeEnabled() read fresh in their own Paint -- only the
+    // OS-drawn scrollbar track/thumb needed this).
     if (nameEdit_ != nullptr) {
         SetWindowTheme(nameEdit_, dark ? L"DarkMode_Explorer" : nullptr, nullptr);
+    }
+    if (selected_.WindowHandle() != nullptr) {
+        SetWindowTheme(selected_.WindowHandle(), dark ? L"DarkMode_Explorer" : nullptr, nullptr);
+    }
+    if (available_.WindowHandle() != nullptr) {
+        SetWindowTheme(available_.WindowHandle(), dark ? L"DarkMode_Explorer" : nullptr, nullptr);
     }
 
     // RDW_ALLCHILDREN, not a plain InvalidateRect -- invalidating just
     // the dialog itself doesn't propagate to child windows (each has
     // its own update region), which would leave the owner-drawn
-    // buttons/list stuck showing the old theme's colors after a live
+    // buttons/panels stuck showing the old theme's colors after a live
     // WM_SETTINGCHANGE until something else happened to repaint them.
     RedrawWindow(dialogHwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_ERASE);
 }
@@ -359,21 +573,49 @@ void GroupPickerWindow::DrawOwnerButton(const DRAWITEMSTRUCT& item) {
         // just an accent-colored border on an otherwise ordinary gray
         // button, as before.
         const COLORREF accent = GetAccentColor();
-        fill = pressed ? DarkenColor(accent, 0.85) : accent;
+        if (disabled) {
+            // Plain gray text (the non-default disabled treatment
+            // below) on a full-brightness accent fill was illegible --
+            // confirmed, human-reported. Dim the fill itself instead
+            // (the same DarkenColor helper already used for the
+            // pressed state), and keep the text light rather than
+            // switching it to gray, so it still reads clearly against
+            // the now-muted fill.
+            fill = DarkenColor(accent, 0.4);
+            text = RGB(0xC8, 0xC8, 0xC8);
+        } else {
+            fill = pressed ? DarkenColor(accent, 0.85) : accent;
+            text = RGB(0xFF, 0xFF, 0xFF);
+        }
         border = fill;
-        text = RGB(0xFF, 0xFF, 0xFF);
     } else {
         fill = dark ? (pressed ? RGB(0x3A, 0x3A, 0x3A) : RGB(0x2B, 0x2B, 0x2B))
                     : (pressed ? RGB(0xD0, 0xD0, 0xD0) : RGB(0xE1, 0xE1, 0xE1));
         border = dark ? RGB(0x50, 0x50, 0x50) : RGB(0xAD, 0xAD, 0xAD);
         text = dark ? RGB(0xE8, 0xE8, 0xE8) : RGB(0x00, 0x00, 0x00);
-    }
-    if (disabled) {
-        text = dark ? RGB(0x70, 0x70, 0x70) : RGB(0x9E, 0x9E, 0x9E);
+        if (disabled) {
+            text = dark ? RGB(0x70, 0x70, 0x70) : RGB(0x9E, 0x9E, 0x9E);
+        }
     }
 
     const UINT dpi = GetDpiForWindow(item.hwndItem);
     const int cornerRadius = Scale(kButtonCornerRadius, dpi);
+
+    // BS_OWNERDRAW buttons still get a default WM_ERASEBKGND from
+    // DefWindowProc before WM_DRAWITEM ever runs, using the stock
+    // "Button" class background (COLOR_BTNFACE -- a light, undarkened
+    // gray) -- confirmed via pixel sampling a live screenshot: a ~1-2px
+    // sliver of exactly that color showed at each corner, precisely
+    // where RoundRect's own arc leaves the bounding box's four corner
+    // triangles untouched by the fill below. Painting the dialog's own
+    // background color across the *entire* rect first, before the
+    // rounded fill on top, guarantees those triangles read as
+    // background instead of stray light gray, matching the same
+    // full-bleed-then-rounded-fill-on-top order the row buttons in
+    // GroupPickerListWindow/GroupPickerSelectedListWindow already use.
+    HBRUSH surroundingBrush = CreateSolidBrush(dark ? RGB(0x20, 0x20, 0x20) : GetSysColor(COLOR_3DFACE));
+    FillRect(item.hDC, &item.rcItem, surroundingBrush);
+    DeleteObject(surroundingBrush);
 
     HBRUSH fillBrush = CreateSolidBrush(fill);
     HPEN borderPen = CreatePen(PS_SOLID, 1, border);
@@ -390,8 +632,15 @@ void GroupPickerWindow::DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     GetWindowTextW(item.hwndItem, buttonText, static_cast<int>(sizeof(buttonText) / sizeof(buttonText[0])));
     SetTextColor(item.hDC, text);
     SetBkMode(item.hDC, TRANSPARENT);
+    // The system generally pre-selects the WM_SETFONT font into an
+    // owner-drawn button's DC, but that isn't a documented guarantee,
+    // and button text is the most visible half of the DPI-font bug this
+    // was written to fix -- select dialogFont_ explicitly rather than
+    // rely on it.
+    HGDIOBJ oldButtonFont = SelectObject(item.hDC, dialogFont_);
     RECT textRect = item.rcItem;
     DrawTextW(item.hDC, buttonText, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(item.hDC, oldButtonFont);
 
     if (focused) {
         RECT focusRect = item.rcItem;
@@ -414,29 +663,56 @@ void GroupPickerWindow::LayoutControls() {
     GetClientRect(GetParent(nameEdit_), &client);
 
     const int margin = Scale(kMargin, dpi);
-    const int nameRowHeight = Scale(kNameRowHeight, dpi);
-    const int nameLabelWidth = Scale(kNameLabelWidth, dpi);
+    const int captionHeight = Scale(kNameCaptionHeight, dpi);
+    const int captionGap = Scale(kNameCaptionGap, dpi);
+    const int fieldHeight = Scale(kNameFieldHeight, dpi);
+    const int fieldPaddingX = Scale(kNameFieldPaddingX, dpi);
     const int buttonHeight = Scale(kButtonHeight, dpi);
     const int buttonWidth = Scale(kButtonWidth, dpi);
+    const int sectionCaptionHeight = Scale(kSectionCaptionHeight, dpi);
+    const int sectionCaptionGap = Scale(kSectionCaptionGap, dpi);
+    const int columnGap = Scale(kColumnGap, dpi);
 
-    MoveWindow(nameLabel_, margin, margin, nameLabelWidth, nameRowHeight, TRUE);
+    MoveWindow(nameLabel_, margin, margin, client.right - 2 * margin, captionHeight, TRUE);
+
+    const int fieldTop = margin + captionHeight + captionGap;
+    nameFieldRect_ = RECT{margin, fieldTop, client.right - margin, fieldTop + fieldHeight};
 
     // Shrink the edit box to one line's actual height and center that
-    // within the row -- see MeasureLineHeight's comment for why (a
-    // single-line EDIT given a taller rect doesn't reliably center its
-    // own text).
-    const int editHeight =
-        std::min(nameRowHeight, MeasureLineHeight(nameEdit_, reinterpret_cast<HFONT>(GetStockObject(
-                                                                  DEFAULT_GUI_FONT))) +
-                                     Scale(6, dpi));
-    const int editY = margin + (nameRowHeight - editHeight) / 2;
-    MoveWindow(nameEdit_, margin + nameLabelWidth, editY, client.right - margin - (margin + nameLabelWidth),
-               editHeight, TRUE);
+    // within the (taller, decorative) field card -- see
+    // MeasureLineHeight's comment for why (a single-line EDIT given a
+    // taller rect doesn't reliably center its own text). No extra
+    // padding added to the measured line height (an earlier version
+    // added +6px, tuned for the old, shorter kNameRowHeight layout --
+    // confirmed, human-reported as no longer centered once this field
+    // became a taller standalone card): the raw text metrics already
+    // give the control the height it needs.
+    const int editHeight = std::min(fieldHeight, MeasureLineHeight(nameEdit_, dialogFont_));
+    const int editY = nameFieldRect_.top + (fieldHeight - editHeight) / 2;
+    MoveWindow(nameEdit_, nameFieldRect_.left + fieldPaddingX, editY,
+               (nameFieldRect_.right - nameFieldRect_.left) - 2 * fieldPaddingX, editHeight, TRUE);
 
+    // Two side-by-side columns, equal width -- "Open windows" (left,
+    // available_) and "Group" (right, selected_) -- both the same
+    // height, filling whatever's left down to the button row. Neither
+    // column's size depends on how many rows it currently holds (unlike
+    // an earlier stacked version, where the Selected panel visibly
+    // resizing the whole dialog on every selection change read as
+    // jank); each just gets its own scrollbar if its content overflows
+    // this fixed height.
+    const int columnWidth = (client.right - 2 * margin - columnGap) / 2;
+    const int leftColumnLeft = margin;
+    const int rightColumnLeft = leftColumnLeft + columnWidth + columnGap;
+
+    const int columnCaptionTop = nameFieldRect_.bottom + margin;
+    MoveWindow(availableLabel_, leftColumnLeft, columnCaptionTop, columnWidth, sectionCaptionHeight, TRUE);
+    MoveWindow(selectedLabel_, rightColumnLeft, columnCaptionTop, columnWidth, sectionCaptionHeight, TRUE);
+
+    const int columnsTop = columnCaptionTop + sectionCaptionHeight + sectionCaptionGap;
     const int buttonsTop = client.bottom - margin - buttonHeight;
-    const int listTop = margin + nameRowHeight + margin;
-    const int listBottom = buttonsTop - margin;
-    MoveWindow(list_.WindowHandle(), margin, listTop, client.right - 2 * margin, listBottom - listTop, TRUE);
+    const int columnsBottom = buttonsTop - margin;
+    MoveWindow(available_.WindowHandle(), leftColumnLeft, columnsTop, columnWidth, columnsBottom - columnsTop, TRUE);
+    MoveWindow(selected_.WindowHandle(), rightColumnLeft, columnsTop, columnWidth, columnsBottom - columnsTop, TRUE);
 
     // Standard dialog pairing: Cancel at the far right, the primary
     // action immediately to its left.
@@ -445,32 +721,138 @@ void GroupPickerWindow::LayoutControls() {
                TRUE);
 }
 
-void GroupPickerWindow::PopulateList() {
-    std::vector<HWND> candidates;
-    EnumWindows(EnumPickerCandidatesProc, reinterpret_cast<LPARAM>(&candidates));
+void GroupPickerWindow::PopulateLists() {
+    allCandidates_.clear();
+    EnumWindows(EnumPickerCandidatesProc, reinterpret_cast<LPARAM>(&allCandidates_));
+    // Not visible yet at this point (WM_CREATE fires before ShowWindow),
+    // so EnumPickerCandidatesProc's own IsCandidateWindowShape check
+    // already excludes window_ here in practice -- this erase is just
+    // defensive symmetry with RefreshCandidates' own identical line,
+    // where it's load-bearing (see that method's comment).
+    std::erase(allCandidates_, window_);
 
-    // Existing group members are always kept checked even if they'd
-    // normally be filtered out of `candidates` (e.g. currently
+    // Existing group members are always kept selected even if they'd
+    // normally be filtered out of allCandidates_ (e.g. currently
     // minimized) -- editing membership should never silently drop a
-    // member just because of a transient state at edit time (see
-    // GroupPickerListWindow::SetWindows).
-    std::vector<HWND> validInitial;
+    // member just because of a transient state at edit time.
+    selectedOrder_.clear();
     for (HWND hwnd : initialSelection_) {
         if (IsWindow(hwnd)) {
-            validInitial.push_back(hwnd);
+            selectedOrder_.push_back(hwnd);
         }
     }
-    list_.SetWindows(candidates, validInitial);
+    // Reset explicitly rather than relying on RefreshLists' own fallback
+    // to overwrite a stale value -- this object is reused across
+    // multiple ShowModal calls, and a leftover selection from a
+    // previous dialog session could otherwise coincidentally still
+    // refer to a window that's (still) open now, silently carrying a
+    // stale selection into what should be a fresh dialog.
+    selectedWindow_.reset();
+    RefreshLists();
 }
 
-// Create Group needs at least one checked window; disabled otherwise so
-// the button's own state communicates whether clicking it would do
+void GroupPickerWindow::RefreshLists() {
+    // Mutually exclusive: a window shows in exactly one of the two
+    // panels (see class comment) -- available_ gets allCandidates_
+    // minus whatever's currently in selectedOrder_, in allCandidates_'s
+    // own stable order.
+    std::vector<HWND> availableWindows;
+    availableWindows.reserve(allCandidates_.size());
+    for (HWND hwnd : allCandidates_) {
+        if (std::find(selectedOrder_.begin(), selectedOrder_.end(), hwnd) == selectedOrder_.end()) {
+            availableWindows.push_back(hwnd);
+        }
+    }
+    available_.SetWindows(availableWindows);
+    selected_.SetSelected(selectedOrder_);
+    UpdateButtonStates();
+
+    // Fall back to a sensible default whenever selectedWindow_ is unset
+    // or no longer refers to a window in either list (closed, or dropped
+    // by a live-refresh reconciliation -- see RefreshCandidates) -- the
+    // same "always show a selected row so its action button stays
+    // discoverable" reasoning an earlier version's row-0 default served,
+    // just computed here (once, for both lists) instead of inside a
+    // child list guessing its own default independently.
+    const bool stillValid =
+        selectedWindow_.has_value() &&
+        (std::find(availableWindows.begin(), availableWindows.end(), *selectedWindow_) != availableWindows.end() ||
+         std::find(selectedOrder_.begin(), selectedOrder_.end(), *selectedWindow_) != selectedOrder_.end());
+    if (!stillValid) {
+        if (!availableWindows.empty()) {
+            selectedWindow_ = availableWindows.front();
+        } else if (!selectedOrder_.empty()) {
+            selectedWindow_ = selectedOrder_.front();
+        } else {
+            selectedWindow_.reset();
+        }
+    }
+    available_.SetSelectedHwnd(selectedWindow_);
+    selected_.SetSelectedHwnd(selectedWindow_);
+}
+
+void GroupPickerWindow::RefreshCandidates() {
+    if (selected_.IsDragging()) {
+        return;  // don't rebuild rows_ out from under an in-progress drag
+    }
+
+    std::vector<HWND> freshCandidates;
+    EnumWindows(EnumPickerCandidatesProc, reinterpret_cast<LPARAM>(&freshCandidates));
+    // Unlike PopulateLists' own initial enumeration (which runs from
+    // WM_CREATE, before ShowWindow makes window_ visible), this timer-
+    // driven re-enumeration runs while the dialog is already shown --
+    // window_ itself is by then a real, visible, WS_CAPTION-having,
+    // ownerless top-level window with non-empty text ("Edit Group
+    // Windows"), satisfying every check IsCandidateWindowShape makes.
+    // Confirmed, human-reported: without this, the dialog starts
+    // listing itself as a candidate in its own "Open windows" a tick or
+    // so after opening.
+    std::erase(freshCandidates, window_);
+
+    // Order-preserving merge, the same way src/main.cpp's
+    // UpdateAltTabCandidatesPreservingOrder reconciles Alt+Tab's own
+    // candidate list mid-session: survivors keep their existing
+    // position (comparing membership, not the fresh EnumWindows Z-order,
+    // avoids reshuffling Available's row order just because focus
+    // changed elsewhere on the desktop), closed ones drop out, brand-new
+    // ones append at the end.
+    std::vector<HWND> updated;
+    for (HWND hwnd : allCandidates_) {
+        if (std::find(freshCandidates.begin(), freshCandidates.end(), hwnd) != freshCandidates.end()) {
+            updated.push_back(hwnd);
+        }
+    }
+    for (HWND hwnd : freshCandidates) {
+        if (std::find(updated.begin(), updated.end(), hwnd) == updated.end()) {
+            updated.push_back(hwnd);
+        }
+    }
+
+    const size_t priorSelectedCount = selectedOrder_.size();
+    std::erase_if(selectedOrder_, [](HWND h) { return !IsWindow(h); });
+
+    // A no-op skips RefreshLists entirely, not just as an optimization:
+    // SetWindows/SetSelected unconditionally reset scrollOffset_/
+    // hoveredIndex_ and re-fetch every row's icon (GetWindowIconHandle's
+    // packaged-app fallback intentionally *leaks* the icon it allocates
+    // -- an accepted tradeoff for a handful of dialog-lifetime icons,
+    // not for one leaked every second this timer ticks with nothing
+    // actually changed).
+    if (updated == allCandidates_ && selectedOrder_.size() == priorSelectedCount) {
+        return;
+    }
+    allCandidates_ = std::move(updated);
+    RefreshLists();
+}
+
+// Create Group needs at least one selected window; disabled otherwise
+// so the button's own state communicates whether clicking it would do
 // anything, rather than it being a silent no-op.
 void GroupPickerWindow::UpdateButtonStates() {
     if (createButton_ == nullptr) {
         return;
     }
-    EnableWindow(createButton_, !list_.CheckedWindows().empty());
+    EnableWindow(createButton_, !selectedOrder_.empty());
 }
 
 void GroupPickerWindow::Commit() {
@@ -480,9 +862,9 @@ void GroupPickerWindow::Commit() {
     if (name.empty()) {
         name = editing_ ? initialName_ : L"New Group";  // never confirm an empty name
     }
-    const std::vector<HWND> windows = list_.CheckedWindows();
-    LogDebug(std::format(L"[Polish] GroupPicker: confirmed with {} window(s), name=\"{}\"", windows.size(), name));
-    result_ = GroupPickerResult{windows, name};
+    LogDebug(std::format(L"[Polish] GroupPicker: confirmed with {} window(s), name=\"{}\"", selectedOrder_.size(),
+                          name));
+    result_ = GroupPickerResult{selectedOrder_, name};
     done_ = true;
 }
 
@@ -492,13 +874,23 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
     initialName_ = initialName;
     editing_ = editing;
 
-    const UINT dpi = GetDpiForSystem();
-    const int width = Scale(kWindowWidth, dpi);
-    const int height = Scale(kWindowHeight, dpi);
-
-    RECT monitorRect{};
     HMONITOR monitor = (owner != nullptr && IsWindow(owner)) ? MonitorFromWindow(owner, MONITOR_DEFAULTTOPRIMARY)
                                                                : MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+
+    // GetDpiForMonitor(monitor), not GetDpiForSystem() -- this dialog is
+    // about to appear on monitor, which may not be the one system DPI
+    // describes (e.g. owner sits on a different-DPI secondary display).
+    // Same reasoning AltTabListWindow::Show already applies for its own
+    // per-monitor Reposition call, and the same create-time bug
+    // GroupChromeWindow's own constructor already found and fixed for
+    // itself.
+    UINT dpiX = USER_DEFAULT_SCREEN_DPI;
+    UINT dpiY = USER_DEFAULT_SCREEN_DPI;
+    GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
+    const int width = Scale(kWindowWidth, dpiX);
+    const int height = Scale(kWindowHeight, dpiX);
+
+    RECT monitorRect{};
     MONITORINFO monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
     if (GetMonitorInfoW(monitor, &monitorInfo)) {
@@ -520,6 +912,16 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
 
     ShowWindow(window_, SW_SHOW);
     SetForegroundWindow(window_);
+    // Start on the name field -- the first of CycleFocus's five tab stops,
+    // so the very first Tab press moves to "Open windows" rather than
+    // landing somewhere arbitrary, and typing a group name works without
+    // having to click the field first.
+    SetFocus(nameEdit_);
+
+    // Live-refreshes allCandidates_/selectedOrder_ against currently-open
+    // windows while the dialog sits idle (see RefreshCandidates) -- no
+    // push-based hook for window-open/close exists to reuse instead.
+    SetTimer(window_, kCandidateRefreshTimerId, kCandidateRefreshIntervalMs, nullptr);
 
     done_ = false;
     result_.reset();
@@ -535,19 +937,34 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
             done_ = true;
             break;
         }
+        // Swallowed here, before TranslateMessage/DispatchMessageW, so the
+        // name field never receives it as a literal tab character -- the
+        // same interception point and shape as the Escape case above. This
+        // window is deliberately not a real dialog (see the class
+        // comment), so Windows' own Tab handling never runs; CycleFocus
+        // does it by hand.
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_TAB &&
+            (msg.hwnd == window_ || IsChild(window_, msg.hwnd))) {
+            CycleFocus((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+            continue;
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
 
-    // DestroyWindow recursively destroys every child, including list_'s
-    // own window -- GroupPickerListWindow's WM_NCDESTROY handler clears
-    // its own window_ back to nullptr as part of that, so list_ is
-    // already safely reset by the time this returns (see its own
-    // comment); nothing extra needed here for it.
+    KillTimer(window_, kCandidateRefreshTimerId);
+
+    // DestroyWindow recursively destroys every child, including both
+    // list panels' own windows -- their WM_NCDESTROY handlers clear
+    // their own window_ back to nullptr as part of that, so they're
+    // already safely reset by the time this returns; nothing extra
+    // needed here for them.
     DestroyWindow(window_);
     window_ = nullptr;
     nameLabel_ = nullptr;
     nameEdit_ = nullptr;
+    selectedLabel_ = nullptr;
+    availableLabel_ = nullptr;
     createButton_ = nullptr;
     cancelButton_ = nullptr;
     if (backgroundBrush_ != nullptr) {
@@ -557,6 +974,10 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
     if (editBackgroundBrush_ != nullptr) {
         DeleteObject(editBackgroundBrush_);
         editBackgroundBrush_ = nullptr;
+    }
+    if (dialogFont_ != nullptr) {
+        DeleteObject(dialogFont_);
+        dialogFont_ = nullptr;
     }
     return result_;
 }

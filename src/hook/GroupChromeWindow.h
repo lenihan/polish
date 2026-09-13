@@ -435,4 +435,14 @@ private:
     std::optional<std::pair<bool, size_t>> hoveredSplitter_;
 };
 
+// Whether hwnd is any group's own chrome container (this group's or any
+// other's) -- a real, normal top-level window by design (see this
+// class's own header comment on why it's deliberately not special-cased
+// out of IsCandidateWindow/Alt+Tab), but not something a user would
+// sensibly add as a *member* of a group. Used only by GroupPickerWindow's
+// own candidate filter, not IsCandidateWindow itself -- windowtracking/
+// has no existing dependency on hook/ and shouldn't gain one just for
+// this narrower, picker-specific check.
+bool IsGroupChromeWindow(HWND hwnd);
+
 }  // namespace polish

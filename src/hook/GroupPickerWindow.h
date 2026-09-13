@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "hook/GroupPickerListWindow.h"
+#include "hook/GroupPickerSelectedListWindow.h"
 
 namespace polish {
 
@@ -15,12 +16,39 @@ struct GroupPickerResult {
     std::wstring name;
 };
 
-// The unified "New Group"/"Manage windows..." dialog: a single
-// Windows-11-style checklist (see GroupPickerListWindow) listing every
-// candidate window, each row a checkbox (group membership) + icon +
-// title, reorderable by dragging a checked row's grip handle -- order
-// feeds directly into GroupChromeWindow's tab order and GroupManager's
-// tile fill order.
+// The unified "New Group"/"Manage windows..." dialog: two side-by-side,
+// mutually-exclusive lists -- "Available windows" on the left (every
+// *not yet selected* candidate, each row with an Add button pointing
+// right -- see GroupPickerListWindow) and "Group" on the right (current
+// membership, in order, each row with a Remove button pointing left
+// back toward Available plus a drag handle for reordering -- see
+// GroupPickerSelectedListWindow). A window lives in exactly one of the
+// two lists at a time; the Add/Remove arrows point toward whichever
+// side a window would move to, the same spatial convention this
+// dialog's original (pre-Windows-11-redesign) two-list layout used.
+// Order feeds directly into GroupChromeWindow's tab order and
+// GroupManager's tile fill order.
+//
+// This shape went through several iterations before landing here: a
+// single flat checklist that sorted checked rows to the top (confirmed,
+// human-reported: felt like the list "jumped" out from under a user
+// mid-browse); a two-panel *stacked* version using checkboxes in
+// Available and a drag-handle-plus-click-to-remove Selected panel
+// (confirmed, human-reported: an imprecise drag attempt would silently
+// register as an accidental removal instead, and the Selected panel's
+// height visibly resizing the whole dialog on every selection change
+// read as jank); a version replacing that drag handle with explicit
+// Move Up/Move Down buttons (confirmed, human-reported: clunkier than a
+// drag handle for reordering). This version keeps an explicit Remove
+// button (so a near-missed drag still can't register as a removal --
+// the row body itself does nothing) while bringing the drag handle back
+// for reordering, and returns to a side-by-side layout instead of
+// stacking one panel's dynamic height above the other. selectedOrder_
+// (below) is this class's own single source of truth for group
+// membership/order; both child lists are pure renderers driven from it
+// (available_ shown ones are allCandidates_ minus selectedOrder_) and
+// report user gestures back up via callbacks, never holding their own
+// independent copy of "what's selected."
 //
 // Not a real Win32 modal dialog (no .rc dialog template, no DialogBoxW)
 // -- a plain WS_POPUP top-level window built the same from-scratch way
@@ -40,9 +68,9 @@ public:
     // it. Returns the final Group-list membership (in its final order)
     // and name on confirm, or std::nullopt on cancel.
     //
-    // `initialSelection` pre-checks those rows (used for editing an
+    // `initialSelection` pre-selects those rows (used for editing an
     // existing group's membership -- an empty list is exactly
-    // creation); existing members are always kept in the list even if
+    // creation); existing members are always kept selected even if
     // they'd normally be filtered out of "candidates" (e.g. currently
     // minimized) -- editing should never silently drop a member just
     // because of a transient state at edit time. `initialName`
@@ -58,7 +86,38 @@ private:
 
     void CreateControls(HWND hwnd);
     void LayoutControls();
-    void PopulateList();
+    // (Re)creates dialogFont_ at the given DPI and re-pushes WM_SETFONT
+    // to every control that uses it, freeing the previous HFONT only
+    // after the new one is in place (freeing first would leave those
+    // controls briefly holding a deleted GDI object). Called once from
+    // CreateControls and again on every WM_DPICHANGED.
+    void ApplyDialogFont(UINT dpi);
+    // Moves keyboard focus to the next (or previous) of this dialog's five
+    // tab stops, wrapping: Name, Open windows, Group, Create, Cancel. Done
+    // by hand because this deliberately isn't a real Win32 dialog (see the
+    // class comment) -- there's no IsDialogMessage/WS_TABSTOP machinery
+    // here to defer to, and two of the five stops are custom-painted child
+    // windows that dialog navigation wouldn't know how to drive anyway.
+    void CycleFocus(bool backward);
+    void PopulateLists();
+    // Pushes selectedOrder_'s current state down to both child lists
+    // (available_'s row set, selected_'s row list) -- the one place
+    // that keeps them in sync with each other and with selectedOrder_
+    // itself, called after every mutation of it. Also the one place
+    // selectedWindow_ is validated (falls back to a sensible default if
+    // it's unset or no longer refers to a live row) and pushed down to
+    // both lists via SetSelectedHwnd.
+    void RefreshLists();
+    // Re-enumerates open windows (the same filter PopulateLists' own
+    // EnumPickerCandidatesProc uses) on a WM_TIMER tick and reconciles
+    // allCandidates_/selectedOrder_ against it, order-preserving the same
+    // way src/main.cpp's UpdateAltTabCandidatesPreservingOrder does for
+    // Alt+Tab -- survivors keep their position, closed windows drop out,
+    // new ones append at the end. A no-op (skips RefreshLists entirely)
+    // when nothing actually changed, since SetWindows/SetSelected reset
+    // scroll/hover state and re-fetch every row's icon -- see this
+    // method's own .cpp comment for why that matters here specifically.
+    void RefreshCandidates();
     void UpdateButtonStates();
     void Commit();
     void ApplyDarkMode();
@@ -68,15 +127,41 @@ private:
     HWND window_ = nullptr;
     HWND nameLabel_ = nullptr;
     HWND nameEdit_ = nullptr;
+    HWND selectedLabel_ = nullptr;
+    HWND availableLabel_ = nullptr;
     HWND createButton_ = nullptr;
     HWND cancelButton_ = nullptr;
-    GroupPickerListWindow list_;
+    GroupPickerSelectedListWindow selected_;
+    GroupPickerListWindow available_;
+
+    // The single source of truth for group membership/order (see class
+    // comment) -- both child panels are refreshed from this, never the
+    // other way around. allCandidates_ is the fixed, never-reordered
+    // universe available_ browses; built once per ShowModal in
+    // PopulateLists.
+    std::vector<HWND> selectedOrder_;
+    std::vector<HWND> allCandidates_;
+
+    // The single cross-list selection -- since a window is only ever in
+    // one of the two lists at a time (see class comment), one shared
+    // HWND is sufficient to guarantee at most one row reads as
+    // "selected" across the whole dialog at once. Both child lists are
+    // pure renderers of this, updated via their own SetSelectedHwnd;
+    // never decide their own default independently. Validated and
+    // pushed down in RefreshLists (see its own comment).
+    std::optional<HWND> selectedWindow_;
 
     std::vector<HWND> initialSelection_;
     std::wstring initialName_;
     bool editing_ = false;
     std::optional<GroupPickerResult> result_;
     bool done_ = false;
+
+    // The rounded-rect "card" LayoutControls positions nameEdit_ within
+    // (client coords) -- cached from LayoutControls so WM_ERASEBKGND can
+    // draw the same rect behind the control without recomputing the
+    // layout math a second place it could drift out of sync with.
+    RECT nameFieldRect_{};
 
     // Backs WM_CTLCOLORSTATIC/WM_CTLCOLOREDIT/WM_ERASEBKGND -- created
     // once per ShowModal (matching window_'s own lifecycle) in
@@ -89,6 +174,17 @@ private:
     // control rather than blending completely into the dialog.
     HBRUSH backgroundBrush_ = nullptr;
     HBRUSH editBackgroundBrush_ = nullptr;
+
+    // The dialog's own DPI-aware text font (NONCLIENTMETRICS'
+    // lfMessageFont, the same source both list panels already use) --
+    // GetStockObject(DEFAULT_GUI_FONT) doesn't scale with DPI, unlike
+    // every control's own box, which left text tiny inside correctly-
+    // sized controls at high DPI (confirmed, human-reported). Rebuilt by
+    // ApplyDialogFont on creation and on every WM_DPICHANGED; freed at
+    // the end of ShowModal, same lifecycle as backgroundBrush_/
+    // editBackgroundBrush_ below (this object is reused across multiple
+    // ShowModal calls).
+    HFONT dialogFont_ = nullptr;
 
     // Set in ApplyDarkMode from the actual DwmSetWindowAttribute result
     // for DWMWA_SYSTEMBACKDROP_TYPE -- currently unused by any painting

@@ -1,5 +1,7 @@
 #include "windowtracking/WindowFilters.h"
 
+#include <dwmapi.h>
+
 namespace polish {
 
 bool IsCandidateWindowShape(HWND hwnd) {
@@ -35,6 +37,19 @@ bool IsCandidateWindowShape(HWND hwnd) {
     // of view. A real, user-facing window always has some title text;
     // nothing legitimate is excluded by requiring one.
     if (GetWindowTextLengthW(hwnd) == 0) {
+        return false;
+    }
+    // A suspended/cloaked UWP window keeps WS_VISIBLE, WS_CAPTION, no
+    // owner and its real title ("Settings") -- probed live: the only
+    // window on this desktop passing every check above with a non-zero
+    // DWMWA_CLOAKED. The title-length guard above was added for the
+    // *title-less* twin of this same app; the titled, cloaked one needs
+    // this. Any non-zero cloak value is excluded, not just
+    // DWM_CLOAKED_SHELL: other-virtual-desktop windows are cloaked the
+    // same way, and leaving those out of Alt+Tab matches Windows' own
+    // current-desktop-only Alt+Tab default.
+    int cloaked = 0;
+    if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked != 0) {
         return false;
     }
     return true;

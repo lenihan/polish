@@ -63,6 +63,7 @@ current todo list.
 
 ## Left to do
 
+= Need a more unique icon...current icon looks like Google Gemini
 - Add Alt+` to cycle a single app's own windows by most-recently-used
   order (native Windows does this by Z-order, not MRU).
 - Groups: handle a member window closing while backgrounded or tiled.

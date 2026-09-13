@@ -43,6 +43,7 @@ add_library(polish_core STATIC
     src/hook/GroupChromeWindow.cpp
     src/hook/GroupPickerWindow.cpp
     src/hook/GroupPickerListWindow.cpp
+    src/hook/GroupPickerSelectedListWindow.cpp
     src/hook/GroupHotkeyDialog.cpp
     src/hook/GroupTabThumbnail.cpp
     src/settings/Settings.cpp

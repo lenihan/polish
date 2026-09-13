@@ -7,9 +7,10 @@ namespace polish {
 // Whether hwnd looks like a normal top-level application window worth
 // treating as a switchable/groupable candidate at all, regardless of
 // whether it's currently minimized -- mirrors the heuristic the
-// taskbar/Alt-Tab use. Filters out tooltips, popups, IME windows, etc.
-// IsCandidateWindow and IsMinimizedCandidateWindow both build on this,
-// splitting only on IsIconic.
+// taskbar/Alt-Tab use. Filters out tooltips, popups, IME windows,
+// cloaked/suspended UWP windows, etc. IsCandidateWindow and
+// IsMinimizedCandidateWindow both build on this, splitting only on
+// IsIconic.
 bool IsCandidateWindowShape(HWND hwnd);
 
 // IsCandidateWindowShape(hwnd) && not minimized -- the normal Alt+Tab
