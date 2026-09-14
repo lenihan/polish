@@ -32,12 +32,28 @@ GridShape ComputeGridShape(GroupMode mode, GroupAlignment alignment, int count);
 // tested the same exhaustive way; CreateGroup/FindGroup's bookkeeping
 // is still covered by GroupManagerTests.cpp.
 //
-// Members are real children (WS_CHILD) of the group's chrome window --
-// true containment, not just repositioning -- so ApplyLayout needs the
-// chrome's HWND, and ReleaseGroup/ReleaseMember must be called before a
-// member/chrome is ever destroyed independently of the other (see
-// WindowReparenting.h's comment on why: a child destroyed along with
-// its parent silently loses whatever wasn't saved).
+// A member joins one of two ways, decided automatically per-window (see
+// EnsureAttached), never by the user:
+//  - Embedded: a real child (WS_CHILD) of the group's chrome window --
+//    true containment, can't be dragged outside the chrome's client
+//    area. The default, and the only way most (Win32) windows join.
+//  - Attached: kept top-level, with the chrome as its *owner*
+//    (GWLP_HWNDPARENT) instead of its parent -- the fallback for a
+//    window that categorically cannot be reparented (a UWP frame
+//    window, confirmed live: SetParent fails outright for
+//    ApplicationFrameWindow every time). An owned window stays above
+//    its owner and is hidden/minimized/destroyed along with it, without
+//    needing WS_CHILD -- so it still moves, minimizes, and closes with
+//    the group, just without being visually contained inside it (it
+//    keeps its own title bar and isn't clipped to the chrome; see
+//    docs/LIMITATIONS.md).
+//
+// Either way, ApplyLayout needs the chrome's HWND, and ReleaseGroup/
+// ReleaseMember must be called before a member/chrome is ever destroyed
+// independently of the other (see WindowReparenting.h's comments on
+// why: a child destroyed along with its parent silently loses whatever
+// wasn't saved, and an *owned* window is destroyed along with its owner
+// exactly the same way).
 class GroupManager {
 public:
     ~GroupManager();
@@ -60,11 +76,11 @@ public:
     // added as a member of its own group).
     GroupState* FindGroupContaining(HWND hwnd);
 
-    // Reparents any not-yet-reparented member into `chromeWindow` (see
-    // the class comment), dropping (GroupState::Remove) any member that
-    // turns out to be unreparentable at all -- e.g. a UWP frame window,
-    // see EnsureReparented/ReparentIntoGroup's own comments -- rather
-    // than leaving it in place to fail the identical reparent again on
+    // Attaches/embeds any not-yet-joined member into `chromeWindow` (see
+    // the class comment for the embedded/attached split), dropping
+    // (GroupState::Remove) any member that turns out to be joinable
+    // neither way at all -- see EnsureAttached's own comment -- rather
+    // than leaving it in place to fail the identical attempt again on
     // every future call. Callers that care about membership changing
     // out from under them (to resync a chrome's own tab labels, say)
     // should compare group.MemberCount() before and after. Restores any
@@ -73,14 +89,16 @@ public:
     // every member into
     // `contentRectClientCoords` -- *client-area-relative* coordinates
     // (a child window's SetWindowPos x/y are relative to its parent's
-    // client origin, not the screen), unlike the old reposition-only
+    // client origin, not the screen; an attached member's slot is
+    // converted to screen coordinates internally, see
+    // ApplyTabLayout/ApplyTileLayout) -- unlike the old reposition-only
     // design's screen coordinates. Behavior depends on group.Mode():
-    //  - Tab: every member occupies the identical rect; only the active
-    //    one is shown (SW_SHOW), every other is hidden (SW_HIDE) -- not
-    //    minimized, just not visible, so switching tabs is instant with
-    //    no z-order ambiguity now that they're true siblings under the
-    //    same parent (the old promote/demote HWND_TOPMOST pulse was for
-    //    independent top-level windows and doesn't apply to children).
+    //  - Tab: every embedded member occupies the identical rect and
+    //    stays shown; only the active one is Z-ordered on top (see
+    //    ApplyTabLayout's own comment for why nothing is ever hidden).
+    //    An *attached* member can't be covered by Z-order this way (an
+    //    owned window is always above its owner) so it's shown only
+    //    while active and hidden (SW_HIDE) otherwise.
     //  - Tile/Stack: contentRectClientCoords is divided into a grid (see
     //    ComputeGridShape -- Tile roughly square, Stack a single row/
     //    column), user-resizable via TileColumnBoundaries/
@@ -106,18 +124,27 @@ public:
     SIZE ApplyLayout(GroupState& group, HWND chromeWindow, const RECT& contentRectClientCoords,
                       int tileSplitterWidthPx = 0);
 
-    // Restores every reparented member of `group` back to an
-    // independent top-level window (WindowReparenting::RestoreTopLevel)
-    // -- must be called before the group's chrome window is destroyed
-    // (app exit, or an explicit "close group"), or every member still
-    // parented to it would be destroyed along with it.
+    // Restores every embedded member of `group` back to an independent
+    // top-level window (WindowReparenting::RestoreTopLevel) and detaches
+    // every attached one (WindowReparenting::DetachFromGroup) -- must be
+    // called before the group's chrome window is destroyed (app exit, or
+    // an explicit "close group"), or every member still parented/owned
+    // by it would be destroyed along with it.
     void ReleaseGroup(const GroupState& group);
 
-    // Restores a single member back to top-level -- used when removing
-    // one window from a group (edit-membership) without disbanding the
-    // whole group. No-op if hwnd was never reparented by this manager
-    // (e.g. it was never actually added, or already released).
+    // Restores/detaches a single member back to independent top-level --
+    // used when removing one window from a group (edit-membership)
+    // without disbanding the whole group. No-op if hwnd was never joined
+    // by this manager (e.g. it was never actually added, or already
+    // released).
     void ReleaseMember(HWND hwnd);
+
+    // Whether `group` currently has any attached (not embedded) member
+    // -- an attached member doesn't move for free with its chrome the
+    // way an embedded (WS_CHILD) one does, so a caller repositioning the
+    // chrome (main.cpp's onMoved_) needs to know whether it must also
+    // reflow the group to drag those along.
+    bool HasAttachedMembers(const GroupState& group) const;
 
     // A static preview of a Tab-mode member's content, captured the
     // instant it was last hidden (switched away from) -- used for the
@@ -176,27 +203,66 @@ public:
     void SetTileBoundary(GroupState& group, bool column, size_t index, int newPixelPosition, int totalSize,
                           int splitterWidthPx);
 
+    // Puts hwnd back into the rect the last ApplyLayout pass positioned
+    // it into, if it has since drifted -- a user dragging or resizing a
+    // member inside the group (confirmed real: Tab mode's member fills
+    // the whole content area but nothing stopped it being resized
+    // smaller, revealing the members Z-ordered behind it). A member's
+    // geometry is owned entirely by this class; nothing else is allowed
+    // to move one. No-op for a window that isn't a currently laid-out
+    // member (memberRects_ has no entry for it), or one already where it
+    // belongs. Returns whether it moved anything, for callers that only
+    // want to log a correction when one actually happened.
+    bool EnforceMemberRect(HWND hwnd);
+
 private:
     SIZE ApplyTabLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRect);
     SIZE ApplyTileLayout(GroupState& group, HWND chromeWindow, const RECT& contentRect, int splitterWidthPx);
-    // Returns false if hwnd could not be reparented (ReparentIntoGroup
-    // failed -- e.g. a UWP frame window, see its own comment) and is
-    // therefore *not* a child of chromeWindow despite being asked for.
-    // ApplyLayout uses this to drop a member that can never actually
-    // join, rather than retrying it every reflow forever.
-    bool EnsureReparented(HWND hwnd, HWND chromeWindow);
+    // Tries to embed hwnd (ReparentIntoGroup); if that fails, falls back
+    // to attaching it instead (AttachToGroup) -- see the class comment
+    // for what each means. Returns false only when *both* fail, which
+    // ApplyLayout uses to drop a member that can never join either way,
+    // rather than retrying it every reflow forever. A window already
+    // joined either way (present in reparentBackups_ or
+    // attachedBackups_) is a no-op returning true.
+    bool EnsureAttached(HWND hwnd, HWND chromeWindow);
+    // Whether hwnd is currently an attached (not embedded) member --
+    // i.e. present in attachedBackups_. Membership in exactly one of the
+    // two backup maps is the source of truth for which kind a member is.
+    bool IsAttached(HWND hwnd) const { return attachedBackups_.contains(hwnd); }
     void CaptureThumbnail(HWND hwnd);
 
     std::vector<GroupState> groups_;
     GroupId nextId_ = 1;
-    // Only contains entries for currently-reparented members -- absence
+    // Only contains entries for currently-embedded members -- absence
     // means "not a child of any group chrome right now," which
-    // EnsureReparented uses to decide whether reparenting is still
-    // needed.
+    // EnsureAttached uses to decide whether embedding is still needed.
     std::map<HWND, ReparentBackup> reparentBackups_;
+    // The attached-member counterpart of reparentBackups_ above -- same
+    // "map membership is the source of truth for current state"
+    // contract, just for the other join kind. A window is in at most
+    // one of these two maps at a time.
+    std::map<HWND, AttachBackup> attachedBackups_;
     // Owned by this class -- freed on ReleaseMember and in the
     // destructor. See CachedThumbnail.
     std::map<HWND, HBITMAP> memberThumbnails_;
+    // The rect the most recent ApplyLayout pass positioned each member
+    // into, in the member's own natural space: chrome-*client*-relative
+    // coordinates for an embedded member (the same space PositionMember's
+    // own `rect` argument uses -- SetWindowPos for a child window is
+    // relative to its parent's client origin), or *screen* coordinates
+    // for an attached one, which isn't a child of anything. Storing each
+    // in its own space is deliberate, not an inconsistency: a single
+    // screen-coordinate map would go stale for every embedded member the
+    // instant the chrome is dragged, since children move with their
+    // parent without any layout pass running -- see EnforceMemberRect,
+    // which is what actually interprets a stored rect using IsAttached
+    // to know which space it's in. Populated at every PositionMember (or
+    // attached-equivalent) call site, erased in ReleaseMember and
+    // ApplyLayout's unjoinable-drop loop -- absence means "not a member
+    // this class is currently positioning," same "map membership is the
+    // source of truth" shape reparentBackups_ already uses.
+    std::map<HWND, RECT> memberRects_;
     // Populated by ApplyTileLayout each time it runs. See
     // TileColumnBoundaries/TileRowBoundaries.
     std::map<GroupId, std::vector<int>> tileColumnBoundaries_;

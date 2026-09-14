@@ -34,9 +34,10 @@ constexpr int kButtonCornerRadius = 6;
 constexpr int kGlyphMargin = 7;
 
 // Shown as this row's tooltip in place of the usual Add-button/
-// truncated-title text -- see GroupPickerRow::addable's own comment.
-constexpr wchar_t kUnaddableTooltipText[] =
-    L"Can't be added to a group -- this kind of window (a Store/UWP app) can't be reparented";
+// truncated-title text -- see GroupPickerRow::embeddable's own comment.
+constexpr wchar_t kAttachedOnlyTooltipText[] =
+    L"This kind of window (a Store/UWP app) can't be contained inside the group -- it will be grouped and "
+    L"positioned with it instead, keeping its own title bar";
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
@@ -235,7 +236,7 @@ LRESULT GroupPickerListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wPa
             // (see the sibling list's own VK_LEFT case for the other
             // half).
             if (wParam == VK_RIGHT || wParam == VK_SPACE) {
-                if (selectedIndex_.has_value() && rows_[*selectedIndex_].addable && onAddRequested_) {
+                if (selectedIndex_.has_value() && onAddRequested_) {
                     onAddRequested_(rows_[*selectedIndex_].hwnd);
                 }
                 return 0;
@@ -306,8 +307,7 @@ LRESULT GroupPickerListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wPa
             // shape as AltTabListWindow's own hit-test loop over
             // {highlightIndex_, hoveredIndex_}.
             for (std::optional<size_t> rowIndex : {selectedIndex_, hoveredIndex_}) {
-                if (!rowIndex.has_value() || *rowIndex >= layout.rowRects.size() || *rowIndex >= rows_.size() ||
-                    !rows_[*rowIndex].addable) {
+                if (!rowIndex.has_value() || *rowIndex >= layout.rowRects.size() || *rowIndex >= rows_.size()) {
                     continue;
                 }
                 const RECT& r = layout.rowRects[*rowIndex];
@@ -339,14 +339,13 @@ LRESULT GroupPickerListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wPa
             // first click precisely on the row's own small Add button --
             // double-clicking anywhere on the row body does the same
             // thing (requires CS_DBLCLKS on this class, see the
-            // constructor). No-op for an unaddable row, same as the Add
-            // button itself never appearing there.
+            // constructor).
             POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             pt.y += scrollOffset_;
             const RowLayout layout = ComputeLayout(GetDpiForWindow(hwnd));
             for (size_t i = 0; i < layout.rowRects.size() && i < rows_.size(); ++i) {
                 if (PtInRect(&layout.rowRects[i], pt)) {
-                    if (rows_[i].addable && onAddRequested_) {
+                    if (onAddRequested_) {
                         onAddRequested_(rows_[i].hwnd);
                     }
                     return 0;
@@ -497,10 +496,7 @@ void GroupPickerListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         const GroupPickerRow& row = rows_[i];
         const bool hovered = hoveredIndex_.has_value() && *hoveredIndex_ == i;
         const bool selected = selectedIndex_.has_value() && *selectedIndex_ == i;
-        // Never for an unaddable row -- there's nothing the button could
-        // do (see GroupPickerRow::addable), so showing it would just be
-        // an invitation to click something inert.
-        const bool showButton = (selected || hovered) && row.addable;
+        const bool showButton = selected || hovered;
         const int rowMidY = (rowRect.top + rowRect.bottom) / 2;
 
         // Always a full-bleed rounded fill covering the *entire* row
@@ -527,28 +523,13 @@ void GroupPickerListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         int x = rowRect.left + paddingX;
         if (row.icon != nullptr) {
             const int iconTop = rowMidY - iconSize / 2;
-            if (row.addable) {
-                DrawIconEx(hdc, x, iconTop, row.icon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
-            } else {
-                // DSS_DISABLED -- the standard "greyed out" icon
-                // treatment (blended toward COLOR_3DHILIGHT/
-                // COLOR_3DSHADOW), the same look a disabled toolbar
-                // button's icon gets. Simpler and more consistent with
-                // the rest of the OS than hand-rolling an alpha blend.
-                DrawState(hdc, nullptr, nullptr, reinterpret_cast<LPARAM>(row.icon), 0, x, iconTop, iconSize,
-                          iconSize, DST_ICON | DSS_DISABLED);
-            }
+            DrawIconEx(hdc, x, iconTop, row.icon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
             x += iconSize + iconTextGap;
         }
 
         const RECT addRect = ComputeAddButtonRect(rowRect, dpi);
         RECT textRect{x, rowRect.top, addRect.left - paddingX, rowRect.bottom};
-        // Muted "disabled control" grey for an unaddable row's text,
-        // instead of the normal full-strength textColor -- the same
-        // dimming role kInactiveTextColor plays for an unselected group
-        // tab (GroupChromeWindow::PaintTabStrip), applied here to mean
-        // "can't be used" rather than "not currently selected".
-        SetTextColor(hdc, row.addable ? textColor : (dark ? RGB(0x80, 0x80, 0x80) : RGB(0x9A, 0x9A, 0x9A)));
+        SetTextColor(hdc, textColor);
         DrawTextW(hdc, row.title.c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 
         // Add button: a right-pointing arrow -- move this window toward
@@ -739,12 +720,12 @@ void GroupPickerListWindow::UpdateTooltip() {
         return;
     }
 
-    // Three tiers: an unaddable row's explanation takes priority over
-    // everything else on that row (there's no Add button to hover, so
-    // this fires for the whole row body, not just a sub-rect); then the
-    // Add button's own tooltip; otherwise, if the hovered row's title
-    // doesn't fit its column (DT_END_ELLIPSIS truncated it), show the
-    // full title -- helpful precisely when it's chopped off, so this
+    // Three tiers: an attached-only row's explanation takes priority
+    // over everything else on that row (shown for the whole row body,
+    // not just a sub-rect, since it's relevant no matter what's hovered);
+    // then the Add button's own tooltip; otherwise, if the hovered row's
+    // title doesn't fit its column (DT_END_ELLIPSIS truncated it), show
+    // the full title -- helpful precisely when it's chopped off, so this
     // deliberately doesn't fire for a title that already fits (see
     // IsTitleTruncated's own comment).
     const wchar_t* text = nullptr;
@@ -754,8 +735,8 @@ void GroupPickerListWindow::UpdateTooltip() {
         const RowLayout layout = ComputeLayout(dpi);
         if (*hoveredIndex_ < layout.rowRects.size() && *hoveredIndex_ < rows_.size()) {
             const GroupPickerRow& row = rows_[*hoveredIndex_];
-            if (!row.addable) {
-                text = kUnaddableTooltipText;
+            if (!row.embeddable) {
+                text = kAttachedOnlyTooltipText;
             } else {
                 const RECT& rowRect = layout.rowRects[*hoveredIndex_];
                 POINT cursor{};

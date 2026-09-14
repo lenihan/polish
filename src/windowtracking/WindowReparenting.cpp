@@ -113,4 +113,36 @@ void RestoreTopLevel(HWND hwnd, const ReparentBackup& backup) {
     ApplyFrameChange(hwnd);
 }
 
+AttachBackup AttachToGroup(HWND hwnd, HWND chrome) {
+    AttachBackup backup;
+    backup.owner = GetWindow(hwnd, GW_OWNER);
+
+    SetLastError(ERROR_SUCCESS);
+    SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(chrome));
+    const DWORD setError = GetLastError();
+
+    // Verify it actually stuck -- see AttachToGroup's own header comment
+    // for why this is unverified against a real UWP frame and must be
+    // checked live rather than assumed. Read back rather than trusting
+    // the setter's return value, the same "don't assume a Win32 setter
+    // took effect" caution ReparentIntoGroup already applies to
+    // SetParent.
+    const HWND ownerNow = GetWindow(hwnd, GW_OWNER);
+    if (ownerNow != chrome) {
+        LogDebug(std::format(L"[Polish] Attach: owner did NOT stick for {} -- wanted {}, got {} (SetWindowLongPtr "
+                              L"error {}). Member will still be position-synced, but won't hide/minimize with the "
+                              L"group on its own.",
+                              DescribeWindow(hwnd), reinterpret_cast<void*>(chrome), reinterpret_cast<void*>(ownerNow),
+                              setError));
+    } else {
+        LogDebug(std::format(L"[Polish] Attach: {} into {} -- owner set ok", DescribeWindow(hwnd),
+                              reinterpret_cast<void*>(chrome)));
+    }
+    return backup;
+}
+
+void DetachFromGroup(HWND hwnd, const AttachBackup& backup) {
+    SetWindowLongPtrW(hwnd, GWLP_HWNDPARENT, reinterpret_cast<LONG_PTR>(backup.owner));
+}
+
 }  // namespace polish

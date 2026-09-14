@@ -77,20 +77,36 @@ current todo list.
   active-tile-ring machinery (`GroupMode::Tile`/`Stack` share
   `IsTiledMode`) — only the grid shape itself differs
   (`ComputeGridShape`).
+- Groups: a member's position/size is now actively enforced, not just
+  set once — dragging or resizing a member's own frame inside the group
+  (revealing other members Z-ordered behind it in Tab mode, or sliding a
+  member over the tab strip) is cancelled (`WM_CANCELMODE` on
+  `EVENT_SYSTEM_MOVESIZESTART`) and snapped back
+  (`GroupManager::EnforceMemberRect`, driven off
+  `EVENT_OBJECT_LOCATIONCHANGE`/`EVENT_SYSTEM_MOVESIZEEND`) to the rect
+  `ApplyLayout` last assigned it.
+- Groups: the picker's selection now stays in the list a run of adds/
+  removes is happening in (the row that took the moved window's place),
+  instead of jumping to the other panel after every single one.
+- Groups: UWP/Store app windows (Calculator, Settings, Photos, ...) now
+  join a group as **attached** members instead of being refused — since
+  `SetParent` categorically fails for the `ApplicationFrameWindow` class
+  (confirmed live, `ERROR_INVALID_PARAMETER` every time), such a window
+  is kept top-level with the group's chrome as its *owner*
+  (`GWLP_HWNDPARENT`) rather than as its parent, and repositioned to its
+  slot in screen coordinates instead of being reparented into it. It
+  still moves/minimizes/closes with the group and is protected by the
+  same position-enforcement as an embedded member, but keeps its own
+  title bar and isn't visually contained inside the group's window — see
+  `docs/LIMITATIONS.md` for the full list of differences. Whether
+  Windows actually honors the owner relationship cross-process against a
+  real UWP frame is logged at join time
+  (`[Polish] Attach: owner set ok` / `did NOT stick`) rather than
+  assumed — worth checking that log line on a real machine before
+  relying on hide/restore-with-group working automatically.
 
 ## Left to do
 
-- Groups: UWP/Store app windows (Calculator, Settings, Photos, ...) can
-  never actually be reparented — confirmed live, `SetParent` fails
-  outright with `ERROR_INVALID_PARAMETER` for the `ApplicationFrameWindow`
-  class every time, mixed-DPI hosting or not. The picker greys these out
-  with an explanatory tooltip instead of offering them, and
-  `GroupManager::ApplyLayout` drops one from a group as a defensive
-  fallback if it ever gets in some other way (logged, resyncs the tab
-  strip). No path to actually support them — would mean positioning them
-  over the group's tile without reparenting, an unrelated feature's worth
-  of work (own taskbar/Alt+Tab entry, own title bar, explicit move/hide/
-  Z-order tracking to keep it glued to the group).
 - Need a more unique icon...current icon looks like Google Gemini
 - Add Alt+` to cycle a single app's own windows by most-recently-used
   order (native Windows does this by Z-order, not MRU).

@@ -357,19 +357,31 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
     });
     selected_.SetOnRemoveRequested([this](HWND hwnd2) {
         const auto it = std::find(selectedOrder_.begin(), selectedOrder_.end(), hwnd2);
+        // Index within "Group" -- the list this window is *leaving* --
+        // captured before the erase so the row that slides into its old
+        // slot can be worked out below.
+        const size_t leavingIndex =
+            it != selectedOrder_.end() ? static_cast<size_t>(it - selectedOrder_.begin()) : 0;
         if (it != selectedOrder_.end()) {
             selectedOrder_.erase(it);
         }
-        selectedWindow_ = hwnd2;  // the moved window becomes selected in its new (Available) list
-        RefreshLists();
-        // The window really did just move into this list -- keyboard
-        // focus (and with it, Up/Down/Left/Right) follows it there. Fires
-        // for a mouse-driven Remove click too, not just Left arrow: both
-        // trigger this same callback, and ending up focused on the list
-        // your click just moved something into reads as consistent, not
-        // surprising, so this isn't worth a separate flag to suppress it
-        // for one trigger and not the other.
-        SetFocus(available_.WindowHandle());
+        // Selection stays in "Group" so a run of removes is one keypress
+        // (or one click) each, rather than bouncing focus over to
+        // "Available windows" after every single one -- an earlier
+        // version followed the moved window into its new list instead,
+        // reported as needing a Tab/click back to "Group" before the
+        // next removal could happen.
+        if (!selectedOrder_.empty()) {
+            selectedWindow_ = selectedOrder_[std::min(leavingIndex, selectedOrder_.size() - 1)];
+            RefreshLists();
+            SetFocus(selected_.WindowHandle());
+        } else {
+            // Nothing left in "Group" to select -- fall back to the
+            // window that just left, now sitting in "Available windows".
+            selectedWindow_ = hwnd2;
+            RefreshLists();
+            SetFocus(available_.WindowHandle());
+        }
     });
     // A plain row-body click (not Remove, not the grip) just selects
     // that row -- selectedWindow_ is the single source of truth for
@@ -391,13 +403,32 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
                                        hwnd, nullptr, instance_, nullptr);
     available_.Create(hwnd);
     available_.SetOnAddRequested([this](HWND hwnd2) {
+        // Index within "Available windows" -- the list this window is
+        // *leaving* -- captured before the mutation, same reasoning as
+        // the symmetric block in selected_'s own SetOnRemoveRequested.
+        const std::vector<HWND> leavingList = AvailableWindows();
+        const auto leavingIt = std::find(leavingList.begin(), leavingList.end(), hwnd2);
+        const size_t leavingIndex =
+            leavingIt != leavingList.end() ? static_cast<size_t>(leavingIt - leavingList.begin()) : 0;
         if (std::find(selectedOrder_.begin(), selectedOrder_.end(), hwnd2) == selectedOrder_.end()) {
             selectedOrder_.push_back(hwnd2);
         }
-        selectedWindow_ = hwnd2;  // the moved window becomes selected in its new (Group) list
-        RefreshLists();
-        // See the symmetric comment on selected_'s own SetOnRemoveRequested.
-        SetFocus(selected_.WindowHandle());
+        // Selection stays in "Available windows" so a run of adds is one
+        // keypress (or one click) each -- see the symmetric comment on
+        // selected_'s own SetOnRemoveRequested for why this replaced the
+        // earlier "follow the window into its new list" behavior.
+        const std::vector<HWND> remaining = AvailableWindows();
+        if (!remaining.empty()) {
+            selectedWindow_ = remaining[std::min(leavingIndex, remaining.size() - 1)];
+            RefreshLists();
+            SetFocus(available_.WindowHandle());
+        } else {
+            // Nothing left in "Available windows" -- fall back to the
+            // window that just left, now sitting in "Group".
+            selectedWindow_ = hwnd2;
+            RefreshLists();
+            SetFocus(selected_.WindowHandle());
+        }
     });
     available_.SetOnRowSelected(onRowSelected);
 
@@ -749,7 +780,7 @@ void GroupPickerWindow::LogCandidates(const wchar_t* reason) const {
     LogDebug(std::format(L"[Polish] Picker: {} -- {} candidate(s): {}", reason, allCandidates_.size(), dump));
 }
 
-void GroupPickerWindow::RefreshLists() {
+std::vector<HWND> GroupPickerWindow::AvailableWindows() const {
     // Mutually exclusive: a window shows in exactly one of the two
     // panels (see class comment) -- available_ gets allCandidates_
     // minus whatever's currently in selectedOrder_, in allCandidates_'s
@@ -761,6 +792,11 @@ void GroupPickerWindow::RefreshLists() {
             availableWindows.push_back(hwnd);
         }
     }
+    return availableWindows;
+}
+
+void GroupPickerWindow::RefreshLists() {
+    const std::vector<HWND> availableWindows = AvailableWindows();
     available_.SetWindows(availableWindows);
     selected_.SetSelected(selectedOrder_);
     UpdateButtonStates();

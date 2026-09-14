@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <format>
 
 #include "util/Logging.h"
+#include "windowtracking/RectUtils.h"
+#include "windowtracking/WindowFilters.h"
 
 namespace polish {
 
@@ -113,11 +116,11 @@ GroupState* GroupManager::FindGroupContaining(HWND hwnd) {
     return it == groups_.end() ? nullptr : &*it;
 }
 
-bool GroupManager::EnsureReparented(HWND hwnd, HWND chromeWindow) {
-    if (reparentBackups_.contains(hwnd)) {
-        return true;  // already a child of some group chrome
+bool GroupManager::EnsureAttached(HWND hwnd, HWND chromeWindow) {
+    if (reparentBackups_.contains(hwnd) || attachedBackups_.contains(hwnd)) {
+        return true;  // already joined, one way or the other
     }
-    // Done here, before the reparent, not via the existing
+    // Done here, before either join path, not via the existing
     // RestoreIfMaximized calls further down: those all run on a window
     // that is already WS_CHILD, where SW_RESTORE on a WS_MINIMIZE child
     // is not meaningful. Needed now that the picker offers minimized
@@ -127,17 +130,33 @@ bool GroupManager::EnsureReparented(HWND hwnd, HWND chromeWindow) {
     if (IsIconic(hwnd)) {
         ShowWindow(hwnd, SW_RESTORE);
     }
-    // No backup recorded when the reparent fails -- ReparentIntoGroup
-    // has already put the window back the way it found it, so recording
-    // one would later hand RestoreTopLevel a window that was never
-    // actually reparented, and (worse) make this function believe the
-    // window is already a member and skip retrying it on the next
-    // layout pass.
-    if (std::optional<ReparentBackup> backup = ReparentIntoGroup(hwnd, chromeWindow)) {
-        reparentBackups_[hwnd] = *backup;
-        return true;
+    // A known case (a UWP frame window) skips straight to the attach
+    // fallback -- SetParent is *guaranteed* to fail for these (confirmed
+    // live, ERROR_INVALID_PARAMETER every time), so trying it first would
+    // only pay for a style strip and its rollback for no chance of
+    // success. Anything else still tries embedding first; attaching is
+    // strictly the fallback, since it's the one that doesn't visually
+    // contain the member.
+    if (!IsUnreparentableWindow(hwnd)) {
+        // No backup recorded when the reparent fails -- ReparentIntoGroup
+        // has already put the window back the way it found it, so
+        // recording one would later hand RestoreTopLevel a window that
+        // was never actually reparented, and (worse) make this function
+        // believe the window is already a member and skip retrying it on
+        // the next layout pass.
+        if (std::optional<ReparentBackup> backup = ReparentIntoGroup(hwnd, chromeWindow)) {
+            reparentBackups_[hwnd] = *backup;
+            return true;
+        }
     }
-    return false;
+    // Embedding wasn't possible (or wasn't attempted) -- fall back to
+    // attaching instead. AttachToGroup always returns a backup (see its
+    // own comment), so this path can't fail the way embedding can; a
+    // member only ends up dropped from the group entirely if it somehow
+    // isn't a valid window at all by the time GetWindow/SetWindowLongPtr
+    // run on it.
+    attachedBackups_[hwnd] = AttachToGroup(hwnd, chromeWindow);
+    return true;
 }
 
 void GroupManager::ReleaseGroup(const GroupState& group) {
@@ -149,20 +168,90 @@ void GroupManager::ReleaseGroup(const GroupState& group) {
 }
 
 void GroupManager::ReleaseMember(HWND hwnd) {
-    const auto it = reparentBackups_.find(hwnd);
-    if (it == reparentBackups_.end()) {
-        return;
+    // A window is in at most one of these two maps -- see attachedBackups_'s
+    // own comment -- so at most one of these branches ever does anything.
+    if (const auto it = reparentBackups_.find(hwnd); it != reparentBackups_.end()) {
+        if (IsWindow(hwnd)) {
+            RestoreTopLevel(hwnd, it->second);
+        }
+        reparentBackups_.erase(it);
+    } else if (const auto attachedIt = attachedBackups_.find(hwnd); attachedIt != attachedBackups_.end()) {
+        if (IsWindow(hwnd)) {
+            DetachFromGroup(hwnd, attachedIt->second);
+        }
+        attachedBackups_.erase(attachedIt);
+    } else {
+        return;  // never actually a member of this manager's making
     }
-    if (IsWindow(hwnd)) {
-        RestoreTopLevel(hwnd, it->second);
-    }
-    reparentBackups_.erase(it);
 
     const auto thumbIt = memberThumbnails_.find(hwnd);
     if (thumbIt != memberThumbnails_.end()) {
         DeleteObject(thumbIt->second);
         memberThumbnails_.erase(thumbIt);
     }
+    memberRects_.erase(hwnd);
+}
+
+bool GroupManager::HasAttachedMembers(const GroupState& group) const {
+    for (const GroupMember& member : group.Members()) {
+        if (member.kind == GroupMemberKind::Window && member.window != nullptr && IsAttached(member.window)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool GroupManager::EnforceMemberRect(HWND hwnd) {
+    const auto it = memberRects_.find(hwnd);
+    if (it == memberRects_.end() || !IsWindow(hwnd)) {
+        return false;
+    }
+    // memberRects_ is stored in the member's own natural space (see its
+    // own comment) -- screen coordinates already for an attached member,
+    // but chrome-*client*-relative for an embedded one, so a child's
+    // GetWindowRect (always screen coordinates, regardless of parent/
+    // child status) needs converting into that same space before
+    // comparing -- the same conversion PositionMember's caller logically
+    // undoes when it hands *back* a client rect to SetWindowPos.
+    RECT current{};
+    GetWindowRect(hwnd, &current);
+    if (!IsAttached(hwnd)) {
+        const HWND parent = GetParent(hwnd);
+        if (parent != nullptr) {
+            POINT topLeft{current.left, current.top};
+            POINT bottomRight{current.right, current.bottom};
+            ScreenToClient(parent, &topLeft);
+            ScreenToClient(parent, &bottomRight);
+            current = RECT{topLeft.x, topLeft.y, bottomRight.x, bottomRight.y};
+        }
+    }
+    const RECT& expected = it->second;
+    if (RectsApproximatelyEqual(current, expected, 1)) {
+        return false;
+    }
+    // A window whose own declared minimum tracking size is larger than
+    // its assigned slot still sits at the right *origin*, just clamped
+    // larger by SetWindowPos itself (PositionMember's own comment; the
+    // Outlook case) -- ReflowGroupTo's grow-and-reapply path is what
+    // handles that, by growing the chrome, not this. Fighting it here
+    // (forcing it back to a size it just refused) would just fire a
+    // pointless SetWindowPos on every location-change event for that
+    // member, so only origin drift and *shrinking* below the assigned
+    // size count as something to correct.
+    const bool originMatches = std::abs(current.left - expected.left) <= 1 && std::abs(current.top - expected.top) <= 1;
+    const bool notSmaller = (current.right - current.left) >= (expected.right - expected.left) - 1 &&
+                             (current.bottom - current.top) >= (expected.bottom - expected.top) - 1;
+    if (originMatches && notSmaller) {
+        return false;
+    }
+    SetWindowPos(hwnd, nullptr, expected.left, expected.top, expected.right - expected.left,
+                 expected.bottom - expected.top, SWP_NOZORDER | SWP_NOACTIVATE);
+    LogDebug(std::format(L"[Polish] Group: pulled member hwnd={} back into its slot "
+                          L"(was {},{} {}x{}, restored to {},{} {}x{})",
+                          reinterpret_cast<void*>(hwnd), current.left, current.top, current.right - current.left,
+                          current.bottom - current.top, expected.left, expected.top,
+                          expected.right - expected.left, expected.bottom - expected.top));
+    return true;
 }
 
 void GroupManager::CaptureThumbnail(HWND hwnd) {
@@ -316,6 +405,17 @@ RECT PositionMember(HWND hwnd, const RECT& rect, bool visible) {
     GetWindowRect(hwnd, &actual);
     return actual;
 }
+
+// Converts a chrome-client-relative rect into screen coordinates -- what
+// an *attached* member's slot needs to be, since it's a top-level window
+// (SetWindowPos for a window with no parent positions it on the screen,
+// not relative to anything), unlike an embedded member's chrome-client-
+// relative slot.
+RECT ClientRectToScreen(HWND chrome, const RECT& clientRect) {
+    POINT points[2] = {{clientRect.left, clientRect.top}, {clientRect.right, clientRect.bottom}};
+    MapWindowPoints(chrome, HWND_DESKTOP, points, 2);
+    return RECT{points[0].x, points[0].y, points[1].x, points[1].y};
+}
 }  // namespace
 
 SIZE GroupManager::ApplyLayout(GroupState& group, HWND chromeWindow, const RECT& contentRectClientCoords,
@@ -323,27 +423,27 @@ SIZE GroupManager::ApplyLayout(GroupState& group, HWND chromeWindow, const RECT&
     // Collected rather than removed as they're found: group.Remove
     // mutates group.Members(), the very vector this range-for is
     // iterating, so removal has to wait until the loop is done.
-    std::vector<HWND> unreparentable;
+    std::vector<HWND> unjoinable;
     for (const GroupMember& member : group.Members()) {
         if (member.kind == GroupMemberKind::Window && member.window != nullptr && IsWindow(member.window)) {
-            if (!EnsureReparented(member.window, chromeWindow)) {
-                unreparentable.push_back(member.window);
+            if (!EnsureAttached(member.window, chromeWindow)) {
+                unjoinable.push_back(member.window);
             }
         }
     }
-    for (HWND hwnd : unreparentable) {
-        // Couldn't be reparented and never will be (see
-        // ReparentIntoGroup's own comment -- a UWP frame window is the
-        // known case) -- dropped from the group rather than left in
-        // place to be retried every single reflow forever, which is
-        // exactly what happened before this existed (confirmed live:
-        // dozens of identical failures a second against Calculator).
-        // The picker also greys these out before they can be added at
-        // all (GroupPickerListWindow); this is the defensive fallback
-        // for any other window this app doesn't yet know is unaddable.
-        LogDebug(std::format(L"[Polish] Group: dropping unaddable member hwnd={} from group id={}",
+    for (HWND hwnd : unjoinable) {
+        // Couldn't be embedded *or* attached (see EnsureAttached's own
+        // comment -- in practice this means the window stopped being
+        // valid between the IsWindow check above and here) -- dropped
+        // from the group rather than left in place to be retried every
+        // single reflow forever, which is exactly what happened before
+        // this existed (confirmed live: dozens of identical failures a
+        // second against Calculator, back when attaching wasn't an
+        // option and every UWP frame window hit this path).
+        LogDebug(std::format(L"[Polish] Group: dropping unjoinable member hwnd={} from group id={}",
                               reinterpret_cast<void*>(hwnd), group.Id()));
         group.Remove(hwnd);
+        memberRects_.erase(hwnd);  // never actually positioned, but harmless/defensive to clear either way
     }
 
     if (IsTiledMode(group.Mode())) {
@@ -352,15 +452,15 @@ SIZE GroupManager::ApplyLayout(GroupState& group, HWND chromeWindow, const RECT&
     return ApplyTabLayout(group, chromeWindow, contentRectClientCoords);
 }
 
-SIZE GroupManager::ApplyTabLayout(const GroupState& group, HWND /*chromeWindow*/, const RECT& contentRect) {
+SIZE GroupManager::ApplyTabLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRect) {
     const int requestedWidth = contentRect.right - contentRect.left;
     const int requestedHeight = contentRect.bottom - contentRect.top;
     int neededWidth = requestedWidth;
     int neededHeight = requestedHeight;
     const std::optional<HWND> active = group.ActiveWindow();
 
-    // Every member stays WS_VISIBLE at all times -- switching tabs only
-    // restacks Z-order (the active member to the top among its
+    // An *embedded* member stays WS_VISIBLE at all times -- switching
+    // tabs only restacks Z-order (the active member to the top among its
     // siblings), never hides or shows anything. This replaced an
     // earlier hide-inactive/show-active design after a real, confirmed
     // report: switching tabs visibly flashed a member's own header
@@ -374,31 +474,56 @@ SIZE GroupManager::ApplyTabLayout(const GroupState& group, HWND /*chromeWindow*/
     // ever hidden -- never flashed, unlike this group's tab switch.
     // Hiding and later re-showing a window is a materially heavier
     // operation for DWM/the app than a plain Z-order restack, which is
-    // presumably why. Since a non-active member is only ever *covered*
-    // now, never actually hidden, RefreshThumbnail/CaptureThumbnail no
-    // longer key off IsWindowVisible to find capture candidates -- see
-    // their own comments.
+    // presumably why. Since a non-active *embedded* member is only ever
+    // *covered* now, never actually hidden, RefreshThumbnail/
+    // CaptureThumbnail no longer key off IsWindowVisible to find capture
+    // candidates -- see their own comments.
+    //
+    // None of that reasoning applies to an *attached* member, though: an
+    // owned window is always above its owner in Z-order, so it cannot be
+    // merely covered the way a sibling child can -- it has to actually
+    // be hidden when its tab isn't active, same as this app's earlier
+    // (abandoned, for embedded members) hide/show design. This is a real
+    // behavioral difference a user can notice (Calculator's own window
+    // blinking away rather than just being covered), but there's no
+    // Z-order-only alternative available for a window that isn't a
+    // sibling of anything.
     for (const GroupMember& member : group.Members()) {
         if (member.kind != GroupMemberKind::Window || member.window == nullptr || !IsWindow(member.window)) {
             continue;  // nested-group case -- v1 never populates this
         }
+        const bool attached = IsAttached(member.window);
+        const bool isActiveMember = active.has_value() && *active == member.window;
+        const RECT slot = attached ? ClientRectToScreen(chromeWindow, contentRect) : contentRect;
+        const bool visible = !attached || isActiveMember;
         RestoreIfMaximized(member.window);
-        SetWindowPos(member.window, nullptr, contentRect.left, contentRect.top,
-                     contentRect.right - contentRect.left, contentRect.bottom - contentRect.top,
-                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SetWindowPos(member.window, nullptr, slot.left, slot.top, slot.right - slot.left, slot.bottom - slot.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE | (visible ? SWP_SHOWWINDOW : SWP_HIDEWINDOW));
+        // The *requested* slot, not whatever GetWindowRect reports back
+        // below -- that can be larger than requested (a window's own
+        // declared minimum tracking size, see PositionMember's own
+        // comment), and EnforceMemberRect already has its own carve-out
+        // for that exact case rather than this needing to record the
+        // clamped size as "correct." In the member's own natural space
+        // -- see memberRects_'s own comment for why that differs by kind.
+        memberRects_[member.window] = slot;
         RECT actual{};
         GetWindowRect(member.window, &actual);
         neededWidth = std::max(neededWidth, static_cast<int>(actual.right - actual.left));
         neededHeight = std::max(neededHeight, static_cast<int>(actual.bottom - actual.top));
     }
-    if (active.has_value() && IsWindow(*active)) {
+    // Z-order promotion only matters for an embedded active member --
+    // an attached one is already always above its owner regardless, and
+    // HWND_TOP would instead promote it above unrelated top-level
+    // windows system-wide, which is not what "the active tab" means.
+    if (active.has_value() && IsWindow(*active) && !IsAttached(*active)) {
         SetWindowPos(*active, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
 
     return SIZE{neededWidth, neededHeight};
 }
 
-SIZE GroupManager::ApplyTileLayout(GroupState& group, HWND /*chromeWindow*/, const RECT& contentRect,
+SIZE GroupManager::ApplyTileLayout(GroupState& group, HWND chromeWindow, const RECT& contentRect,
                                     int splitterWidthPx) {
     // Real (non-nested-group) members only -- see the Tab-layout loop's
     // same filter. Counted separately from group.Members().size() so
@@ -432,11 +557,19 @@ SIZE GroupManager::ApplyTileLayout(GroupState& group, HWND /*chromeWindow*/, con
             int neededWidth = requestedWidth;
             int neededHeight = requestedHeight;
             for (HWND hwnd : windows) {
-                const RECT actual = PositionMember(hwnd, contentRect, true);
+                const RECT slot = IsAttached(hwnd) ? ClientRectToScreen(chromeWindow, contentRect) : contentRect;
+                const RECT actual = PositionMember(hwnd, slot, true);
+                memberRects_[hwnd] = slot;  // requested, not actual -- see the Tab-layout loop's comment
                 neededWidth = std::max(neededWidth, static_cast<int>(actual.right - actual.left));
                 neededHeight = std::max(neededHeight, static_cast<int>(actual.bottom - actual.top));
             }
-            SetWindowPos(*active, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            if (!IsAttached(*active)) {
+                // See the symmetric skip in ApplyTabLayout's own comment
+                // -- HWND_TOP would promote an attached member above
+                // unrelated top-level windows system-wide, not just
+                // within the group.
+                SetWindowPos(*active, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
             // No grid while maximized -- same "nothing to render/hit-
             // test" contract as the 0-1-member case above.
             tileColumnBoundaries_.erase(group.Id());
@@ -518,9 +651,12 @@ SIZE GroupManager::ApplyTileLayout(GroupState& group, HWND /*chromeWindow*/, con
         const int slotRight = colEdges[static_cast<size_t>(col) + 1] + col * splitterWidthPx;
         const int slotTop = rowEdges[static_cast<size_t>(row)] + row * splitterWidthPx;
         const int slotBottom = rowEdges[static_cast<size_t>(row) + 1] + row * splitterWidthPx;
-        const RECT slot{contentRect.left + slotLeft, contentRect.top + slotTop, contentRect.left + slotRight,
-                         contentRect.top + slotBottom};
-        const RECT actual = PositionMember(windows[static_cast<size_t>(i)], slot, true);
+        const RECT clientSlot{contentRect.left + slotLeft, contentRect.top + slotTop, contentRect.left + slotRight,
+                               contentRect.top + slotBottom};
+        HWND memberHwnd = windows[static_cast<size_t>(i)];
+        const RECT slot = IsAttached(memberHwnd) ? ClientRectToScreen(chromeWindow, clientSlot) : clientSlot;
+        const RECT actual = PositionMember(memberHwnd, slot, true);
+        memberRects_[memberHwnd] = slot;  // requested, not actual -- see the Tab-layout loop's comment
         colWidths[static_cast<size_t>(col)] =
             std::max(colWidths[static_cast<size_t>(col)], static_cast<int>(actual.right - actual.left));
         rowHeights[static_cast<size_t>(row)] =

@@ -100,6 +100,14 @@ private:
     // windows that dialog navigation wouldn't know how to drive anyway.
     void CycleFocus(bool backward);
     void PopulateLists();
+    // allCandidates_ minus whatever's currently in selectedOrder_, in
+    // allCandidates_'s own stable order -- exactly the row set the
+    // "Open windows" panel shows (the two lists are mutually exclusive,
+    // see class comment). Its own function because the add/remove
+    // callbacks need to see this list both before and after they mutate
+    // selectedOrder_, to work out which row should inherit the moved
+    // one's slot.
+    std::vector<HWND> AvailableWindows() const;
     // Pushes selectedOrder_'s current state down to both child lists
     // (available_'s row set, selected_'s row list) -- the one place
     // that keeps them in sync with each other and with selectedOrder_

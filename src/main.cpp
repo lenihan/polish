@@ -217,6 +217,15 @@ void OnObjectFocusChanged(HWND hwnd);
 std::vector<std::wstring> CollectMemberTitles(const polish::GroupState& group);
 std::vector<HICON> CollectMemberIcons(const polish::GroupState& group);
 
+// A member's geometry belongs entirely to GroupManager -- see
+// GroupManager::EnforceMemberRect's own comment. Called from three of
+// OnWinEvent's cases below (MOVESIZESTART/LOCATIONCHANGE/MOVESIZEEND)
+// whenever hwnd is a group member, to snap back a drag/resize the
+// member's own frame let through. A thin wrapper only so those call
+// sites read as intent ("keep this in place") rather than reaching into
+// g_groupManager directly three times.
+void KeepGroupMemberInPlace(HWND hwnd) { g_groupManager.EnforceMemberRect(hwnd); }
+
 // The window currently being live-tracked for settle events -- i.e. the
 // foreground window, whenever it's a candidate window (see
 // IsCandidateWindow). Only one window is tracked at a time; Phase 2
@@ -469,9 +478,36 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 }
                 g_inMoveSizeLoop = true;
             }
+            if (g_groupManager.FindGroupContaining(hwnd) != nullptr) {
+                // A group member's own frame (Explorer's, a browser's,
+                // ...) is about to enter its native move/size modal
+                // loop -- confirmed real: dragging a member's resize
+                // border resized it in place, revealing the other
+                // members Z-ordered behind it (Tab mode never hides
+                // them, see ApplyTabLayout's own comment). WM_CANCELMODE
+                // is the documented way to abort that loop from outside
+                // it; posted, not sent, so a hung/slow member can't
+                // block this hook callback. EnforceMemberRect is the
+                // belt to this loop's suspenders -- it also covers the
+                // (likely, unverified) case where cancelling didn't
+                // actually stop something that already moved a pixel or
+                // two before this event was delivered.
+                PostMessageW(hwnd, WM_CANCELMODE, 0, 0);
+                KeepGroupMemberInPlace(hwnd);
+            }
             break;
 
         case EVENT_OBJECT_LOCATIONCHANGE:
+            if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF) {
+                // Cheap for the overwhelming majority of these events (a
+                // map lookup that immediately misses) -- see
+                // KeepGroupMemberInPlace's own comment. Note the chrome
+                // itself moving fires this for every child too, which is
+                // harmless: memberRects_ is chrome-client-relative, and
+                // a child's client-relative position doesn't change when
+                // its parent moves.
+                KeepGroupMemberInPlace(hwnd);
+            }
             if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF && hwnd == g_trackedWindow &&
                 !g_inMoveSizeLoop) {
                 // Only debounce outside an active drag -- see
@@ -505,6 +541,13 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 KillTimer(g_messageWindow, kSettleTimerId);
                 CheckSettledRectAndRecord();
             }
+            // The final word once a drag loop survives the MOVESIZESTART
+            // cancel above (e.g. an app that runs its own drag loop
+            // rather than the system one, so WM_CANCELMODE had nothing
+            // to abort) -- LOCATIONCHANGE's own snap-back already fires
+            // live during the drag, but this guarantees the end state
+            // regardless.
+            KeepGroupMemberInPlace(hwnd);
             break;
 
         case EVENT_OBJECT_DESTROY:
@@ -2341,10 +2384,25 @@ void TriggerNewGroup(HWND owner) {
     chrome->SetOnAlignmentToggleRequested([id]() { ToggleGroupAlignment(id); });
     chrome->SetOnEditWindowsRequested([id]() { EditGroupWindows(id); });
     chrome->SetOnResized([id]() { ReflowGroupTo(id); });
-    // Deliberately UpdateGroupActiveTileHighlight, not ReflowGroupTo --
-    // members move for free with their parent (see GroupChromeWindow's
-    // own WM_MOVE comment), only the ring needs repositioning.
-    chrome->SetOnMoved([id]() { UpdateGroupActiveTileHighlight(id); });
+    // Deliberately UpdateGroupActiveTileHighlight, not a full
+    // ReflowGroupTo, for the common case -- an *embedded* member moves
+    // for free with its parent (see GroupChromeWindow's own WM_MOVE
+    // comment), only the ring needs repositioning. An *attached* member
+    // is a top-level window of its own, though (owned, not parented), so
+    // it does not move with the chrome on its own -- a group with any
+    // (HasAttachedMembers) needs the full reflow every time the chrome
+    // moves, to drag those along. WM_MOVE fires continuously during a
+    // drag, so this full-reflow path is deliberately not the default for
+    // every group -- only groups that actually have something needing it
+    // pay for it.
+    chrome->SetOnMoved([id]() {
+        polish::GroupState* group = g_groupManager.FindGroup(id);
+        if (group != nullptr && g_groupManager.HasAttachedMembers(*group)) {
+            ReflowGroupTo(id);
+        } else {
+            UpdateGroupActiveTileHighlight(id);
+        }
+    });
     chrome->SetOnMemberClicked([id](POINT pt) { OnGroupMemberClicked(id, pt); });
     chrome->SetOnClosing([id]() { CloseGroup(id); });
     chrome->SetOnTabHovered(

@@ -48,3 +48,36 @@ gets a full pass in Phase 3; today it records what's already known.
    without removing it from the Run key — if that happens, the checkbox
    still shows checked even though Windows won't actually run Polish at
    login.
+
+7. **A UWP/Store app window (Calculator, Settings, Photos, ...) can never
+   actually be contained inside a group** — confirmed live, `SetParent`
+   fails outright with `ERROR_INVALID_PARAMETER` for the
+   `ApplicationFrameWindow` class every time, mixed-DPI hosting or not.
+   Such a window still joins a group, but as an **attached** member
+   rather than an embedded one: it stays a real top-level window with the
+   group's chrome as its owner, instead of becoming a child of it. In
+   practice that means:
+   - It keeps its own title bar/frame, drawn by its own process — Polish
+     never strips it the way it does for an embedded member.
+   - It is not clipped to the group's window; it floats above the
+     chrome's own rect rather than being drawn inside it, so it can
+     visibly overhang when the group is partly offscreen, resized
+     smaller than it, or overlapped by another window.
+   - It is hidden (not merely covered) when its tab isn't the active one
+     in Tab mode, since an owned window is always above its owner in
+     Z-order and can't be covered by a sibling the way an embedded
+     member can.
+   - It moves, minimizes, restores, and closes with the group by relying
+     on Windows' owned-window semantics (`GWLP_HWNDPARENT`) — whether
+     that actually takes effect against a given UWP frame is logged at
+     join time (`[Polish] Attach: ...`) rather than assumed; if it
+     doesn't stick for some app, the member is still kept in sync
+     position-wise, just without the automatic hide/restore-with-group
+     behavior.
+   - Because it is an *owned* window, it is destroyed if the group's
+     chrome window is ever destroyed without first detaching it
+     (`GroupManager::ReleaseGroup`/`ReleaseMember`, called on every
+     normal "close group"/remove-member path) — an abrupt Polish crash
+     or kill before that runs could take an attached app down with it,
+     the same hazard an embedded member's `WS_CHILD` relationship
+     already has.
