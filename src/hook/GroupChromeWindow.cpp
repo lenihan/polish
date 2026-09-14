@@ -45,6 +45,16 @@ constexpr int kTabStripLeftPadding = 8;  // logical px, before the first tab
 constexpr int kTabGap = 8;               // logical px, between adjacent tabs
 constexpr int kTabCornerRadius = 8;      // logical px -- tabs' rounded top corners
 
+// The active tab's light outline, in *device* pixels -- deliberately not
+// DPI-scaled, unlike almost everything else here. Three separate pieces
+// have to line up pixel-for-pixel to read as one continuous stroke: the
+// tab's own RoundRect pen, the concave fillets' arc
+// (DrawConcaveFillet's borderThickness), and the straight run along the
+// connector's outer edge out to the header's edges (PaintTabStrip). One
+// constant so they can't drift apart. Scale this if the line reads too
+// faint at high DPI -- all three follow.
+constexpr int kActiveBorderThickness = 1;  // device px
+
 // Tab mode only: a permanent full-length band between the tab strip and
 // the member's own content, colored to match the active tab -- File
 // Explorer's own command-bar area does the same thing. Real reserved
@@ -150,23 +160,46 @@ int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USE
 // Method: `square` starts out entirely `innerColor` (continuing both the
 // tab's straight edge and the connector's own straight edge as one
 // shape); a quarter circle of radius `radius`, centered on `arcCenter`,
-// is then carved out of it in `outerColor` -- leaving a concave arc that
-// curves from the tab's edge into the connector's edge instead of
-// meeting at a hard corner.
-void DrawConcaveFillet(HDC hdc, const RECT& square, POINT arcCenter, COLORREF innerColor, COLORREF outerColor) {
+// is filled in `borderColor`, then a second, smaller quarter circle
+// (radius - borderThickness) is filled in `outerColor` on top of that --
+// leaving a `borderThickness`-wide ring of `borderColor` tracing the arc
+// exactly, the curved counterpart of the active tab's own straight-edge
+// pen (PaintTabStrip) and the straight run along the connector's outer
+// edge (also PaintTabStrip) -- together, one continuous outline with no
+// step where curve meets straight line. Pass borderThickness <= 0 (or
+// >= radius) for the plain two-fill join with no visible border, the
+// original behavior.
+void DrawConcaveFillet(HDC hdc, const RECT& square, POINT arcCenter, COLORREF innerColor, COLORREF outerColor,
+                       COLORREF borderColor, int borderThickness) {
     HBRUSH innerBrush = CreateSolidBrush(innerColor);
     FillRect(hdc, &square, innerBrush);
     DeleteObject(innerBrush);
 
     const int radius = square.right - square.left;
-    HRGN circleRgn =
-        CreateEllipticRgn(arcCenter.x - radius, arcCenter.y - radius, arcCenter.x + radius, arcCenter.y + radius);
     HRGN squareRgn = CreateRectRgn(square.left, square.top, square.right, square.bottom);
-    CombineRgn(squareRgn, squareRgn, circleRgn, RGN_AND);
-    HBRUSH outerBrush = CreateSolidBrush(outerColor);
-    FillRgn(hdc, squareRgn, outerBrush);
-    DeleteObject(outerBrush);
-    DeleteObject(circleRgn);
+
+    HRGN outerCircleRgn =
+        CreateEllipticRgn(arcCenter.x - radius, arcCenter.y - radius, arcCenter.x + radius, arcCenter.y + radius);
+    HRGN outerRgn = CreateRectRgn(0, 0, 0, 0);
+    CombineRgn(outerRgn, squareRgn, outerCircleRgn, RGN_AND);
+    HBRUSH borderBrush = CreateSolidBrush(borderColor);
+    FillRgn(hdc, outerRgn, borderBrush);
+    DeleteObject(borderBrush);
+    DeleteObject(outerCircleRgn);
+    DeleteObject(outerRgn);
+
+    const int innerRadius = radius - borderThickness;
+    if (innerRadius > 0) {
+        HRGN innerCircleRgn = CreateEllipticRgn(arcCenter.x - innerRadius, arcCenter.y - innerRadius,
+                                                arcCenter.x + innerRadius, arcCenter.y + innerRadius);
+        HRGN innerRgn = CreateRectRgn(0, 0, 0, 0);
+        CombineRgn(innerRgn, squareRgn, innerCircleRgn, RGN_AND);
+        HBRUSH outerBrush = CreateSolidBrush(outerColor);
+        FillRgn(hdc, innerRgn, outerBrush);
+        DeleteObject(outerBrush);
+        DeleteObject(innerCircleRgn);
+        DeleteObject(innerRgn);
+    }
     DeleteObject(squareRgn);
 }
 
@@ -1102,6 +1135,70 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     const int tabColumnWidth = TabColumnWidth(dpi);        // 0 unless Vertical
     const int tabStripLeftWidth = TabStripLeftWidth(dpi);  // 0 unless Vertical
 
+    // Hoisted above the strip/connector painting below (rather than
+    // computed just before the tab-label loop, as it used to be) --
+    // paintConnectorBorderLine, further down, needs the active tab's own
+    // rect to know where to leave a gap for the fillets to bridge.
+    // Depends only on clientRect/memberTitles_/mode_/alignment_, none of
+    // which the painting below touches, so hoisting it changes nothing
+    // about what it returns.
+    const std::vector<RECT> tabRects = ComputeTabRects(clientRect);
+    // The active tab's own rect, if there is one with a currently valid
+    // index -- both paintConnectorBorderLine and the tab-painting loop
+    // further down need this, computed once so the two can never
+    // disagree about which tab (if any) is active for painting purposes.
+    const RECT* activeTabRect = (activeIndex_ < tabRects.size()) ? &tabRects[activeIndex_] : nullptr;
+
+    // Light outline continuing the active tab's own border pen and the
+    // concave fillets (see kActiveBorderThickness's own comment) out to
+    // both ends of the header, along the strip's trailing edge -- so the
+    // three read as one unbroken line separating the tab strip from the
+    // merged active-tab/connector shape, interrupted only where the
+    // fillets bridge it around the active tab (or not interrupted at
+    // all, when there isn't one). A closure, not a free function: called
+    // from two places below (the tabRects.empty() early-out and after
+    // the tab-painting loop), and it needs enough of this function's own
+    // locals (hdc, dpi-derived sizes, activeTabRect) that threading them
+    // all through as parameters would be noisier than capturing them.
+    // Deliberately called *after* every tab has painted its own fill --
+    // an inactive tab's fill happens to match the strip's own base color
+    // exactly and would otherwise paint straight over this row, erasing
+    // it, if this ran first.
+    auto paintConnectorBorderLine = [&]() {
+        HBRUSH borderBrush = CreateSolidBrush(kActiveBorderColor);
+        if (alignment_ == GroupAlignment::Vertical) {
+            const int lineRight = clientRect.left + tabColumnWidth;
+            const int lineLeft = lineRight - kActiveBorderThickness;
+            const int top = clientRect.top + titleBarHeight;
+            if (activeTabRect != nullptr) {
+                const int gapTop = activeTabRect->top - cornerRadius;
+                const int gapBottom = activeTabRect->bottom + cornerRadius;
+                RECT above{lineLeft, top, lineRight, gapTop};
+                FillRect(hdc, &above, borderBrush);
+                RECT below{lineLeft, gapBottom, lineRight, clientRect.bottom};
+                FillRect(hdc, &below, borderBrush);
+            } else {
+                RECT full{lineLeft, top, lineRight, clientRect.bottom};
+                FillRect(hdc, &full, borderBrush);
+            }
+        } else {
+            const int lineBottom = clientRect.top + titleBarHeight + tabHeight;
+            const int lineTop = lineBottom - kActiveBorderThickness;
+            if (activeTabRect != nullptr) {
+                const int gapLeft = activeTabRect->left - cornerRadius;
+                const int gapRight = activeTabRect->right + cornerRadius;
+                RECT left{clientRect.left, lineTop, gapLeft, lineBottom};
+                FillRect(hdc, &left, borderBrush);
+                RECT right{gapRight, lineTop, clientRect.right, lineBottom};
+                FillRect(hdc, &right, borderBrush);
+            } else {
+                RECT full{clientRect.left, lineTop, clientRect.right, lineBottom};
+                FillRect(hdc, &full, borderBrush);
+            }
+        }
+        DeleteObject(borderBrush);
+    };
+
     if (alignment_ == GroupAlignment::Vertical) {
         // Left-column counterpart of the horizontal strip's own base
         // fill below -- same "leftover space reads as more inactive
@@ -1176,8 +1273,11 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     HGDIOBJ oldFont = SelectObject(hdc, font);
     SetBkMode(hdc, TRANSPARENT);
 
-    const std::vector<RECT> tabRects = ComputeTabRects(clientRect);
     if (tabRects.empty()) {
+        // No active tab either (activeTabRect is null whenever tabRects
+        // is), so this draws one unbroken line the full length of the
+        // header -- nothing for the fillets to bridge around.
+        paintConnectorBorderLine();
         SelectObject(hdc, oldFont);
         DeleteObject(font);
         return;
@@ -1199,8 +1299,8 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
             const COLORREF fill = active ? kActiveTabColor : (hovered ? kHoverTabColor : kInactiveTabColor);
             HBRUSH tabBrush = CreateSolidBrush(fill);
             HGDIOBJ oldBrush = SelectObject(hdc, tabBrush);
-            HPEN tabPen = active ? CreatePen(PS_SOLID, 1, kActiveBorderColor) : CreatePen(PS_NULL, 0, 0);
-            HGDIOBJ oldPen = SelectObject(hdc, tabPen);
+            HPEN nullPen = static_cast<HPEN>(GetStockObject(NULL_PEN));
+            HGDIOBJ oldPen = SelectObject(hdc, nullPen);
             // Rounded top corners only (Horizontal) / rounded left
             // corners only (Vertical): RoundRect rounds all four
             // corners of whatever rect it's given, so the *other* two
@@ -1219,6 +1319,10 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
             // below them: the content-facing edge is always the square,
             // pen-free one, so the active tab merges into the content
             // rather than reading as a bordered pill beside it.
+            //
+            // Fill only, no pen, here -- unconditionally, even for the
+            // active tab (see the second, border-only pass just below
+            // for why its outline is no longer drawn in this same call).
             IntersectClipRect(hdc, tabRect.left, tabRect.top, tabRect.right, tabRect.bottom);
             if (alignment_ == GroupAlignment::Vertical) {
                 RoundRect(hdc, tabRect.left, tabRect.top, tabRect.right + cornerRadius, tabRect.bottom, cornerRadius,
@@ -1231,8 +1335,45 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
             SelectObject(hdc, oldPen);
             SelectObject(hdc, oldBrush);
             DeleteObject(tabBrush);
-            if (!active) {
-                DeleteObject(tabPen);
+
+            if (active) {
+                // Second pass, border only (NULL_BRUSH, real pen) --
+                // splitting this out from the fill pass above is what
+                // stops the outline forking at the content-facing
+                // corners. A single RoundRect call with both a fill and
+                // a pen draws the pen the *entire* length of every edge
+                // inside the clip, including the last cornerRadius px of
+                // the content-facing side/edge where the fillet arc
+                // (DrawConcaveFillet, below) is about to take over --
+                // producing two visible lines side by side there (the
+                // straight pen plus the curve) instead of one turning
+                // into the other. Clipping the border pass short of
+                // that corner -- rather than the fillet somehow erasing
+                // the overshoot afterward -- is what makes this
+                // deterministic regardless of paint order.
+                //
+                // The `+ kActiveBorderThickness` below lands the pen's
+                // last row/column exactly on the arc's own inner
+                // endpoint rather than one pixel short of it; nudge this
+                // first if the join looks notched or doubled-up live.
+                HPEN borderPen = CreatePen(PS_SOLID, kActiveBorderThickness, kActiveBorderColor);
+                HGDIOBJ oldBorderPen = SelectObject(hdc, borderPen);
+                HGDIOBJ oldBorderBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                if (alignment_ == GroupAlignment::Vertical) {
+                    const int clipRight = tabRect.right - cornerRadius + kActiveBorderThickness;
+                    IntersectClipRect(hdc, tabRect.left, tabRect.top, clipRight, tabRect.bottom);
+                    RoundRect(hdc, tabRect.left, tabRect.top, tabRect.right + cornerRadius, tabRect.bottom,
+                              cornerRadius, cornerRadius);
+                } else {
+                    const int clipBottom = tabRect.bottom - cornerRadius + kActiveBorderThickness;
+                    IntersectClipRect(hdc, tabRect.left, tabRect.top, tabRect.right, clipBottom);
+                    RoundRect(hdc, tabRect.left, tabRect.top, tabRect.right, tabRect.bottom + cornerRadius,
+                              cornerRadius, cornerRadius);
+                }
+                SelectClipRgn(hdc, nullptr);
+                SelectObject(hdc, oldBorderBrush);
+                SelectObject(hdc, oldBorderPen);
+                DeleteObject(borderPen);
             }
         }
 
@@ -1253,20 +1394,20 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
                 const RECT topSquare{tabRect.right - cornerRadius, tabRect.top - cornerRadius, tabRect.right,
                                      tabRect.top};
                 DrawConcaveFillet(hdc, topSquare, POINT{topSquare.left, topSquare.top}, kActiveTabColor,
-                                   kInactiveTabColor);
+                                   kInactiveTabColor, kActiveBorderColor, kActiveBorderThickness);
                 const RECT bottomSquare{tabRect.right - cornerRadius, tabRect.bottom, tabRect.right,
                                         tabRect.bottom + cornerRadius};
                 DrawConcaveFillet(hdc, bottomSquare, POINT{bottomSquare.left, bottomSquare.bottom}, kActiveTabColor,
-                                   kInactiveTabColor);
+                                   kInactiveTabColor, kActiveBorderColor, kActiveBorderThickness);
             } else {
                 const RECT leftSquare{tabRect.left - cornerRadius, tabRect.bottom - cornerRadius, tabRect.left,
                                       tabRect.bottom};
                 DrawConcaveFillet(hdc, leftSquare, POINT{leftSquare.left, leftSquare.top}, kActiveTabColor,
-                                   kInactiveTabColor);
+                                   kInactiveTabColor, kActiveBorderColor, kActiveBorderThickness);
                 const RECT rightSquare{tabRect.right, tabRect.bottom - cornerRadius, tabRect.right + cornerRadius,
                                        tabRect.bottom};
                 DrawConcaveFillet(hdc, rightSquare, POINT{rightSquare.right, rightSquare.top}, kActiveTabColor,
-                                   kInactiveTabColor);
+                                   kInactiveTabColor, kActiveBorderColor, kActiveBorderThickness);
             }
         }
 
@@ -1284,6 +1425,9 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
         SelectObject(hdc, active ? boldFont : font);
         DrawTextW(hdc, memberTitles_[i].c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     }
+    // After every tab -- see paintConnectorBorderLine's own comment on
+    // why painting order matters here.
+    paintConnectorBorderLine();
     SelectObject(hdc, oldFont);
     DeleteObject(boldFont);
     DeleteObject(font);
@@ -1716,8 +1860,14 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
                 }
             }
         } else {
+            // Half the glyph box, not a quarter -- confirmed,
+            // human-reported, that a quarter-thickness bar read as too
+            // subtle to register as "this is the tab strip's edge" at
+            // this glyph's small size. Deliberate; don't shrink this
+            // back for visual "balance" without re-confirming legibility
+            // live.
             const int barThickness =
-                std::max(1, static_cast<int>(alignmentGlyph.bottom - alignmentGlyph.top) / 4);
+                std::max(1, static_cast<int>(alignmentGlyph.bottom - alignmentGlyph.top) / 2);
             HBRUSH barBrush = CreateSolidBrush(glyphColor);
             const RECT bar = (alignment_ == GroupAlignment::Vertical)
                                   ? RECT{alignmentGlyph.left, alignmentGlyph.top, alignmentGlyph.left + barThickness,
