@@ -61,9 +61,16 @@ public:
     GroupState* FindGroupContaining(HWND hwnd);
 
     // Reparents any not-yet-reparented member into `chromeWindow` (see
-    // the class comment), restores any still-maximized member first
-    // (SetWindowPos silently no-ops on size/position otherwise -- a
-    // confirmed M0 finding), then positions every member into
+    // the class comment), dropping (GroupState::Remove) any member that
+    // turns out to be unreparentable at all -- e.g. a UWP frame window,
+    // see EnsureReparented/ReparentIntoGroup's own comments -- rather
+    // than leaving it in place to fail the identical reparent again on
+    // every future call. Callers that care about membership changing
+    // out from under them (to resync a chrome's own tab labels, say)
+    // should compare group.MemberCount() before and after. Restores any
+    // still-maximized member first (SetWindowPos silently no-ops on
+    // size/position otherwise -- a confirmed M0 finding), then positions
+    // every member into
     // `contentRectClientCoords` -- *client-area-relative* coordinates
     // (a child window's SetWindowPos x/y are relative to its parent's
     // client origin, not the screen), unlike the old reposition-only
@@ -172,7 +179,12 @@ public:
 private:
     SIZE ApplyTabLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRect);
     SIZE ApplyTileLayout(GroupState& group, HWND chromeWindow, const RECT& contentRect, int splitterWidthPx);
-    void EnsureReparented(HWND hwnd, HWND chromeWindow);
+    // Returns false if hwnd could not be reparented (ReparentIntoGroup
+    // failed -- e.g. a UWP frame window, see its own comment) and is
+    // therefore *not* a child of chromeWindow despite being asked for.
+    // ApplyLayout uses this to drop a member that can never actually
+    // join, rather than retrying it every reflow forever.
+    bool EnsureReparented(HWND hwnd, HWND chromeWindow);
     void CaptureThumbnail(HWND hwnd);
 
     std::vector<GroupState> groups_;

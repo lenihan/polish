@@ -1,5 +1,10 @@
 #include "hook/GroupHotkeyDialog.h"
 
+#include <iterator>
+
+#include "util/DialogKeyboard.h"
+#include "util/UiFont.h"
+
 namespace polish {
 
 namespace {
@@ -107,8 +112,24 @@ LRESULT GroupHotkeyDialog::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
     }
 }
 
+void GroupHotkeyDialog::CycleFocus(bool backward) {
+    // Reading order: the four modifier checkboxes, the key field, then
+    // the two buttons.
+    const HWND stops[] = {ctrlCheck_, altCheck_, shiftCheck_, winCheck_, keyEdit_, saveButton_, cancelButton_};
+    polish::CycleFocus(stops, std::size(stops), backward);
+}
+
 void GroupHotkeyDialog::CreateControls(HWND hwnd) {
-    HFONT dialogFont = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    // MakeUiFont, not GetStockObject(DEFAULT_GUI_FONT) -- the same
+    // fixed, pre-DPI-awareness font that left the group chrome's tab
+    // labels tiny at high DPI (see util/UiFont.h). Owned now, so
+    // ShowModal's cleanup deletes it; the stock font it replaced must
+    // never be deleted.
+    if (dialogFont_ != nullptr) {
+        DeleteObject(dialogFont_);
+    }
+    dialogFont_ = MakeUiFont(GetDpiForWindow(hwnd));
+    HFONT dialogFont = dialogFont_;
 
     ctrlCheck_ = CreateWindowExW(0, L"BUTTON", L"Ctrl", WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, 0, 0, 0, 0, hwnd,
                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCtrlCheckId)), instance_, nullptr);
@@ -237,6 +258,12 @@ std::optional<HotkeyChoice> GroupHotkeyDialog::ShowModal(HWND owner, const Hotke
 
     ShowWindow(window_, SW_SHOW);
     SetForegroundWindow(window_);
+    // Start on the first modifier checkbox -- the first of CycleFocus's
+    // tab stops. Without this the dialog opened with focus nowhere at
+    // all, which (combined with having had no Tab handling) meant it
+    // could not be operated from the keyboard *whatsoever* until
+    // something was clicked first.
+    SetFocus(ctrlCheck_);
 
     done_ = false;
     result_.reset();
@@ -246,18 +273,28 @@ std::optional<HotkeyChoice> GroupHotkeyDialog::ShowModal(HWND owner, const Hotke
         if (got <= 0) {
             break;
         }
-        const bool targetsThisDialog = msg.hwnd == window_ || IsChild(window_, msg.hwnd);
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE && targetsThisDialog) {
+        if (IsDialogKeyDown(msg, window_, VK_ESCAPE)) {
             result_.reset();
             done_ = true;
             break;
         }
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN && targetsThisDialog) {
+        if (IsDialogKeyDown(msg, window_, VK_RETURN)) {
             Commit();
             if (done_) {
                 break;
             }
             continue;  // Commit() showed a validation error and left the dialog open
+        }
+        // Swallowed before TranslateMessage so the key field never sees
+        // a literal tab character -- same interception point and
+        // reasoning as GroupPickerWindow's own pump. This dialog is not
+        // a real Win32 dialog either (custom class, own modal loop), so
+        // BS_DEFPUSHBUTTON on Save and the checkboxes' own WS_TABSTOP-ish
+        // expectations get no help from a dialog manager: every stop has
+        // to be walked by hand.
+        if (IsDialogKeyDown(msg, window_, VK_TAB)) {
+            CycleFocus((GetKeyState(VK_SHIFT) & 0x8000) != 0);
+            continue;
         }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
@@ -265,6 +302,11 @@ std::optional<HotkeyChoice> GroupHotkeyDialog::ShowModal(HWND owner, const Hotke
 
     DestroyWindow(window_);
     window_ = nullptr;
+    if (dialogFont_ != nullptr) {
+        // After DestroyWindow, so no control still has it selected.
+        DeleteObject(dialogFont_);
+        dialogFont_ = nullptr;
+    }
     ctrlCheck_ = nullptr;
     altCheck_ = nullptr;
     shiftCheck_ = nullptr;

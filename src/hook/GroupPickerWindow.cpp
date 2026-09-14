@@ -10,7 +10,9 @@
 
 #include "hook/GroupChromeWindow.h"
 #include "util/DarkMode.h"
+#include "util/DialogKeyboard.h"
 #include "util/Logging.h"
+#include "util/UiFont.h"
 #include "windowtracking/WindowFilters.h"
 
 namespace polish {
@@ -110,25 +112,21 @@ int MeasureLineHeight(HWND hwnd, HFONT font) {
     return metrics.tmHeight + metrics.tmExternalLeading;
 }
 
-// The real font Windows itself uses for dialog body text at this DPI --
-// not GetStockObject(DEFAULT_GUI_FONT), a fixed, pre-DPI-awareness
-// bitmap font that leaves text tiny inside otherwise-correctly-scaled
-// controls at high DPI (confirmed, human-reported). Same technique both
-// list panels already use for their own row text (see
-// GroupPickerListWindow.cpp's identical block) and AltTabListWindow.cpp
-// documents as the right one.
-HFONT MakeDialogFont(UINT dpi) {
-    NONCLIENTMETRICSW metrics{};
-    metrics.cbSize = sizeof(metrics);
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi);
-    return CreateFontIndirectW(&metrics.lfMessageFont);
-}
-
 BOOL CALLBACK EnumPickerCandidatesProc(HWND hwnd, LPARAM lParam) {
-    // A group's own chrome container is deliberately excluded here even
-    // though it's a perfectly normal top-level window everywhere else
-    // (see IsGroupChromeWindow's own comment) -- not something a user
-    // would sensibly add as a *member* of any group, including its own.
+    // Other groups' chrome windows are deliberately *not* excluded here
+    // anymore. A chrome is a perfectly normal top-level window
+    // everywhere else in this app, and excluding every one of them (as
+    // an earlier version did, by class name) left a real hole:
+    // a window that's already a member of some group is WS_CHILD and
+    // therefore invisible to EnumWindows entirely (see
+    // WindowReparenting.h), so with its group's chrome filtered out too,
+    // an entire group's worth of windows had *no* representation in this
+    // list at all -- confirmed, human-reported, with a grouped Explorer
+    // window that simply couldn't be found anywhere. Listing the chrome
+    // gives that group a single visible entry standing in for all of it.
+    // Only the group currently being edited is excluded, and that
+    // happens in PopulateLists/RefreshCandidates (which know which one
+    // that is), not here.
     //
     // IsCandidateWindowShape, not IsCandidateWindow -- this dialog has
     // no separate "minimized" section the way Alt+Tab does, so it can't
@@ -138,7 +136,7 @@ BOOL CALLBACK EnumPickerCandidatesProc(HWND hwnd, LPARAM lParam) {
     // opened didn't appear at all). A minimized window is exactly as
     // groupable as a restored one -- GroupManager::EnsureReparented
     // restores it on add so it doesn't join as a blank tile.
-    if (IsCandidateWindowShape(hwnd) && !IsElevatedWindow(hwnd) && !IsGroupChromeWindow(hwnd)) {
+    if (IsCandidateWindowShape(hwnd) && !IsElevatedWindow(hwnd)) {
         reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
     }
     return TRUE;
@@ -424,7 +422,7 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
     // Every control here is created at a placeholder 0x0 size, so
     // sending WM_SETFONT before the real MoveWindow left the name
     // field's text pinned to the top instead of centered.
-    dialogFont_ = MakeDialogFont(GetDpiForWindow(hwnd));
+    dialogFont_ = MakeUiFont(GetDpiForWindow(hwnd));
     LayoutControls();
 
     for (HWND control : {nameLabel_, nameEdit_, selectedLabel_, availableLabel_, createButton_, cancelButton_}) {
@@ -441,7 +439,7 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
 // the moment in between, every control must keep holding a valid HFONT,
 // never a deleted one.
 void GroupPickerWindow::ApplyDialogFont(UINT dpi) {
-    HFONT newFont = MakeDialogFont(dpi);
+    HFONT newFont = MakeUiFont(dpi);
     for (HWND control : {nameLabel_, nameEdit_, selectedLabel_, availableLabel_, createButton_, cancelButton_}) {
         if (control != nullptr) {
             SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(newFont), TRUE);
@@ -455,36 +453,13 @@ void GroupPickerWindow::ApplyDialogFont(UINT dpi) {
 
 void GroupPickerWindow::CycleFocus(bool backward) {
     // Order is the dialog's own reading order: the name field, then the
-    // two panels left-to-right, then the two buttons.
+    // two panels left-to-right, then the two buttons. The ring mechanics
+    // (skipping disabled stops -- Create Group is disabled whenever the
+    // group is empty, see UpdateButtonStates -- and wrapping) live in
+    // util/DialogKeyboard, shared with GroupHotkeyDialog.
     const HWND stops[] = {nameEdit_, available_.WindowHandle(), selected_.WindowHandle(), createButton_,
                           cancelButton_};
-    const size_t count = std::size(stops);
-
-    // GetFocus() returning something not in this list (or nothing at all,
-    // before anything has been focused) lands on index 0, so the first Tab
-    // press always has a well-defined destination.
-    const HWND focused = GetFocus();
-    size_t index = 0;
-    for (size_t i = 0; i < count; ++i) {
-        if (stops[i] != nullptr && stops[i] == focused) {
-            index = i;
-            break;
-        }
-    }
-
-    // Create Group is disabled whenever the group is empty
-    // (UpdateButtonStates) -- SetFocus on a disabled window is a silent
-    // no-op, which without this loop would leave Tab stuck unable to
-    // leave whatever stop came before it (confirmed live). Bounded to
-    // `count` steps so a hypothetical future stop that's disabled too
-    // still terminates instead of spinning forever.
-    for (size_t step = 0; step < count; ++step) {
-        index = backward ? (index + count - 1) % count : (index + 1) % count;
-        if (stops[index] != nullptr && IsWindowEnabled(stops[index])) {
-            SetFocus(stops[index]);
-            break;
-        }
-    }
+    polish::CycleFocus(stops, std::size(stops), backward);
 }
 
 // Applies (or re-applies, on a live WM_SETTINGCHANGE) the current OS
@@ -730,6 +705,8 @@ void GroupPickerWindow::PopulateLists() {
     // defensive symmetry with RefreshCandidates' own identical line,
     // where it's load-bearing (see that method's comment).
     std::erase(allCandidates_, window_);
+    std::erase(allCandidates_, editedGroupChrome_);
+    LogCandidates(L"populate");
 
     // Existing group members are always kept selected even if they'd
     // normally be filtered out of allCandidates_ (e.g. currently
@@ -749,6 +726,27 @@ void GroupPickerWindow::PopulateLists() {
     // stale selection into what should be a fresh dialog.
     selectedWindow_.reset();
     RefreshLists();
+}
+
+void GroupPickerWindow::LogCandidates(const wchar_t* reason) const {
+    std::wstring dump;
+    for (HWND hwnd : allCandidates_) {
+        wchar_t title[128] = L"";
+        GetWindowTextW(hwnd, title, static_cast<int>(std::size(title)));
+        wchar_t className[128] = L"";
+        GetClassNameW(hwnd, className, static_cast<int>(std::size(className)));
+        if (!dump.empty()) {
+            dump += L" | ";
+        }
+        // Class name included for the same reason main.cpp's Alt+Tab
+        // dump includes it: it's what distinguishes a real app window
+        // from a UWP host frame (ApplicationFrameWindow,
+        // Windows.UI.Core.CoreWindow) and from another group's own
+        // chrome (PolishGroupChromeWindow), which is now a legitimate
+        // candidate rather than a filtered-out one.
+        dump += std::format(L"{}:\"{}\"[{}]", reinterpret_cast<void*>(hwnd), title, className);
+    }
+    LogDebug(std::format(L"[Polish] Picker: {} -- {} candidate(s): {}", reason, allCandidates_.size(), dump));
 }
 
 void GroupPickerWindow::RefreshLists() {
@@ -808,6 +806,7 @@ void GroupPickerWindow::RefreshCandidates() {
     // listing itself as a candidate in its own "Open windows" a tick or
     // so after opening.
     std::erase(freshCandidates, window_);
+    std::erase(freshCandidates, editedGroupChrome_);
 
     // Order-preserving merge, the same way src/main.cpp's
     // UpdateAltTabCandidatesPreservingOrder reconciles Alt+Tab's own
@@ -873,6 +872,10 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
     initialSelection_ = initialSelection;
     initialName_ = initialName;
     editing_ = editing;
+    // When editing, `owner` *is* the edited group's own chrome (main.cpp
+    // passes it); when creating a new group it's nullptr and nothing
+    // gets excluded. See editedGroupChrome_'s own comment.
+    editedGroupChrome_ = owner;
 
     HMONITOR monitor = (owner != nullptr && IsWindow(owner)) ? MonitorFromWindow(owner, MONITOR_DEFAULTTOPRIMARY)
                                                                : MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
@@ -931,11 +934,23 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
         if (got <= 0) {
             break;
         }
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE &&
-            (msg.hwnd == window_ || IsChild(window_, msg.hwnd))) {
+        if (IsDialogKeyDown(msg, window_, VK_ESCAPE)) {
             result_.reset();
             done_ = true;
             break;
+        }
+        // Enter commits, the counterpart to Escape above. Needed by hand
+        // for the same reason Tab is: the Create button is BS_OWNERDRAW
+        // with no dialog manager behind it, so BS_DEFPUSHBUTTON would do
+        // nothing and Enter was simply dead everywhere in the dialog --
+        // including in the name field, where it's the most natural way
+        // to finish. Ignored while Create is disabled (an empty group),
+        // matching what clicking the button would do.
+        if (IsDialogKeyDown(msg, window_, VK_RETURN)) {
+            if (createButton_ != nullptr && IsWindowEnabled(createButton_)) {
+                Commit();
+            }
+            continue;
         }
         // Swallowed here, before TranslateMessage/DispatchMessageW, so the
         // name field never receives it as a literal tab character -- the
@@ -943,8 +958,7 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
         // window is deliberately not a real dialog (see the class
         // comment), so Windows' own Tab handling never runs; CycleFocus
         // does it by hand.
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_TAB &&
-            (msg.hwnd == window_ || IsChild(window_, msg.hwnd))) {
+        if (IsDialogKeyDown(msg, window_, VK_TAB)) {
             CycleFocus((GetKeyState(VK_SHIFT) & 0x8000) != 0);
             continue;
         }

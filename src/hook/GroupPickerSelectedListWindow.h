@@ -39,6 +39,14 @@ struct GroupPickerSelectedRow {
 // click (neither rect) is a third, later-added gesture of its own:
 // select this row (see SetOnRowSelected), never remove or drag it.
 //
+// A row-body *double*-click removes it, though -- unlike a single click,
+// a double-click can't be an imprecise drag attempt (a drag is
+// press-move-release, not two quick clicks in place), so it doesn't
+// reintroduce the accidental-removal failure mode the paragraph above
+// describes. It exists purely as a quicker path once you already know
+// which window you want out, mirroring the sibling list's identical
+// double-click-to-add.
+//
 // Remove and the grip are only ever drawn/hit-testable on the currently
 // "selected" row (selectedIndex_, pushed down from GroupPickerWindow's
 // own single cross-list selectedWindow_) and/or whichever row the mouse
@@ -61,8 +69,10 @@ struct GroupPickerSelectedRow {
 //
 // Keyboard: one of GroupPickerWindow's five Tab stops, with the same
 // focus-border/Up-Down-moves-selection behavior as its sibling (see
-// GroupPickerListWindow's own comment). Reordering stays mouse-only --
-// there is no keyboard equivalent of the drag grip yet.
+// GroupPickerListWindow's own comment). Alt+Up/Alt+Down is the keyboard
+// equivalent of dragging a row's grip -- Alt-modified specifically so
+// plain Up/Down keeps meaning "move the selection" and can never
+// silently rearrange the group.
 class GroupPickerSelectedListWindow {
 public:
     explicit GroupPickerSelectedListWindow(HINSTANCE instance);
@@ -130,6 +140,8 @@ private:
     void UpdateTooltip();
     // Scrolls just far enough to bring row `index` fully into view -- see
     // GroupPickerListWindow::EnsureRowVisible's identical contract.
+    // One viewport's worth of rows, for PageUp/PageDown. Never 0.
+    size_t RowsPerPage() const;
     void EnsureRowVisible(size_t index);
 
     HINSTANCE instance_;

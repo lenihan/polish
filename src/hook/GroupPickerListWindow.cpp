@@ -7,7 +7,9 @@
 #include <iterator>
 
 #include "util/DarkMode.h"
+#include "util/UiFont.h"
 #include "util/WindowIcon.h"
+#include "windowtracking/WindowFilters.h"
 
 namespace polish {
 
@@ -31,6 +33,11 @@ constexpr int kButtonSize = 24;
 constexpr int kButtonCornerRadius = 6;
 constexpr int kGlyphMargin = 7;
 
+// Shown as this row's tooltip in place of the usual Add-button/
+// truncated-title text -- see GroupPickerRow::addable's own comment.
+constexpr wchar_t kUnaddableTooltipText[] =
+    L"Can't be added to a group -- this kind of window (a Store/UWP app) can't be reparented";
+
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
 // Linear per-channel blend toward `tint` -- used to give a selected row
@@ -51,10 +58,7 @@ COLORREF BlendColor(COLORREF base, COLORREF tint, double amount) {
 // with the exact font Paint draws it with, not GetStockObject's default,
 // so this agrees with what's actually visible.
 bool IsTitleTruncated(HWND window, const std::wstring& title, int availableWidth, UINT dpi) {
-    NONCLIENTMETRICSW metrics{};
-    metrics.cbSize = sizeof(metrics);
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi);
-    HFONT font = CreateFontIndirectW(&metrics.lfMessageFont);
+    HFONT font = MakeUiFont(dpi);
     HDC hdc = GetDC(window);
     HGDIOBJ oldFont = SelectObject(hdc, font);
     SIZE size{};
@@ -107,6 +111,9 @@ HWND GroupPickerListWindow::Create(HWND parent) {
     if (!classRegistered) {
         WNDCLASSEXW windowClass{};
         windowClass.cbSize = sizeof(windowClass);
+        // CS_DBLCLKS -- WM_LBUTTONDBLCLK never fires without it (off by
+        // default); needed for double-click-to-add on a row.
+        windowClass.style = CS_DBLCLKS;
         windowClass.lpfnWndProc = WindowProcThunk;
         windowClass.hInstance = instance_;
         windowClass.lpszClassName = kWindowClassName;
@@ -220,16 +227,21 @@ LRESULT GroupPickerListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wPa
         case WM_KEYDOWN: {
             // Right is this list's half of the move gesture -- the
             // keyboard equivalent of clicking the row's own Add button.
-            // Left does nothing here: a window in Open windows can only
-            // move right, into Group (see the sibling list's own VK_LEFT
-            // case for the other half).
-            if (wParam == VK_RIGHT) {
-                if (selectedIndex_.has_value() && onAddRequested_) {
+            // Space does the same thing: it's the conventional "activate
+            // the focused row" key, and a list where the only way to act
+            // on a row is an arrow key reads as broken to anyone who
+            // tries the obvious one first. Left does nothing here: a
+            // window in Open windows can only move right, into Group
+            // (see the sibling list's own VK_LEFT case for the other
+            // half).
+            if (wParam == VK_RIGHT || wParam == VK_SPACE) {
+                if (selectedIndex_.has_value() && rows_[*selectedIndex_].addable && onAddRequested_) {
                     onAddRequested_(rows_[*selectedIndex_].hwnd);
                 }
                 return 0;
             }
-            if (wParam != VK_UP && wParam != VK_DOWN) {
+            if (wParam != VK_UP && wParam != VK_DOWN && wParam != VK_HOME && wParam != VK_END &&
+                wParam != VK_PRIOR && wParam != VK_NEXT) {
                 return DefWindowProcW(hwnd, message, wParam, lParam);
             }
             if (rows_.empty()) {
@@ -238,11 +250,37 @@ LRESULT GroupPickerListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wPa
             // Clamped at both ends rather than wrapping: Tab is what
             // leaves this list (see GroupPickerWindow::CycleFocus), so
             // wrapping here would just make the two gestures ambiguous.
+            // With nothing selected yet, every one of these keys lands on
+            // the first row -- the same "first keypress has a
+            // well-defined destination" rule CycleFocus follows.
             size_t next = 0;
             if (selectedIndex_.has_value()) {
                 const size_t current = *selectedIndex_;
-                next = wParam == VK_DOWN ? std::min(current + 1, rows_.size() - 1)
-                                          : (current == 0 ? 0 : current - 1);
+                const size_t last = rows_.size() - 1;
+                const size_t page = RowsPerPage();
+                switch (wParam) {
+                    case VK_UP:
+                        next = current == 0 ? 0 : current - 1;
+                        break;
+                    case VK_DOWN:
+                        next = std::min(current + 1, last);
+                        break;
+                    case VK_HOME:
+                        next = 0;
+                        break;
+                    case VK_END:
+                        next = last;
+                        break;
+                    case VK_PRIOR:
+                        next = current < page ? 0 : current - page;
+                        break;
+                    case VK_NEXT:
+                        next = std::min(current + page, last);
+                        break;
+                    default:
+                        next = current;
+                        break;
+                }
             }
             // Reported up rather than applied here, exactly as a row-body
             // click is -- GroupPickerWindow owns the single cross-list
@@ -268,7 +306,8 @@ LRESULT GroupPickerListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wPa
             // shape as AltTabListWindow's own hit-test loop over
             // {highlightIndex_, hoveredIndex_}.
             for (std::optional<size_t> rowIndex : {selectedIndex_, hoveredIndex_}) {
-                if (!rowIndex.has_value() || *rowIndex >= layout.rowRects.size() || *rowIndex >= rows_.size()) {
+                if (!rowIndex.has_value() || *rowIndex >= layout.rowRects.size() || *rowIndex >= rows_.size() ||
+                    !rows_[*rowIndex].addable) {
                     continue;
                 }
                 const RECT& r = layout.rowRects[*rowIndex];
@@ -288,6 +327,27 @@ LRESULT GroupPickerListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wPa
                 if (PtInRect(&layout.rowRects[i], pt)) {
                     if (onRowSelected_) {
                         onRowSelected_(rows_[i].hwnd);
+                    }
+                    return 0;
+                }
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONDBLCLK: {
+            // A quick way to add a window without having to land the
+            // first click precisely on the row's own small Add button --
+            // double-clicking anywhere on the row body does the same
+            // thing (requires CS_DBLCLKS on this class, see the
+            // constructor). No-op for an unaddable row, same as the Add
+            // button itself never appearing there.
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            pt.y += scrollOffset_;
+            const RowLayout layout = ComputeLayout(GetDpiForWindow(hwnd));
+            for (size_t i = 0; i < layout.rowRects.size() && i < rows_.size(); ++i) {
+                if (PtInRect(&layout.rowRects[i], pt)) {
+                    if (rows_[i].addable && onAddRequested_) {
+                        onAddRequested_(rows_[i].hwnd);
                     }
                     return 0;
                 }
@@ -420,10 +480,7 @@ void GroupPickerListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     POINT priorViewportOrg{};
     SetViewportOrgEx(hdc, 0, -scrollOffset_, &priorViewportOrg);
 
-    NONCLIENTMETRICSW metrics{};
-    metrics.cbSize = sizeof(metrics);
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi);
-    HFONT textFont = CreateFontIndirectW(&metrics.lfMessageFont);
+    HFONT textFont = MakeUiFont(dpi);
     HGDIOBJ oldFont = SelectObject(hdc, textFont);
     SetBkMode(hdc, TRANSPARENT);
 
@@ -440,7 +497,10 @@ void GroupPickerListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         const GroupPickerRow& row = rows_[i];
         const bool hovered = hoveredIndex_.has_value() && *hoveredIndex_ == i;
         const bool selected = selectedIndex_.has_value() && *selectedIndex_ == i;
-        const bool showButton = selected || hovered;
+        // Never for an unaddable row -- there's nothing the button could
+        // do (see GroupPickerRow::addable), so showing it would just be
+        // an invitation to click something inert.
+        const bool showButton = (selected || hovered) && row.addable;
         const int rowMidY = (rowRect.top + rowRect.bottom) / 2;
 
         // Always a full-bleed rounded fill covering the *entire* row
@@ -467,13 +527,28 @@ void GroupPickerListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         int x = rowRect.left + paddingX;
         if (row.icon != nullptr) {
             const int iconTop = rowMidY - iconSize / 2;
-            DrawIconEx(hdc, x, iconTop, row.icon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
+            if (row.addable) {
+                DrawIconEx(hdc, x, iconTop, row.icon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
+            } else {
+                // DSS_DISABLED -- the standard "greyed out" icon
+                // treatment (blended toward COLOR_3DHILIGHT/
+                // COLOR_3DSHADOW), the same look a disabled toolbar
+                // button's icon gets. Simpler and more consistent with
+                // the rest of the OS than hand-rolling an alpha blend.
+                DrawState(hdc, nullptr, nullptr, reinterpret_cast<LPARAM>(row.icon), 0, x, iconTop, iconSize,
+                          iconSize, DST_ICON | DSS_DISABLED);
+            }
             x += iconSize + iconTextGap;
         }
 
         const RECT addRect = ComputeAddButtonRect(rowRect, dpi);
         RECT textRect{x, rowRect.top, addRect.left - paddingX, rowRect.bottom};
-        SetTextColor(hdc, textColor);
+        // Muted "disabled control" grey for an unaddable row's text,
+        // instead of the normal full-strength textColor -- the same
+        // dimming role kInactiveTextColor plays for an unselected group
+        // tab (GroupChromeWindow::PaintTabStrip), applied here to mean
+        // "can't be used" rather than "not currently selected".
+        SetTextColor(hdc, row.addable ? textColor : (dark ? RGB(0x80, 0x80, 0x80) : RGB(0x9A, 0x9A, 0x9A)));
         DrawTextW(hdc, row.title.c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 
         // Add button: a right-pointing arrow -- move this window toward
@@ -529,6 +604,24 @@ void GroupPickerListWindow::Paint(HDC hdc, const RECT& clientRect) const {
 // view -- no-op when it's already visible. Reuses the same clamped
 // scrollOffset_/SetScrollInfo/invalidate shape WM_MOUSEWHEEL and
 // WM_VSCROLL already use; only the target offset is computed differently.
+size_t GroupPickerListWindow::RowsPerPage() const {
+    // How far PageUp/PageDown moves: one viewport's worth of rows, the
+    // conventional meaning, so paging lines up with what's actually on
+    // screen rather than an arbitrary fixed count. At least 1, so a
+    // viewport shorter than a single row still advances instead of
+    // leaving the key dead.
+    if (window_ == nullptr) {
+        return 1;
+    }
+    RECT clientRect;
+    GetClientRect(window_, &clientRect);
+    const int rowHeight = Scale(kRowHeight, GetDpiForWindow(window_));
+    if (rowHeight <= 0) {
+        return 1;
+    }
+    return std::max<size_t>(1, static_cast<size_t>((clientRect.bottom - clientRect.top) / rowHeight));
+}
+
 void GroupPickerListWindow::EnsureRowVisible(size_t index) {
     if (window_ == nullptr) {
         return;
@@ -607,7 +700,8 @@ void GroupPickerListWindow::SetWindows(const std::vector<HWND>& candidates) {
     rows_.clear();
     rows_.reserve(candidates.size());
     for (HWND hwnd : candidates) {
-        rows_.push_back(GroupPickerRow{hwnd, GetWindowTitle(hwnd), GetWindowIconHandle(hwnd)});
+        rows_.push_back(GroupPickerRow{hwnd, GetWindowTitle(hwnd), GetWindowIconHandle(hwnd),
+                                       !IsUnreparentableWindow(hwnd)});
     }
     hoveredIndex_.reset();
     // selectedIndex_ deliberately left untouched here -- GroupPickerWindow
@@ -645,35 +739,42 @@ void GroupPickerListWindow::UpdateTooltip() {
         return;
     }
 
-    // Two tiers: the Add button's own tooltip takes priority; otherwise,
-    // if the hovered row's title doesn't fit its column (DT_END_ELLIPSIS
-    // truncated it), show the full title -- helpful precisely when it's
-    // chopped off, so this deliberately doesn't fire for a title that
-    // already fits (see IsTitleTruncated's own comment).
+    // Three tiers: an unaddable row's explanation takes priority over
+    // everything else on that row (there's no Add button to hover, so
+    // this fires for the whole row body, not just a sub-rect); then the
+    // Add button's own tooltip; otherwise, if the hovered row's title
+    // doesn't fit its column (DT_END_ELLIPSIS truncated it), show the
+    // full title -- helpful precisely when it's chopped off, so this
+    // deliberately doesn't fire for a title that already fits (see
+    // IsTitleTruncated's own comment).
     const wchar_t* text = nullptr;
     std::wstring hoveredTitle;
     if (hoveredIndex_.has_value() && window_ != nullptr) {
         const UINT dpi = GetDpiForWindow(window_);
         const RowLayout layout = ComputeLayout(dpi);
         if (*hoveredIndex_ < layout.rowRects.size() && *hoveredIndex_ < rows_.size()) {
-            const RECT& rowRect = layout.rowRects[*hoveredIndex_];
-            POINT cursor{};
-            GetCursorPos(&cursor);
-            ScreenToClient(window_, &cursor);
-            cursor.y += scrollOffset_;
-            const RECT addRect = ComputeAddButtonRect(rowRect, dpi);
-            if (PtInRect(&addRect, cursor)) {
-                text = L"Add to group";
+            const GroupPickerRow& row = rows_[*hoveredIndex_];
+            if (!row.addable) {
+                text = kUnaddableTooltipText;
             } else {
-                const GroupPickerRow& row = rows_[*hoveredIndex_];
-                int x = Scale(kPaddingX, dpi);
-                if (row.icon != nullptr) {
-                    x += Scale(kIconSize, dpi) + Scale(kIconTextGap, dpi);
-                }
-                const int availableWidth = (addRect.left - Scale(kPaddingX, dpi)) - x;
-                if (IsTitleTruncated(window_, row.title, availableWidth, dpi)) {
-                    hoveredTitle = row.title;
-                    text = hoveredTitle.c_str();
+                const RECT& rowRect = layout.rowRects[*hoveredIndex_];
+                POINT cursor{};
+                GetCursorPos(&cursor);
+                ScreenToClient(window_, &cursor);
+                cursor.y += scrollOffset_;
+                const RECT addRect = ComputeAddButtonRect(rowRect, dpi);
+                if (PtInRect(&addRect, cursor)) {
+                    text = L"Add to group";
+                } else {
+                    int x = Scale(kPaddingX, dpi);
+                    if (row.icon != nullptr) {
+                        x += Scale(kIconSize, dpi) + Scale(kIconTextGap, dpi);
+                    }
+                    const int availableWidth = (addRect.left - Scale(kPaddingX, dpi)) - x;
+                    if (IsTitleTruncated(window_, row.title, availableWidth, dpi)) {
+                        hoveredTitle = row.title;
+                        text = hoveredTitle.c_str();
+                    }
                 }
             }
         }

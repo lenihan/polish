@@ -10,6 +10,7 @@
 
 #include "resource.h"
 #include "util/DarkMode.h"
+#include "util/UiFont.h"
 
 namespace polish {
 
@@ -867,6 +868,32 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             }
             return 0;
 
+        case WM_MOVE:
+            // Members move for free (see WM_SIZE's own comment) -- this
+            // is only for onMoved_'s own use case, the active-tile ring,
+            // which is a separate top-level window and does not.
+            if (onMoved_) {
+                onMoved_();
+            }
+            return 0;
+
+        case WM_PARENTNOTIFY:
+            // A member (a real WS_CHILD now) was clicked -- forward the
+            // click point so the owner can resolve which member and
+            // activate it, a click-based counterpart to focus-based
+            // activation for apps that don't move keyboard focus on
+            // click/re-activation (see SetOnMemberClicked's own
+            // comment). lParam is the click point in *this* window's own
+            // client coordinates for every WM_LBUTTONDOWN-family
+            // wParam -- not meaningful for WM_PARENTNOTIFY's other two
+            // reasons (a child being created/destroyed), which is why
+            // this only acts on WM_LBUTTONDOWN specifically.
+            if (LOWORD(wParam) == WM_LBUTTONDOWN && onMemberClicked_) {
+                const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+                onMemberClicked_(pt);
+            }
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+
         case WM_DPICHANGED: {
             // Standard MSDN-documented handling: resize to the rect
             // Windows suggests for the new DPI (a Per-Monitor-V2-aware
@@ -982,19 +1009,28 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     // Windows 11's own tab style (File Explorer, Notepad): a strip the
     // tabs sit in, an active tab that's the *same* color as the content
     // area below it (so it visually merges/"grows out of" the content,
-    // no border between them), rounded top corners only. Inactive tabs
-    // now get their own (much darker) fill too, rather than just
-    // showing the strip color -- background contrast is the primary way
-    // the active tab stands out; text color only needs a slight nudge on
-    // top of that, not a stark black-vs-white split.
+    // no border between them), rounded top corners only. Unselected tabs
+    // are deliberately de-emphasized on *both* axes -- background and
+    // text -- rather than the active tab being emphasized on top of an
+    // otherwise-neutral strip: a lighter/receding fill (in dark mode the
+    // active tab is already the lighter of the two, so de-emphasis there
+    // falls entirely on text/hover instead) and disabled-looking grey
+    // text, never full-strength black/white. Two invariants hold in both
+    // themes: unselected sits strictly between the strip and the active
+    // tab, so a *hovered* unselected tab can never outshine the selected
+    // one (a real, confirmed bug in the old dark-mode numbers, where
+    // hover 0x2B was lighter than active 0x20); and unselected text is
+    // always a mid-grey "disabled" tone, never the same strength as the
+    // active tab's (the old light-mode numbers had this backwards --
+    // unselected text was pure 0x000000, stronger than active's 0x1A).
     const bool dark = IsDarkModeEnabled();
     const COLORREF kContentColor = dark ? RGB(0x20, 0x20, 0x20) : RGB(0xFF, 0xFF, 0xFF);
     const COLORREF kActiveTabColor = kContentColor;
-    const COLORREF kInactiveTabColor = dark ? RGB(0x0A, 0x0A, 0x0A) : RGB(0xDD, 0xDD, 0xDD);
-    const COLORREF kHoverTabColor = dark ? RGB(0x2B, 0x2B, 0x2B) : RGB(0xE9, 0xE9, 0xE9);
+    const COLORREF kInactiveTabColor = dark ? RGB(0x0A, 0x0A, 0x0A) : RGB(0xEF, 0xEF, 0xEF);
+    const COLORREF kHoverTabColor = dark ? RGB(0x17, 0x17, 0x17) : RGB(0xF7, 0xF7, 0xF7);
     const COLORREF kActiveBorderColor = dark ? RGB(0x3F, 0x3F, 0x3F) : RGB(0xD8, 0xD8, 0xD8);
     const COLORREF kActiveTextColor = dark ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x1A, 0x1A, 0x1A);
-    const COLORREF kInactiveTextColor = dark ? RGB(0xE0, 0xE0, 0xE0) : RGB(0x00, 0x00, 0x00);
+    const COLORREF kInactiveTextColor = dark ? RGB(0x9A, 0x9A, 0x9A) : RGB(0x60, 0x60, 0x60);
 
     const UINT dpi = GetDpiForWindow(window_);
     const int cornerRadius = Scale(kTabCornerRadius, dpi);
@@ -1130,13 +1166,20 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     FillRect(hdc, &contentRect, contentBrush);
     DeleteObject(contentBrush);
 
-    HFONT font = reinterpret_cast<HFONT>(GetStockObject(DEFAULT_GUI_FONT));
+    // MakeUiFont, not GetStockObject(DEFAULT_GUI_FONT) -- the stock font
+    // is fixed at a pre-DPI-awareness size, which left tab labels
+    // visibly tiny at high DPI even though every other tab-strip
+    // dimension here was already being scaled (confirmed,
+    // human-reported). Owned, so both exits below have to delete it --
+    // unlike the stock font it replaced, which must never be deleted.
+    HFONT font = MakeUiFont(dpi);
     HGDIOBJ oldFont = SelectObject(hdc, font);
     SetBkMode(hdc, TRANSPARENT);
 
     const std::vector<RECT> tabRects = ComputeTabRects(clientRect);
     if (tabRects.empty()) {
         SelectObject(hdc, oldFont);
+        DeleteObject(font);
         return;
     }
 
@@ -1145,10 +1188,7 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
 
     // The active tab's label is bold, matching File Explorer/Notepad --
     // inactive tabs keep the regular weight already selected into hdc.
-    LOGFONTW boldLogFont{};
-    GetObjectW(font, sizeof(boldLogFont), &boldLogFont);
-    boldLogFont.lfWeight = FW_BOLD;
-    HFONT boldFont = CreateFontIndirectW(&boldLogFont);
+    HFONT boldFont = MakeUiFontWithWeight(dpi, FW_BOLD);
 
     for (size_t i = 0; i < tabRects.size(); ++i) {
         const RECT& tabRect = tabRects[i];
@@ -1246,6 +1286,7 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     }
     SelectObject(hdc, oldFont);
     DeleteObject(boldFont);
+    DeleteObject(font);
 }
 
 int GroupChromeWindow::HeaderHeight(UINT dpi) const {
@@ -1294,10 +1335,24 @@ RECT GroupChromeWindow::ManageWindowsButtonRect(const RECT& clientRect, UINT dpi
     return RECT{minimize.left - gap - w, minimize.top, minimize.left - gap, minimize.bottom};
 }
 
-RECT GroupChromeWindow::ModeToggleButtonRect(const RECT& clientRect, UINT dpi) const {
+// Left-to-right order (right to left in this anchor chain, each button
+// immediately left of the last): tile-maximize, mode, alignment,
+// manage-windows | gap | minimize, maximize, close. TileMaximize is the
+// one conditionally-visible button (see TileMaximizeButtonVisible), so
+// it anchors the *leftmost* end of the chain instead of sitting in the
+// middle of it -- hiding/showing it then only ever changes the title
+// text's own right boundary (PaintTitleBar), never shifts any other
+// button.
+RECT GroupChromeWindow::AlignmentButtonRect(const RECT& clientRect, UINT dpi) const {
     const RECT manageWindows = ManageWindowsButtonRect(clientRect, dpi);
     const int w = Scale(kTitleBarButtonWidth, dpi);
     return RECT{manageWindows.left - w, manageWindows.top, manageWindows.left, manageWindows.bottom};
+}
+
+RECT GroupChromeWindow::ModeToggleButtonRect(const RECT& clientRect, UINT dpi) const {
+    const RECT alignment = AlignmentButtonRect(clientRect, dpi);
+    const int w = Scale(kTitleBarButtonWidth, dpi);
+    return RECT{alignment.left - w, alignment.top, alignment.left, alignment.bottom};
 }
 
 bool GroupChromeWindow::TileMaximizeButtonVisible() const {
@@ -1315,19 +1370,6 @@ RECT GroupChromeWindow::TileMaximizeButtonRect(const RECT& clientRect, UINT dpi)
     const RECT modeToggle = ModeToggleButtonRect(clientRect, dpi);
     const int w = Scale(kTitleBarButtonWidth, dpi);
     return RECT{modeToggle.left - w, modeToggle.top, modeToggle.left, modeToggle.bottom};
-}
-
-RECT GroupChromeWindow::AlignmentButtonRect(const RECT& clientRect, UINT dpi) const {
-    // Immediately left of wherever the leftmost of the other three
-    // currently sits -- TileMaximizeButtonRect itself doesn't move
-    // depending on whether it's actually visible (see
-    // TileMaximizeButtonVisible), so this button would leave a gap
-    // when tile-maximize is hidden if it anchored off ModeToggle
-    // directly instead.
-    const RECT leftNeighbor =
-        TileMaximizeButtonVisible() ? TileMaximizeButtonRect(clientRect, dpi) : ModeToggleButtonRect(clientRect, dpi);
-    const int w = Scale(kTitleBarButtonWidth, dpi);
-    return RECT{leftNeighbor.left - w, leftNeighbor.top, leftNeighbor.left, leftNeighbor.bottom};
 }
 
 int GroupChromeWindow::TabColumnWidth(UINT dpi) const {
@@ -1385,12 +1427,14 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
     SetTextColor(hdc, dark ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x1A, 0x1A, 0x1A));
 
     const int textLeft = (icon != nullptr) ? iconLeft + iconSize + Scale(kTitleBarIconTextGap, dpi) : iconLeft;
-    // AlignmentButtonRect is always the leftmost of the four action
-    // buttons (it's always shown, unlike TileMaximize) and already
-    // accounts for whether TileMaximize itself is visible when
-    // anchoring off it -- one boundary that's always correct, instead
-    // of this call site needing its own visibility check too.
-    const int textRight = AlignmentButtonRect(clientRect, dpi).left;
+    // TileMaximize is the leftmost of the four action buttons when
+    // visible (see the anchor-chain comment above AlignmentButtonRect);
+    // otherwise ModeToggle is. This is the one place that still needs
+    // its own visibility check, now that TileMaximizeButtonRect no
+    // longer shifts anything to its right when it disappears.
+    const int textRight =
+        (TileMaximizeButtonVisible() ? TileMaximizeButtonRect(clientRect, dpi) : ModeToggleButtonRect(clientRect, dpi))
+            .left;
     RECT textRect{textLeft, clientRect.top, textRight, clientRect.top + titleBarHeight};
     DrawTextW(hdc, title, -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     SelectObject(hdc, oldFont);
@@ -1715,19 +1759,24 @@ void GroupChromeWindow::UpdateTooltip() {
     } else if (hoveredActionButton_.has_value()) {
         switch (*hoveredActionButton_) {
             case TitleBarActionButton::ModeToggle:
-                // Names the *next* mode in the button's Tab -> Tile ->
-                // Stack -> Tab cycle (see ToggleGroupMode), not the
-                // current one -- matches every other tooltip on this
-                // button ("Switch to X" always names the target state).
+                // These two buttons name their *current* state, not what
+                // clicking them would do -- matching their glyphs, which
+                // already depict the current mode/alignment rather than
+                // the target (see PaintTitleBar). An earlier "Switch to
+                // X" wording named the target instead, which read as a
+                // direct contradiction of the glyph sitting right under
+                // the cursor. The remaining buttons below stay
+                // action-worded because they *are* actions, with no
+                // state of their own to report.
                 switch (mode_) {
                     case GroupMode::Tab:
-                        text = L"Switch to Tile";
+                        text = L"Tabs";
                         break;
                     case GroupMode::Tile:
-                        text = L"Switch to Stack";
+                        text = L"Tiles";
                         break;
                     case GroupMode::Stack:
-                        text = L"Switch to Tabs";
+                        text = L"Stack";
                         break;
                 }
                 break;
@@ -1738,15 +1787,10 @@ void GroupChromeWindow::UpdateTooltip() {
                 text = tileMaximized_ ? L"Restore tile" : L"Maximize tile";
                 break;
             case TitleBarActionButton::Alignment:
-                if (mode_ == GroupMode::Tile) {
-                    text = alignment_ == GroupAlignment::Horizontal ? L"Switch to vertical tiles"
-                                                                      : L"Switch to horizontal tiles";
-                } else if (mode_ == GroupMode::Stack) {
-                    text = alignment_ == GroupAlignment::Horizontal ? L"Stack vertically" : L"Stack horizontally";
-                } else {
-                    text = alignment_ == GroupAlignment::Horizontal ? L"Switch to vertical tabs"
-                                                                      : L"Switch to horizontal tabs";
-                }
+                // One setting regardless of mode (see GroupAlignment's
+                // own comment), so unlike the old target-naming wording
+                // this needs no per-mode phrasing at all.
+                text = alignment_ == GroupAlignment::Horizontal ? L"Horizontal" : L"Vertical";
                 break;
         }
     }
@@ -1967,9 +2011,8 @@ void GroupChromeWindow::GrowContentAreaTo(SIZE minContentSize) {
     // The gap between the outer window rect and the content area (title
     // bar, borders, and the tab strip itself) doesn't change with size,
     // so it's measured once and added back on top of whatever content
-    // size is actually needed -- same offset-measurement approach as
-    // the WM_WINDOWPOSCHANGING handler above, for the same reason (the
-    // outer rect and the client/content rect are not the same rect).
+    // size is actually needed (the outer rect and the client/content
+    // rect are not the same rect).
     RECT windowRect{};
     GetWindowRect(window_, &windowRect);
     const int overheadWidth = (windowRect.right - windowRect.left) - currentWidth;
@@ -1978,11 +2021,10 @@ void GroupChromeWindow::GrowContentAreaTo(SIZE minContentSize) {
     const int newWidth = std::max(static_cast<int>(minContentSize.cx), currentWidth) + overheadWidth;
     const int newHeight = std::max(static_cast<int>(minContentSize.cy), currentHeight) + overheadHeight;
 
-    // SWP_NOMOVE -- top-left stays put; only WM_WINDOWPOSCHANGING's
-    // onMoved_ notification is for actual moves (SWP_NOMOVE here means
-    // it won't fire), the caller re-applies layout explicitly right
-    // after calling this, so there's no risk of a feedback loop through
-    // that callback.
+    // SWP_NOMOVE -- top-left stays put, so this never generates a
+    // WM_MOVE/onMoved_ notification; the caller re-applies layout
+    // explicitly right after calling this, so there's no risk of a
+    // feedback loop through that callback either way.
     SetWindowPos(window_, nullptr, 0, 0, newWidth, newHeight, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
@@ -2182,12 +2224,6 @@ void GroupChromeWindow::Show(const std::vector<std::wstring>& memberTitles, Grou
     InvalidateRect(window_, nullptr, TRUE);
     ShowWindow(window_, SW_SHOW);
     UpdateWindow(window_);
-}
-
-bool IsGroupChromeWindow(HWND hwnd) {
-    wchar_t className[64];
-    return GetClassNameW(hwnd, className, static_cast<int>(std::size(className))) > 0 &&
-           wcscmp(className, kWindowClassName) == 0;
 }
 
 }  // namespace polish

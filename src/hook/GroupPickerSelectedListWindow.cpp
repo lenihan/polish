@@ -7,6 +7,7 @@
 #include <iterator>
 
 #include "util/DarkMode.h"
+#include "util/UiFont.h"
 #include "util/WindowIcon.h"
 
 namespace polish {
@@ -45,10 +46,7 @@ COLORREF BlendColor(COLORREF base, COLORREF tint, double amount) {
 // tooltip UpdateTooltip shows only when a row's own text is actually
 // clipped by DT_END_ELLIPSIS.
 bool IsTitleTruncated(HWND window, const std::wstring& title, int availableWidth, UINT dpi) {
-    NONCLIENTMETRICSW metrics{};
-    metrics.cbSize = sizeof(metrics);
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi);
-    HFONT font = CreateFontIndirectW(&metrics.lfMessageFont);
+    HFONT font = MakeUiFont(dpi);
     HDC hdc = GetDC(window);
     HGDIOBJ oldFont = SelectObject(hdc, font);
     SIZE size{};
@@ -115,6 +113,9 @@ HWND GroupPickerSelectedListWindow::Create(HWND parent) {
     if (!classRegistered) {
         WNDCLASSEXW windowClass{};
         windowClass.cbSize = sizeof(windowClass);
+        // CS_DBLCLKS -- WM_LBUTTONDBLCLK never fires without it (off by
+        // default); needed for double-click-to-remove on a row.
+        windowClass.style = CS_DBLCLKS;
         windowClass.lpfnWndProc = WindowProcThunk;
         windowClass.hInstance = instance_;
         windowClass.lpszClassName = kWindowClassName;
@@ -219,32 +220,89 @@ LRESULT GroupPickerSelectedListWindow::HandleMessage(HWND hwnd, UINT message, WP
         case WM_KEYDOWN: {
             // Left is this list's half of the move gesture -- the
             // keyboard equivalent of clicking the row's own Remove
-            // button. Right does nothing here: a Group member can only
-            // move left, back into Open windows (see the sibling list's
-            // own VK_RIGHT case for the other half).
-            if (wParam == VK_LEFT) {
+            // button. Space does the same, matching the sibling list's
+            // own Space (the conventional "act on the focused row" key).
+            // Right does nothing here: a Group member can only move
+            // left, back into Open windows (see the sibling list's own
+            // VK_RIGHT case for the other half).
+            if (wParam == VK_LEFT || wParam == VK_SPACE) {
                 if (selectedIndex_.has_value() && onRemoveRequested_) {
                     onRemoveRequested_(rows_[*selectedIndex_].hwnd);
                 }
                 return 0;
             }
-            if (wParam != VK_UP && wParam != VK_DOWN) {
+            if (wParam != VK_UP && wParam != VK_DOWN && wParam != VK_HOME && wParam != VK_END &&
+                wParam != VK_PRIOR && wParam != VK_NEXT) {
                 return DefWindowProcW(hwnd, message, wParam, lParam);
             }
             if (rows_.empty()) {
                 return 0;
             }
-            // Moves the selection only -- deliberately not the row's
-            // position. Reordering is the grip's job (see BeginDrag);
-            // there's no keyboard equivalent for it yet, and quietly
-            // overloading the arrow keys with it would make an ordinary
-            // "move the selection down" gesture silently rearrange the
-            // group instead.
+            // Alt+Up/Alt+Down moves the row itself; plain Up/Down moves
+            // only the selection. Reordering was the drag grip's job
+            // exclusively until now (see BeginDrag), which left the one
+            // gesture in this dialog with no keyboard path at all. Alt
+            // as the modifier, rather than overloading bare arrows,
+            // keeps "move the selection down" from silently rearranging
+            // the group -- the exact ambiguity the old comment here
+            // warned about.
+            if ((wParam == VK_UP || wParam == VK_DOWN) && (GetKeyState(VK_MENU) & 0x8000) != 0) {
+                if (!selectedIndex_.has_value()) {
+                    return 0;
+                }
+                const size_t current = *selectedIndex_;
+                const size_t last = rows_.size() - 1;
+                if ((wParam == VK_UP && current == 0) || (wParam == VK_DOWN && current == last)) {
+                    return 0;  // already at the end it's being pushed toward
+                }
+                const size_t target = wParam == VK_UP ? current - 1 : current + 1;
+                std::swap(rows_[current], rows_[target]);
+                selectedIndex_ = target;
+                // Same "report the whole new order upward" contract
+                // EndDrag uses -- GroupPickerWindow owns selectedOrder_
+                // and pushes the result back down.
+                if (onReordered_) {
+                    std::vector<HWND> order;
+                    order.reserve(rows_.size());
+                    for (const GroupPickerSelectedRow& row : rows_) {
+                        order.push_back(row.hwnd);
+                    }
+                    onReordered_(std::move(order));
+                }
+                EnsureRowVisible(target);
+                InvalidateRect(hwnd, nullptr, TRUE);
+                return 0;
+            }
+            // Selection movement only, clamped at both ends rather than
+            // wrapping -- see the sibling list's identical block.
             size_t next = 0;
             if (selectedIndex_.has_value()) {
                 const size_t current = *selectedIndex_;
-                next = wParam == VK_DOWN ? std::min(current + 1, rows_.size() - 1)
-                                          : (current == 0 ? 0 : current - 1);
+                const size_t last = rows_.size() - 1;
+                const size_t page = RowsPerPage();
+                switch (wParam) {
+                    case VK_UP:
+                        next = current == 0 ? 0 : current - 1;
+                        break;
+                    case VK_DOWN:
+                        next = std::min(current + 1, last);
+                        break;
+                    case VK_HOME:
+                        next = 0;
+                        break;
+                    case VK_END:
+                        next = last;
+                        break;
+                    case VK_PRIOR:
+                        next = current < page ? 0 : current - page;
+                        break;
+                    case VK_NEXT:
+                        next = std::min(current + page, last);
+                        break;
+                    default:
+                        next = current;
+                        break;
+                }
             }
             if (onRowSelected_) {
                 onRowSelected_(rows_[next].hwnd);
@@ -290,6 +348,28 @@ LRESULT GroupPickerSelectedListWindow::HandleMessage(HWND hwnd, UINT message, WP
                 if (PtInRect(&layout.rowRects[i], pt)) {
                     if (onRowSelected_) {
                         onRowSelected_(rows_[i].hwnd);
+                    }
+                    return 0;
+                }
+            }
+            return 0;
+        }
+
+        case WM_LBUTTONDBLCLK: {
+            // See GroupPickerListWindow's identical handler: a quick way
+            // to move a window back out without needing to land the
+            // first click precisely on the small Remove button (requires
+            // CS_DBLCLKS on this class, see the constructor). Anywhere
+            // on the row removes it, the grip zone included -- a
+            // double-click isn't a drag gesture, so there's no reorder
+            // meaning to preserve there.
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            pt.y += scrollOffset_;
+            const RowLayout layout = ComputeLayout(GetDpiForWindow(hwnd));
+            for (size_t i = 0; i < layout.rowRects.size() && i < rows_.size(); ++i) {
+                if (PtInRect(&layout.rowRects[i], pt)) {
+                    if (onRemoveRequested_) {
+                        onRemoveRequested_(rows_[i].hwnd);
                     }
                     return 0;
                 }
@@ -431,10 +511,7 @@ void GroupPickerSelectedListWindow::Paint(HDC hdc, const RECT& clientRect) const
     FillRect(hdc, &clientRect, backgroundBrush);
     DeleteObject(backgroundBrush);
 
-    NONCLIENTMETRICSW metrics{};
-    metrics.cbSize = sizeof(metrics);
-    SystemParametersInfoForDpi(SPI_GETNONCLIENTMETRICS, sizeof(metrics), &metrics, 0, dpi);
-    HFONT textFont = CreateFontIndirectW(&metrics.lfMessageFont);
+    HFONT textFont = MakeUiFont(dpi);
     HGDIOBJ oldFont = SelectObject(hdc, textFont);
     SetBkMode(hdc, TRANSPARENT);
 
@@ -566,6 +643,21 @@ void GroupPickerSelectedListWindow::Paint(HDC hdc, const RECT& clientRect) const
 
 // See GroupPickerListWindow::EnsureRowVisible -- identical logic against
 // this class's own rows.
+size_t GroupPickerSelectedListWindow::RowsPerPage() const {
+    // See GroupPickerListWindow::RowsPerPage -- identical contract: one
+    // viewport's worth of rows for PageUp/PageDown, never 0.
+    if (window_ == nullptr) {
+        return 1;
+    }
+    RECT clientRect;
+    GetClientRect(window_, &clientRect);
+    const int rowHeight = Scale(kRowHeight, GetDpiForWindow(window_));
+    if (rowHeight <= 0) {
+        return 1;
+    }
+    return std::max<size_t>(1, static_cast<size_t>((clientRect.bottom - clientRect.top) / rowHeight));
+}
+
 void GroupPickerSelectedListWindow::EnsureRowVisible(size_t index) {
     if (window_ == nullptr) {
         return;

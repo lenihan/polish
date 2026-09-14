@@ -33,28 +33,33 @@ public:
     // class (e.g. a group's active-tile ring), where the highlight
     // should behave like an ordinary window: covered by whatever the
     // user brings to the front, not floating above unrelated apps
-    // forever. See ShowAroundTarget's `zOrderAnchor` for how a
-    // non-topmost instance stays visually attached to its owner instead.
-    explicit AltTabHighlightBorder(HINSTANCE instance, bool alwaysOnTop = true);
+    // forever.
+    //
+    // `owner`: passed straight through as CreateWindowExW's hWndParent
+    // -- for a WS_POPUP window that makes this an *owned* window rather
+    // than an unrelated top-level one, and Windows itself then maintains
+    // everything a group's per-tile ring needs for free: always above
+    // its owner in Z order (no code here has to re-assert that -- a real,
+    // confirmed bug in an earlier unowned version, where activating the
+    // owner buried the ring behind it with nothing to bring it back),
+    // hidden automatically when the owner is minimized and shown again
+    // on restore, and destroyed automatically if the owner is destroyed
+    // first. Pass nullptr (the default) for the real Alt+Tab overlay,
+    // which has no single owner to attach to and relies on
+    // alwaysOnTop's WS_EX_TOPMOST instead.
+    explicit AltTabHighlightBorder(HINSTANCE instance, bool alwaysOnTop = true, HWND owner = nullptr);
     ~AltTabHighlightBorder();
 
     AltTabHighlightBorder(const AltTabHighlightBorder&) = delete;
     AltTabHighlightBorder& operator=(const AltTabHighlightBorder&) = delete;
 
     // Positions the glow directly on target's current screen rect,
-    // renders it, and makes it visible. `owner`, when non-null, keeps
-    // the glow directly in front of that window in the Z order instead
-    // of in the topmost band -- only meaningful for an instance
-    // constructed with alwaysOnTop=false (ignored otherwise, since a
-    // topmost instance always belongs in the topmost band). Pass the
-    // window the glow is meant to sit on top of, not a raw
-    // SetWindowPos insertion point -- SetWindowPos's own
-    // hWndInsertAfter places a window *behind* the handle you give it,
-    // the opposite of "in front of", so this resolves the correct
-    // insertion point (whatever currently sits directly in front of
-    // `owner`) internally rather than exposing that inversion to
-    // callers.
-    void ShowAroundTarget(HWND target, HWND owner = nullptr);
+    // renders it, and makes it visible. Z-order is just
+    // alwaysOnTop_ ? HWND_TOPMOST : HWND_TOP -- an owned window (see the
+    // constructor's `owner`) doesn't need, and can't usefully take,
+    // anything more specific than that; Windows keeps it in front of its
+    // owner on its own.
+    void ShowAroundTarget(HWND target);
 
     // Hides the glow.
     void Hide();
@@ -62,6 +67,18 @@ public:
 private:
     HWND window_ = nullptr;
     bool alwaysOnTop_ = true;
+    // The screen size (not position) ShowAroundTarget last rendered the
+    // ring's content at -- {-1, -1} (never a real size) before the first
+    // call and after Hide(), so the next ShowAroundTarget always does a
+    // full render rather than comparing against stale content. The
+    // ring's rendered pixels depend only on target *size* (DPI, corner
+    // radii, which corners get the screen-edge radius), never position
+    // -- when a new call's target is the same size, ShowAroundTarget
+    // skips the DIB/GDI+/premultiply work entirely and just moves the
+    // existing content, so a target that's only moving (e.g. the whole
+    // group being dragged by its title bar, which re-renders the ring on
+    // every WM_MOVE) stays cheap.
+    SIZE lastRenderedSize_{-1, -1};
 };
 
 }  // namespace polish

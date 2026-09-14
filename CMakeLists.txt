@@ -48,6 +48,8 @@ add_library(polish_core STATIC
     src/hook/GroupTabThumbnail.cpp
     src/settings/Settings.cpp
     src/util/DarkMode.cpp
+    src/util/DialogKeyboard.cpp
+    src/util/UiFont.cpp
     src/util/WindowIcon.cpp
 )
 

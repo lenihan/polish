@@ -118,6 +118,17 @@ private:
     // scroll/hover state and re-fetch every row's icon -- see this
     // method's own .cpp comment for why that matters here specifically.
     void RefreshCandidates();
+    // Dumps the current candidate list to the debug log as
+    // hwnd:"title"[class], the same shape main.cpp's Alt+Tab session dump
+    // uses. Exists because "window X isn't in the list" was otherwise
+    // undiagnosable from this side: several independent filters can drop
+    // a window (IsCandidateWindowShape's visible/owner/toolwindow/caption/
+    // title-length/cloaked checks, plus this dialog's own fail-closed
+    // IsElevatedWindow), and a window that's already a member of another
+    // group is WS_CHILD and so never reaches EnumWindows at all. Having
+    // the accepted set in the log turns "it's missing" into "it's
+    // missing *and* here's everything that wasn't".
+    void LogCandidates(const wchar_t* reason) const;
     void UpdateButtonStates();
     void Commit();
     void ApplyDarkMode();
@@ -153,6 +164,14 @@ private:
 
     std::vector<HWND> initialSelection_;
     std::wstring initialName_;
+    // The chrome window of the group being edited, or nullptr when
+    // creating a new group -- ShowModal's own `owner` argument, kept so
+    // PopulateLists/RefreshCandidates can drop exactly this one window
+    // from the candidate list. Every *other* group's chrome is a
+    // perfectly ordinary candidate (see EnumPickerCandidatesProc's own
+    // comment for why), but offering a group to itself as a member is
+    // nonsense -- and would reparent a window into itself.
+    HWND editedGroupChrome_ = nullptr;
     bool editing_ = false;
     std::optional<GroupPickerResult> result_;
     bool done_ = false;

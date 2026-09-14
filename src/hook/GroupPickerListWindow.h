@@ -17,6 +17,15 @@ struct GroupPickerRow {
     HWND hwnd = nullptr;
     std::wstring title;
     HICON icon = nullptr;  // borrowed, may be nullptr (falls back to text-only)
+    // False for a window this app already knows can never actually join
+    // a group (see WindowFilters::IsUnreparentableWindow) -- a UWP frame
+    // window (Calculator, Settings, ...), whose SetParent fails outright
+    // every time. Such a row is still listed (so its absence doesn't
+    // read as a bug) but painted dimmed, never shows its Add button, and
+    // its tooltip explains why instead of showing the truncated-title
+    // fallback. Computed once in SetWindows, not re-checked per paint --
+    // this property of a window class doesn't change at runtime.
+    bool addable = true;
 };
 
 // The "Available windows" half of GroupPickerWindow's picker: every
@@ -54,6 +63,15 @@ struct GroupPickerRow {
 // one that actually updates selectedWindow_ and pushes it back down to
 // both this list and its sibling, so this class never decides selection
 // on its own.
+//
+// Double-clicking a row's body does what its Add button would --
+// requires no more precision than a single click on the body (unlike
+// clicking the small button itself), so it's a quicker way to move a
+// window across once you already know which one you want. This doesn't
+// reintroduce the single-click-ambiguity problem the button design
+// above replaced: a double-click is already a distinct, deliberate
+// gesture from a single click or a drag, so it can't be mistaken for
+// either.
 //
 // Modeled on AltTabListWindow's ComputeLayout/Paint/hit-test/scroll
 // shape (the closest existing precedent for a hand-rolled, DPI-aware,
@@ -127,6 +145,8 @@ private:
     // Scrolls just far enough to bring row `index` fully into view, if it
     // isn't already -- keyboard navigation can move the selection past
     // either edge of the viewport, which the mouse-driven paths never do.
+    // One viewport's worth of rows, for PageUp/PageDown. Never 0.
+    size_t RowsPerPage() const;
     void EnsureRowVisible(size_t index);
 
     HINSTANCE instance_;

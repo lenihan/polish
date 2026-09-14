@@ -48,9 +48,17 @@ private:
     void CreateControls(HWND hwnd);
     void LayoutControls();
     void Commit();
+    // Moves focus to the next/previous control. By hand, like
+    // GroupPickerWindow's own identically-named method (both defer to
+    // util/DialogKeyboard) -- this is a custom window class with its own
+    // modal pump, not a real Win32 dialog, so there's no dialog manager
+    // to walk WS_TABSTOP for us.
+    void CycleFocus(bool backward);
 
     HINSTANCE instance_;
     HWND window_ = nullptr;
+    // Owned -- see CreateControls. Deleted in ShowModal's cleanup.
+    HFONT dialogFont_ = nullptr;
     HWND ctrlCheck_ = nullptr;
     HWND altCheck_ = nullptr;
     HWND shiftCheck_ = nullptr;

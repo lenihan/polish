@@ -80,6 +80,17 @@ current todo list.
 
 ## Left to do
 
+- Groups: UWP/Store app windows (Calculator, Settings, Photos, ...) can
+  never actually be reparented — confirmed live, `SetParent` fails
+  outright with `ERROR_INVALID_PARAMETER` for the `ApplicationFrameWindow`
+  class every time, mixed-DPI hosting or not. The picker greys these out
+  with an explanatory tooltip instead of offering them, and
+  `GroupManager::ApplyLayout` drops one from a group as a defensive
+  fallback if it ever gets in some other way (logged, resyncs the tab
+  strip). No path to actually support them — would mean positioning them
+  over the group's tile without reparenting, an unrelated feature's worth
+  of work (own taskbar/Alt+Tab entry, own title bar, explicit move/hide/
+  Z-order tracking to keep it glued to the group).
 - Need a more unique icon...current icon looks like Google Gemini
 - Add Alt+` to cycle a single app's own windows by most-recently-used
   order (native Windows does this by Z-order, not MRU).
@@ -89,9 +100,20 @@ current todo list.
 - Groups: clamp tile auto-grow-to-fit to monitor bounds.
 - Groups: rename too "Polish Groups" and make it pinnable to the Start
   menu.
-- Groups: support nested groups (a group containing other groups).
+- Groups: support nested groups (a group containing other groups). The
+  picker now *lists* other groups' chrome windows and lets you add one
+  (it reparents like any other window), but layout treats it as a plain
+  member — `GroupMemberKind::NestedGroup` is still never populated.
 - Groups: add Alt+backtick MRU switching scoped to one group's members.
 - Groups: add a per-process exclusion list.
+- Groups: keyboard shortcuts for the group window itself (switch tabs,
+  cycle mode, alignment, tile-maximize). Needs the low-level keyboard
+  hook the way Alt+Tab does, not a plain WM_KEYDOWN handler: with a
+  group open, focus belongs to the *member app* (a foreign process), so
+  the chrome window never receives keystrokes at all.
+- Tray menu: reachable by keyboard (NIM_SETVERSION + NIN_KEYSELECT so
+  Win+B finds it, menu positioned at the icon rather than the cursor,
+  and `&` mnemonics on the items).
 - Add a "Restart as Administrator" tray item so elevated windows become
   manageable.
 - Add an "easy move/resize" mode: while active, the whole window is a

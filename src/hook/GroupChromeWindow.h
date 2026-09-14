@@ -206,10 +206,31 @@ public:
     // Called whenever the chrome's client size actually changes
     // (WM_SIZE), so the owner can re-lay-out members to fill the new
     // content area. Not fired on a pure move -- children already move
-    // for free with their parent, so a plain drag needs no callback at
-    // all now (contrast the old reposition-only design's WM_MOVING-
-    // driven follow logic, no longer needed).
+    // for free with their parent, so a plain drag needs no *layout*
+    // callback at all (contrast the old reposition-only design's
+    // WM_MOVING-driven follow logic, no longer needed). See SetOnMoved
+    // for the one thing that still needs to know about a pure move.
     void SetOnResized(std::function<void()> callback) { onResized_ = std::move(callback); }
+
+    // Called on WM_MOVE (a pure move, no size change -- SetOnResized's
+    // own comment covers why members themselves need no callback for
+    // this). Exists for the group's active-tile ring: it's a separate
+    // top-level window, not a child, so it doesn't move for free the way
+    // members do -- without this, dragging a tiled group by its title
+    // bar leaves the ring behind at its old screen position (a real,
+    // confirmed bug).
+    void SetOnMoved(std::function<void()> callback) { onMoved_ = std::move(callback); }
+
+    // Called with the client-coordinate point of a mouse-down that
+    // landed inside one of the group's own members (WM_PARENTNOTIFY),
+    // whichever mode the group is in. Tile/Stack's active-tile ring
+    // needs this: keyboard focus (EVENT_OBJECT_FOCUS, tracked in
+    // main.cpp's OnObjectFocusChanged) is the primary way the owner
+    // learns which tile became active, but not every app moves focus on
+    // a click/re-activation, so a click is a second, click-based signal
+    // -- the owner resolves the specific child member at this point
+    // (ChildWindowFromPointEx) and activates it.
+    void SetOnMemberClicked(std::function<void(POINT)> callback) { onMemberClicked_ = std::move(callback); }
 
     // Called after the mouse rests on a tab for a short delay, with
     // that tab's index and its rect in *screen* coordinates (so the
@@ -313,34 +334,43 @@ private:
     RECT MaximizeButtonRect(const RECT& clientRect, UINT dpi) const;
     RECT CloseButtonRect(const RECT& clientRect, UINT dpi) const;
 
-    // Two more buttons immediately left of the caption buttons -- mode
-    // toggle and manage-windows, the same two actions the right-click
-    // context menu already offers (see ShowContextMenu), now with a
-    // visible trigger instead of only a hidden menu. Unlike the caption
-    // buttons above, these are ordinary *client*-area buttons (plain
+    // Four client-area buttons immediately left of the caption buttons,
+    // left to right: tile-maximize, mode toggle, alignment,
+    // manage-windows -- the anchor chain runs the other direction
+    // (ManageWindowsButtonRect off the caption buttons, each of the
+    // other three off the one immediately to its right), see
+    // AlignmentButtonRect's own comment for why. Mode-toggle and
+    // manage-windows are the same two actions the right-click context
+    // menu already offers (see ShowContextMenu), now with a visible
+    // trigger instead of only a hidden menu. Unlike the caption buttons
+    // above, these are ordinary *client*-area buttons (plain
     // WM_LBUTTONDOWN, not a WM_NCHITTEST code) -- there's no OS-
     // recognized hit-test value for "app-defined title bar button", so
-    // WM_NCHITTEST instead reports plain HTCLIENT for these two rects
-    // (see its own switch) rather than HTCAPTION, letting normal client
+    // WM_NCHITTEST instead reports plain HTCLIENT for these rects (see
+    // its own switch) rather than HTCAPTION, letting normal client
     // mouse messages reach them.
-    RECT ModeToggleButtonRect(const RECT& clientRect, UINT dpi) const;
     RECT ManageWindowsButtonRect(const RECT& clientRect, UINT dpi) const;
 
-    // A third client-area button, immediately left of the other two --
-    // maximizes/restores whichever tile is currently active (see
-    // GroupState::IsTileMaximized). Only meaningful in a tiled mode --
-    // Tile or Stack -- with 2+ members (a single tile already fills the
-    // whole area on its own); TileMaximizeButtonVisible() is the one
-    // place that decision is made, consulted by painting, hit-testing,
-    // and the title text's own right-boundary math alike so all three
-    // can never disagree about whether this button is showing right now.
+    // Toggles alignment_ between Horizontal/Vertical. Always shown
+    // (unlike TileMaximize, this is meaningful in every mode).
+    RECT AlignmentButtonRect(const RECT& clientRect, UINT dpi) const;
+
+    RECT ModeToggleButtonRect(const RECT& clientRect, UINT dpi) const;
+
+    // The leftmost of the four -- maximizes/restores whichever tile is
+    // currently active (see GroupState::IsTileMaximized). Only
+    // meaningful in a tiled mode -- Tile or Stack -- with 2+ members (a
+    // single tile already fills the whole area on its own);
+    // TileMaximizeButtonVisible() is the one place that decision is
+    // made, consulted by painting, hit-testing, and the title text's own
+    // right-boundary math alike so all three can never disagree about
+    // whether this button is showing right now. Anchoring the one
+    // conditionally-visible button at the *leftmost* end of the chain
+    // (rather than in the middle of it, as an earlier layout did) means
+    // hiding/showing it only ever moves the title text's own right
+    // boundary -- never any other button.
     bool TileMaximizeButtonVisible() const;
     RECT TileMaximizeButtonRect(const RECT& clientRect, UINT dpi) const;
-
-    // A fourth client-area button, immediately left of the other
-    // three -- toggles alignment_ between Horizontal/Vertical. Always
-    // shown (unlike TileMaximize, this is meaningful in both modes).
-    RECT AlignmentButtonRect(const RECT& clientRect, UINT dpi) const;
 
     // 0 outside Tab mode (Tile/Stack) or in Horizontal alignment; the
     // reserved left-column width in Tab mode with Vertical alignment --
@@ -397,6 +427,8 @@ private:
     // Mirrors GroupState::Alignment() -- see SetAlignment.
     GroupAlignment alignment_ = GroupAlignment::Horizontal;
     std::function<void()> onResized_;
+    std::function<void()> onMoved_;
+    std::function<void(POINT)> onMemberClicked_;
     std::function<void()> onClosing_;
     std::function<void(std::optional<size_t>, const RECT&)> onTabHovered_;
     std::optional<size_t> hoveredTabIndex_;
@@ -451,15 +483,5 @@ private:
     // handles.
     std::optional<std::pair<bool, size_t>> hoveredSplitter_;
 };
-
-// Whether hwnd is any group's own chrome container (this group's or any
-// other's) -- a real, normal top-level window by design (see this
-// class's own header comment on why it's deliberately not special-cased
-// out of IsCandidateWindow/Alt+Tab), but not something a user would
-// sensibly add as a *member* of a group. Used only by GroupPickerWindow's
-// own candidate filter, not IsCandidateWindow itself -- windowtracking/
-// has no existing dependency on hook/ and shouldn't gain one just for
-// this narrower, picker-specific check.
-bool IsGroupChromeWindow(HWND hwnd);
 
 }  // namespace polish

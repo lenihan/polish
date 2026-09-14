@@ -164,14 +164,17 @@ polish::ActivationHistory g_activationHistory;
 polish::GroupManager g_groupManager;
 std::map<polish::GroupId, std::unique_ptr<polish::GroupChromeWindow>> g_groupChromeWindows;
 
-// Which tile is "active" in a Tile-mode group -- a separate instance
-// from g_altTabHighlightBorder (same class, reused as-is: nothing in
+// Which tile is "active" in a Tile/Stack group -- one ring per group,
+// keyed the same way as g_groupChromeWindows (a single shared instance,
+// used until this map replaced it, let one group's reflow silently
+// Hide() a different group's ring -- see EnsureGroupActiveTileHighlight's
+// own comment). Same AltTabHighlightBorder class Alt+Tab cycling uses
+// (g_altTabHighlightBorder, a separate instance) -- nothing in
 // AltTabHighlightBorder assumes its target is top-level, and a
 // reparented member's GetWindowRect/DwmGetWindowAttribute both still
-// return real screen coordinates) so Alt+Tab cycling and a group's
-// active-tile ring can never fight over one window. See
+// return real screen coordinates. See
 // OnObjectFocusChanged/UpdateGroupActiveTileHighlight.
-std::unique_ptr<polish::AltTabHighlightBorder> g_groupActiveTileHighlight;
+std::map<polish::GroupId, std::unique_ptr<polish::AltTabHighlightBorder>> g_groupActiveTileHighlights;
 
 // One shared hover-preview popup, reused across every group's tab strip
 // (only one can ever be hovered at a time app-wide) -- created lazily
@@ -204,6 +207,15 @@ void OnMemberTitleChanged(HWND hwnd);
 // focus, system-wide -- a no-op unless it turns out to be (or be nested
 // inside) a Tile-mode group's member window.
 void OnObjectFocusChanged(HWND hwnd);
+
+// Forward-declared so ReflowGroupTo (defined above these) can call them
+// after GroupManager::ApplyLayout drops a member that turned out to be
+// unreparentable -- the chrome's own tab labels/icons otherwise stay
+// stale (one tab too many) until some unrelated event happens to
+// refresh them. Defined further down near the rest of the tab-label
+// refresh call sites they already share.
+std::vector<std::wstring> CollectMemberTitles(const polish::GroupState& group);
+std::vector<HICON> CollectMemberIcons(const polish::GroupState& group);
 
 // The window currently being live-tracked for settle events -- i.e. the
 // foreground window, whenever it's a candidate window (see
@@ -735,47 +747,53 @@ void EnsureAltTabHighlightBorder() {
     }
 }
 
-void EnsureGroupActiveTileHighlight() {
-    if (!g_groupActiveTileHighlight) {
+// Creates group `id`'s own ring on demand, owned by its chrome window --
+// see AltTabHighlightBorder's own `owner` comment for what that gets for
+// free (always in front of its owner, hidden/shown with minimize/
+// restore, destroyed with its owner). One instance per group (not the
+// single shared instance an earlier version used) so two groups' rings
+// can never fight over one window -- confirmed real: any *other* group's
+// reflow used to call Hide() on the one shared ring and silently kill
+// whichever group was actually using it.
+void EnsureGroupActiveTileHighlight(polish::GroupId id, HWND chromeWindow) {
+    if (g_groupActiveTileHighlights.find(id) == g_groupActiveTileHighlights.end()) {
         // alwaysOnTop=false -- unlike the real Alt+Tab overlay, this
         // ring must not float above unrelated windows (e.g. covering
-        // VS Code) once the group loses focus; see ShowAroundTarget's
-        // `owner` param, used below to keep it anchored just in front
-        // of the group's own chrome instead.
-        g_groupActiveTileHighlight =
-            std::make_unique<polish::AltTabHighlightBorder>(GetModuleHandleW(nullptr), /*alwaysOnTop=*/false);
+        // VS Code) once the group loses focus; ownership (the `owner`
+        // param) keeps it glued to the chrome's own Z position instead.
+        g_groupActiveTileHighlights[id] = std::make_unique<polish::AltTabHighlightBorder>(
+            GetModuleHandleW(nullptr), /*alwaysOnTop=*/false, chromeWindow);
     }
 }
 
 // Shows/hides/repositions the active-tile ring for group `id` to match
 // its current state -- called any time something might have changed
-// which tile is active, whether it's still Tile mode, or where the
-// active member's own rect now is (a mode switch, a reflow, closing
-// the group, ...). Always safe to call speculatively; a cheap no-op
-// whenever there's nothing to show.
+// which tile is active, whether it's still Tile mode, where the active
+// member's own rect now is, or where the chrome itself now is (a mode
+// switch, a reflow, a chrome move, closing the group, ...). Always safe
+// to call speculatively; a cheap no-op whenever there's nothing to show.
 void UpdateGroupActiveTileHighlight(polish::GroupId id) {
     polish::GroupState* group = g_groupManager.FindGroup(id);
+    auto ringIt = g_groupActiveTileHighlights.find(id);
     if (group == nullptr || !polish::IsTiledMode(group->Mode()) || group->MemberCount() <= 1) {
         // A single-member Tile "grid" already fills the whole content
         // area -- nothing to distinguish it from, so no point ringing
         // it.
-        if (g_groupActiveTileHighlight) {
-            g_groupActiveTileHighlight->Hide();
+        if (ringIt != g_groupActiveTileHighlights.end()) {
+            ringIt->second->Hide();
         }
         return;
     }
     const auto active = group->ActiveWindow();
     auto chromeIt = g_groupChromeWindows.find(id);
     if (!active.has_value() || !IsWindow(*active) || chromeIt == g_groupChromeWindows.end()) {
-        if (g_groupActiveTileHighlight) {
-            g_groupActiveTileHighlight->Hide();
+        if (ringIt != g_groupActiveTileHighlights.end()) {
+            ringIt->second->Hide();
         }
         return;
     }
-    EnsureGroupActiveTileHighlight();
-    // Anchored just in front of the group's own chrome in Z order (not
-    // the topmost band) -- see EnsureGroupActiveTileHighlight's comment.
-    g_groupActiveTileHighlight->ShowAroundTarget(*active, chromeIt->second->Handle());
+    EnsureGroupActiveTileHighlight(id, chromeIt->second->Handle());
+    g_groupActiveTileHighlights[id]->ShowAroundTarget(*active);
 }
 
 // Called when the active tile changes via something other than the
@@ -796,6 +814,27 @@ void ActivateGroupTile(polish::GroupId id, HWND hwnd) {
         chromeIt->second->SetActiveIndex(*activeIndex);
     }
     UpdateGroupActiveTileHighlight(id);
+}
+
+// Called from GroupChromeWindow's onMemberClicked (WM_PARENTNOTIFY) --
+// the click-based counterpart to OnObjectFocusChanged below (see
+// SetOnMemberClicked's own comment for why focus events alone aren't
+// enough). Resolves the specific member at the click point and
+// activates it, same as a focus event landing inside one would.
+void OnGroupMemberClicked(polish::GroupId id, POINT clientPt) {
+    auto chromeIt = g_groupChromeWindows.find(id);
+    if (chromeIt == g_groupChromeWindows.end()) {
+        return;
+    }
+    const HWND chrome = chromeIt->second->Handle();
+    const HWND member =
+        ChildWindowFromPointEx(chrome, clientPt, CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT);
+    if (member == nullptr || member == chrome) {
+        // No child at that point (only possible if the click didn't
+        // actually land on a member -- e.g. a gap between splitters).
+        return;
+    }
+    ActivateGroupTile(id, member);
 }
 
 void OnObjectFocusChanged(HWND hwnd) {
@@ -1222,10 +1261,108 @@ void OnAltTabCancel() {
 // spill into past the last minimized row). Tab/Shift+Tab
 // (OnAltTabCycle) always reset out of the minimized section on the very
 // next press, regardless of where this last left it.
-void OnAltTabNavigate(bool downward) {
+// How far PageUp/PageDown jumps. A fixed count rather than a real
+// viewport-derived page: the candidates are spread across one panel per
+// monitor, each with its own height and its own scroll state, so there
+// is no single "page" to derive -- and a page that silently meant
+// different amounts depending on which monitor the highlight happened to
+// be on would be worse than one predictable number.
+constexpr size_t kAltTabPageStep = 10;
+
+// Moves the highlight to the first candidate on the next (or previous)
+// monitor's panel, skipping panels that currently have no candidates of
+// their own. Left/Right mean this, rather than movement within a list,
+// because Up/Down already flow between a monitor's Active and Minimized
+// sections -- so the horizontal axis is free for the spatially obvious
+// meaning on a multi-monitor desktop. A no-op with fewer than two
+// panels.
+void MoveAltTabHighlightToAdjacentPanel(bool forward) {
+    if (g_altTabCandidates.empty() || g_altTabPanels.size() < 2 ||
+        g_altTabHighlightIndex >= g_altTabCandidates.size()) {
+        return;
+    }
+    const HMONITOR currentMonitor =
+        MonitorFromWindow(g_altTabCandidates[g_altTabHighlightIndex], MONITOR_DEFAULTTONEAREST);
+    size_t panelIndex = 0;
+    for (size_t i = 0; i < g_altTabPanels.size(); ++i) {
+        if (g_altTabPanels[i].monitor == currentMonitor) {
+            panelIndex = i;
+            break;
+        }
+    }
+
+    const size_t panelCount = g_altTabPanels.size();
+    for (size_t step = 1; step <= panelCount; ++step) {
+        const size_t candidatePanel =
+            forward ? (panelIndex + step) % panelCount : (panelIndex + panelCount - step) % panelCount;
+        for (size_t i = 0; i < g_altTabCandidates.size(); ++i) {
+            if (MonitorFromWindow(g_altTabCandidates[i], MONITOR_DEFAULTTONEAREST) ==
+                g_altTabPanels[candidatePanel].monitor) {
+                g_altTabHighlightIndex = i;
+                g_altTabSelectionInMinimized = false;
+                ApplyAltTabDimming();
+                return;
+            }
+        }
+    }
+}
+
+void OnAltTabNavigate(polish::AltTabHook::NavigateStep step) {
     if (!g_altTabSessionOpen) {
         return;
     }
+    using Step = polish::AltTabHook::NavigateStep;
+
+    if (step == Step::PrevPanel || step == Step::NextPanel) {
+        MoveAltTabHighlightToAdjacentPanel(step == Step::NextPanel);
+        return;
+    }
+
+    // Home/End always mean the active section's own ends -- jumping into
+    // the minimized section is Down's job, and an "End" that could land
+    // in either section depending on prior state would be unpredictable.
+    if (step == Step::First || step == Step::Last) {
+        if (g_altTabCandidates.empty()) {
+            return;
+        }
+        g_altTabSelectionInMinimized = false;
+        g_altTabHighlightIndex = (step == Step::First) ? 0 : g_altTabCandidates.size() - 1;
+        ApplyAltTabDimming();
+        return;
+    }
+
+    // Paging clamps at both ends rather than wrapping (unlike Tab's own
+    // cycle, which deliberately wraps): paging is for covering a long
+    // list quickly, and wrapping past the end there tends to lose the
+    // user's place rather than help.
+    if (step == Step::PageUp || step == Step::PageDown) {
+        if (g_altTabSelectionInMinimized) {
+            RebuildAltTabMinimizedCandidates();
+            if (g_altTabMinimized.empty()) {
+                g_altTabSelectionInMinimized = false;
+            } else {
+                g_altTabMinimizedHighlightIndex =
+                    (step == Step::PageDown)
+                        ? std::min(g_altTabMinimizedHighlightIndex + kAltTabPageStep, g_altTabMinimized.size() - 1)
+                        : (g_altTabMinimizedHighlightIndex < kAltTabPageStep
+                               ? 0
+                               : g_altTabMinimizedHighlightIndex - kAltTabPageStep);
+                ApplyAltTabDimming();
+                return;
+            }
+        }
+        if (g_altTabCandidates.empty()) {
+            return;
+        }
+        g_altTabHighlightIndex =
+            (step == Step::PageDown)
+                ? std::min(g_altTabHighlightIndex + kAltTabPageStep, g_altTabCandidates.size() - 1)
+                : (g_altTabHighlightIndex < kAltTabPageStep ? 0 : g_altTabHighlightIndex - kAltTabPageStep);
+        ApplyAltTabDimming();
+        return;
+    }
+
+    const bool downward = (step == Step::Next);
     if (!g_altTabSelectionInMinimized && downward && !g_altTabCandidates.empty() &&
         g_altTabHighlightIndex + 1 >= g_altTabCandidates.size()) {
         RebuildAltTabMinimizedCandidates();
@@ -1644,8 +1781,21 @@ void ReflowGroupTo(polish::GroupId id) {
 
     const HWND chromeHandle = chromeIt->second->Handle();
     const RECT contentRect = chromeIt->second->ContentRectInClientCoords();
+    const size_t memberCountBefore = group->MemberCount();
     const SIZE needed =
         g_groupManager.ApplyLayout(*group, chromeHandle, contentRect, chromeIt->second->TileSplitterWidthPx());
+    // ApplyLayout can drop a member that turned out to be unreparentable
+    // (see its own comment) -- when it does, the chrome's tab strip
+    // still shows the stale, now-too-long title/icon list until
+    // something resyncs it, so do that here rather than leaving a
+    // ghost tab behind.
+    if (group->MemberCount() != memberCountBefore) {
+        chromeIt->second->SetMemberTitles(CollectMemberTitles(*group));
+        chromeIt->second->SetMemberIcons(CollectMemberIcons(*group));
+        if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
+            chromeIt->second->SetActiveIndex(*activeIndex);
+        }
+    }
     // A no-op in Tab mode (both come back empty) -- ApplyLayout is what
     // actually (re)computes these, so the chrome's own copy (used for
     // splitter rendering/hit-testing) needs refreshing after every call
@@ -2135,12 +2285,6 @@ void CloseGroup(polish::GroupId id) {
     if (group == nullptr) {
         return;
     }
-    // The ring is a separate top-level popup, not a child of this
-    // group's chrome -- it doesn't get cleaned up for free just because
-    // the chrome is about to be destroyed.
-    if (g_groupActiveTileHighlight) {
-        g_groupActiveTileHighlight->Hide();
-    }
     g_groupManager.ReleaseGroup(*group);
     polish::LogDebug(std::format(L"[Polish] Group: closed group id={}, {} member(s) released to top-level", id,
                                   group->MemberCount()));
@@ -2197,6 +2341,11 @@ void TriggerNewGroup(HWND owner) {
     chrome->SetOnAlignmentToggleRequested([id]() { ToggleGroupAlignment(id); });
     chrome->SetOnEditWindowsRequested([id]() { EditGroupWindows(id); });
     chrome->SetOnResized([id]() { ReflowGroupTo(id); });
+    // Deliberately UpdateGroupActiveTileHighlight, not ReflowGroupTo --
+    // members move for free with their parent (see GroupChromeWindow's
+    // own WM_MOVE comment), only the ring needs repositioning.
+    chrome->SetOnMoved([id]() { UpdateGroupActiveTileHighlight(id); });
+    chrome->SetOnMemberClicked([id](POINT pt) { OnGroupMemberClicked(id, pt); });
     chrome->SetOnClosing([id]() { CloseGroup(id); });
     chrome->SetOnTabHovered(
         [id](std::optional<size_t> index, const RECT& tabScreenRect) { OnGroupTabHovered(id, index, tabScreenRect); });
@@ -2326,15 +2475,24 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             RefreshAltTabPanels();
             return 0;
 
-        case kCloseGroupMessage:
+        case kCloseGroupMessage: {
             // Deferred from CloseGroup -- see its own comment for why
             // this can't safely happen synchronously from within the
             // closing chrome's own WM_CLOSE handling. By now WM_CLOSE/
             // WM_DESTROY have both fully finished and members have
             // already been released, so erasing (and thereby
             // destroying, via ~GroupChromeWindow) is safe here.
-            g_groupChromeWindows.erase(static_cast<polish::GroupId>(wParam));
+            const auto id = static_cast<polish::GroupId>(wParam);
+            // Erase the ring *before* the chrome: the ring is owned by
+            // the chrome window (see AltTabHighlightBorder's `owner`),
+            // so destroying the chrome first would destroy the ring
+            // along with it as a side effect (harmless -- the ring's own
+            // destructor guards with IsWindow -- but erasing our side
+            // first is the more predictable order).
+            g_groupActiveTileHighlights.erase(id);
+            g_groupChromeWindows.erase(id);
             return 0;
+        }
 
         case WM_DESTROY:
             UnregisterHotKey(hwnd, kNewGroupHotkeyId);
@@ -2363,7 +2521,11 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             g_altTabHook.reset();
             g_altTabOverlays.clear();
             g_altTabHighlightBorder.reset();
-            g_groupActiveTileHighlight.reset();
+            // Before g_groupChromeWindows.clear() below -- each ring is
+            // owned by its group's chrome (see AltTabHighlightBorder's
+            // `owner`), so clearing this first is the same predictable-
+            // order reasoning as kCloseGroupMessage's own erase order.
+            g_groupActiveTileHighlights.clear();
             // Every remaining group's members must be released back to
             // top-level *before* their chrome windows are destroyed
             // below -- unlike a single group's own WM_CLOSE path

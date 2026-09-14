@@ -1,5 +1,7 @@
 #include "hook/AltTabHook.h"
 
+#include <optional>
+
 namespace polish {
 
 namespace {
@@ -14,7 +16,36 @@ AltTabHook* g_instance = nullptr;
 // AltTabHook::RowAction, the *kind* of row action a RowKeyAction message
 // carries in its lParam) is the one HookAction value that isn't fully
 // self-describing from its tag alone.
-enum class HookAction : WPARAM { CycleForward, CycleBackward, Commit, Cancel, NavigateDown, NavigateUp, RowKeyAction };
+// Navigate carries the specific AltTabHook::NavigateStep in lParam, the
+// same way RowKeyAction carries its RowAction -- one action rather than
+// one per direction, now that there are eight of them.
+enum class HookAction : WPARAM { CycleForward, CycleBackward, Commit, Cancel, Navigate, RowKeyAction };
+
+// The navigation key -> step mapping, and the definition of which keys
+// count as navigation keys at all (anything this returns nullopt for is
+// left completely alone, even mid-session).
+std::optional<AltTabHook::NavigateStep> NavigateStepForKey(DWORD vkCode) {
+    switch (vkCode) {
+        case VK_DOWN:
+            return AltTabHook::NavigateStep::Next;
+        case VK_UP:
+            return AltTabHook::NavigateStep::Prev;
+        case VK_PRIOR:
+            return AltTabHook::NavigateStep::PageUp;
+        case VK_NEXT:
+            return AltTabHook::NavigateStep::PageDown;
+        case VK_HOME:
+            return AltTabHook::NavigateStep::First;
+        case VK_END:
+            return AltTabHook::NavigateStep::Last;
+        case VK_LEFT:
+            return AltTabHook::NavigateStep::PrevPanel;
+        case VK_RIGHT:
+            return AltTabHook::NavigateStep::NextPanel;
+        default:
+            return std::nullopt;
+    }
+}
 
 bool IsDown(WPARAM wParam) { return wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN; }
 bool IsUp(WPARAM wParam) { return wParam == WM_KEYUP || wParam == WM_SYSKEYUP; }
@@ -212,30 +243,29 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         return false;
     }
 
-    if ((data.vkCode == VK_DOWN || data.vkCode == VK_UP) && sessionActive_) {
-        // Strictly gated on sessionActive_ already being true (checked
-        // above) -- unlike Tab, arrow keys are used constantly
-        // system-wide and must never be able to start a session on their
-        // own, nor have any effect when Alt+Tab isn't active. See class
-        // comment.
-        bool& physicallyDown = (data.vkCode == VK_DOWN) ? downPhysicallyDown_ : upPhysicallyDown_;
-        if (IsDown(wParam)) {
-            if (physicallyDown) {
-                return true;  // OS key-repeat, not a fresh press -- swallow, don't re-navigate
+    if (sessionActive_) {
+        // Strictly gated on sessionActive_ already being true -- unlike
+        // Tab, these keys are used constantly system-wide and must never
+        // be able to start a session on their own, nor have any effect
+        // when Alt+Tab isn't active. See class comment.
+        if (const std::optional<AltTabHook::NavigateStep> step = NavigateStepForKey(data.vkCode)) {
+            bool& physicallyDown = navigateKeysDown_[static_cast<size_t>(*step)];
+            if (IsDown(wParam)) {
+                if (physicallyDown) {
+                    return true;  // OS key-repeat, not a fresh press -- swallow, don't re-navigate
+                }
+                physicallyDown = true;
+                // Posted, not called directly -- same reason Tab's onCycle_
+                // is posted rather than invoked synchronously here: the hook
+                // callback must stay trivial (see class comment).
+                PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::Navigate),
+                             static_cast<LPARAM>(*step));
+                return true;
             }
-            physicallyDown = true;
-            // Posted, not called directly -- same reason Tab's onCycle_
-            // is posted rather than invoked synchronously here: the hook
-            // callback must stay trivial (see class comment).
-            PostMessageW(messageWindow_, kHookMessage,
-                         static_cast<WPARAM>(data.vkCode == VK_DOWN ? HookAction::NavigateDown
-                                                                     : HookAction::NavigateUp),
-                         0);
-            return true;
-        }
-        if (IsUp(wParam)) {
-            physicallyDown = false;
-            return true;
+            if (IsUp(wParam)) {
+                physicallyDown = false;
+                return true;
+            }
         }
     }
 
@@ -300,14 +330,9 @@ void AltTabHook::HandleHookMessage(WPARAM wParam, LPARAM lParam) {
                 onCancel_();
             }
             break;
-        case HookAction::NavigateDown:
+        case HookAction::Navigate:
             if (onNavigate_) {
-                onNavigate_(/*downward=*/true);
-            }
-            break;
-        case HookAction::NavigateUp:
-            if (onNavigate_) {
-                onNavigate_(/*downward=*/false);
+                onNavigate_(static_cast<NavigateStep>(lParam));
             }
             break;
         case HookAction::RowKeyAction:

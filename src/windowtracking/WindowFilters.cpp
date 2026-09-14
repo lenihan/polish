@@ -2,6 +2,9 @@
 
 #include <dwmapi.h>
 
+#include <cstring>
+#include <iterator>
+
 namespace polish {
 
 bool IsCandidateWindowShape(HWND hwnd) {
@@ -85,6 +88,12 @@ bool IsElevatedWindow(HWND hwnd) {
     }
     CloseHandle(process);
     return elevated;
+}
+
+bool IsUnreparentableWindow(HWND hwnd) {
+    wchar_t className[64];
+    return GetClassNameW(hwnd, className, static_cast<int>(std::size(className))) > 0 &&
+           wcscmp(className, L"ApplicationFrameWindow") == 0;
 }
 
 }  // namespace polish

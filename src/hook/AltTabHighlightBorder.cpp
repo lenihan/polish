@@ -132,28 +132,74 @@ void PremultiplyAlpha(BYTE* pixels, int pixelCount) {
 
 }  // namespace
 
-AltTabHighlightBorder::AltTabHighlightBorder(HINSTANCE instance, bool alwaysOnTop) : alwaysOnTop_(alwaysOnTop) {
+AltTabHighlightBorder::AltTabHighlightBorder(HINSTANCE instance, bool alwaysOnTop, HWND owner)
+    : alwaysOnTop_(alwaysOnTop) {
     EnsureGdiplusStarted();
     EnsureClassRegistered(instance);
     DWORD exStyle = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
     if (alwaysOnTop_) {
         exStyle |= WS_EX_TOPMOST;
     }
-    window_ = CreateWindowExW(exStyle, kClassName, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance, nullptr);
+    // `owner` as hWndParent -- see the header's own comment on what an
+    // owned WS_POPUP gets for free from Windows itself.
+    window_ = CreateWindowExW(exStyle, kClassName, L"", WS_POPUP, 0, 0, 0, 0, owner, nullptr, instance, nullptr);
 }
 
 AltTabHighlightBorder::~AltTabHighlightBorder() {
-    if (window_ != nullptr) {
+    // An owned window can already be gone by the time this destructor
+    // runs -- if `owner` (the group's chrome) was destroyed first,
+    // Windows destroys this window along with it (see the constructor's
+    // `owner` comment), so window_ may be a stale, no-longer-valid
+    // handle here. DestroyWindow on an invalid handle is harmless
+    // (it just fails), but IsWindow avoids relying on that.
+    if (window_ != nullptr && IsWindow(window_)) {
         DestroyWindow(window_);
     }
 }
 
-void AltTabHighlightBorder::ShowAroundTarget(HWND target, HWND owner) {
+void AltTabHighlightBorder::ShowAroundTarget(HWND target) {
     if (window_ == nullptr) {
         return;
     }
     RECT targetRect;
     if (!GetVisibleWindowRect(target, targetRect)) {
+        return;
+    }
+
+    // On the window's own rect, not inflated outward -- the ring sits
+    // inside the target's own edge, into its own content, rather than
+    // projecting out into the desktop margin around it. Everywhere more
+    // than `thickness` in from the edge, the target's real content shows
+    // through completely untouched.
+    const RECT outer = targetRect;
+    const int width = outer.right - outer.left;
+    const int height = outer.bottom - outer.top;
+    if (width <= 0 || height <= 0) {
+        // Nothing to draw (e.g. target mid-minimize) -- hide rather than
+        // leaving whatever was last rendered sitting on screen at a
+        // stale position (a real, confirmed bug: this used to just
+        // return here, leaving a stale ring visible until some unrelated
+        // later event happened to hide it).
+        Hide();
+        return;
+    }
+
+    const HWND insertAfter = alwaysOnTop_ ? HWND_TOPMOST : HWND_TOP;
+
+    if (lastRenderedSize_.cx == width && lastRenderedSize_.cy == height) {
+        // Cheap path: same size as the last full render below, so the
+        // previously rendered content is still correct as-is (thickness,
+        // corner radii, and which corners get the screen-edge radius all
+        // depend only on target *size*, never position) -- just move the
+        // window instead of rebuilding it through the DIB/GDI+/
+        // premultiply pipeline. UpdateLayeredWindow with hdcSrc null
+        // repositions a layered window without touching its content
+        // (documented behavior) -- the point of this path: a title-bar
+        // drag re-invokes this on every WM_MOVE, and that has to stay
+        // cheap or dragging visibly stutters.
+        SetWindowPos(window_, insertAfter, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        POINT dstPoint{outer.left, outer.top};
+        UpdateLayeredWindow(window_, nullptr, &dstPoint, nullptr, nullptr, nullptr, 0, nullptr, 0);
         return;
     }
 
@@ -176,18 +222,6 @@ void AltTabHighlightBorder::ShowAroundTarget(HWND target, HWND owner) {
     // thickness/radius value in this class, confirm/adjust after seeing it
     // live rather than trusting the number in isolation.
     const int screenRadius = MulDiv(20, static_cast<int>(dpi), 96);
-
-    // On the window's own rect, not inflated outward -- the ring sits
-    // inside the target's own edge, into its own content, rather than
-    // projecting out into the desktop margin around it. Everywhere more
-    // than `thickness` in from the edge, the target's real content shows
-    // through completely untouched.
-    const RECT outer = targetRect;
-    const int width = outer.right - outer.left;
-    const int height = outer.bottom - outer.top;
-    if (width <= 0 || height <= 0) {
-        return;
-    }
 
     // Per-corner: use the screen's own (larger) corner radius only for a
     // corner that's actually flush against the monitor's physical edge on
@@ -235,25 +269,12 @@ void AltTabHighlightBorder::ShowAroundTarget(HWND target, HWND owner) {
     // up as the previous target's rendered content briefly stretched
     // into the new window bounds before catching up.
     //
-    // A topmost instance always belongs in the topmost band, regardless
-    // of whatever `owner` the caller passed (or didn't). A non-topmost
-    // instance with no owner falls back to HWND_TOP -- still just "in
-    // front of everything else in the normal band" at the moment of
-    // this call, not floating above unrelated windows indefinitely the
-    // way HWND_TOPMOST would. A non-topmost instance *with* an owner
-    // resolves to whatever currently sits directly in front of that
-    // owner (GW_HWNDPREV) -- SetWindowPos's hWndInsertAfter places a
-    // window *behind* the handle passed to it, so inserting after
-    // `owner` itself would put the glow behind its owner instead of on
-    // top of it; falls back to HWND_TOP the same as "no owner" when
-    // `owner` is already frontmost (GW_HWNDPREV returns null, which is
-    // also HWND_TOP's own value).
-    HWND insertAfter = HWND_TOP;
-    if (alwaysOnTop_) {
-        insertAfter = HWND_TOPMOST;
-    } else if (owner != nullptr) {
-        insertAfter = GetWindow(owner, GW_HWNDPREV);
-    }
+    // insertAfter alone is enough for Z-order now: a non-topmost
+    // instance is created as an *owned* window (see the constructor's
+    // `owner` comment), so Windows itself keeps it in front of its owner
+    // without this needing to resolve anything relative to a specific
+    // window -- HWND_TOP just means "front of the normal band", same as
+    // it always has for an unowned window with no `owner` to anchor to.
     SetWindowPos(window_, insertAfter, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
 
     BITMAPINFO bmi{};
@@ -338,12 +359,23 @@ void AltTabHighlightBorder::ShowAroundTarget(HWND target, HWND owner) {
     DeleteDC(memDC);
     ReleaseDC(nullptr, screenDC);
     DeleteObject(dib);
+
+    // Remember what size this render is good for, so the next call at
+    // the same size can take the cheap reposition-only path above.
+    lastRenderedSize_ = SIZE{width, height};
 }
 
 void AltTabHighlightBorder::Hide() {
     if (window_ != nullptr) {
         ShowWindow(window_, SW_HIDE);
     }
+    // Not a real size -- forces the next ShowAroundTarget to do a full
+    // render rather than trusting stale cached content the hidden window
+    // may not actually have anymore (harmless either way content-wise,
+    // since UpdateLayeredWindow's content persists across ShowWindow, but
+    // this keeps the two functions' contracts simple: a hidden ring has
+    // no "last render" to reuse).
+    lastRenderedSize_ = SIZE{-1, -1};
 }
 
 }  // namespace polish

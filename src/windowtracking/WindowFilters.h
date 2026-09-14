@@ -36,4 +36,15 @@ bool IsMinimizedCandidateWindow(HWND hwnd);
 // someone add a window that then silently can't be repositioned.
 bool IsElevatedWindow(HWND hwnd);
 
+// Whether hwnd belongs to the UWP/Store "app frame" window family
+// (class ApplicationFrameWindow -- the host every UWP app's window
+// ultimately sits inside: Calculator, Settings, Photos, the Store
+// itself). Reparenting one of these into another window's client area
+// is not a permissions or DPI issue to work around -- SetParent fails
+// outright with ERROR_INVALID_PARAMETER every time, confirmed live and
+// logged (see ReparentIntoGroup). The group picker uses this to grey
+// these out up front, with an explanatory tooltip, rather than letting
+// someone add one and have it silently fail to join.
+bool IsUnreparentableWindow(HWND hwnd);
+
 }  // namespace polish

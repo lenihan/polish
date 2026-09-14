@@ -80,15 +80,16 @@ namespace polish {
 // WindowFromPoint-plus-handle-comparison check is the same bounded,
 // synchronous, no-UI shape as hasEligibleCandidates above.
 //
-// Arrow-key (Up/Down) navigation, once a session is already active, is
-// recognized the same way Tab is -- swallowed and posted via onNavigate --
-// but strictly gated on sessionActive_ already being true: unlike Tab,
-// arrow keys are used constantly system-wide, so they must never be able
-// to start a session and must be completely inert otherwise. The same
-// physically-down debounce pattern used for tabPhysicallyDown_ applies
-// per-key here too, so OS auto-repeat on a held arrow doesn't rapid-cycle
-// through the list -- the identical bug shape already found and fixed
-// once for Tab itself.
+// Navigation keys (Up/Down, Home/End, PageUp/PageDown, Left/Right),
+// once a session is already active, are recognized the same way Tab is
+// -- swallowed and posted via onNavigate -- but strictly gated on
+// sessionActive_ already being true: unlike Tab, these keys are used
+// constantly system-wide, so they must never be able to start a session
+// and must be completely inert otherwise. The same physically-down
+// debounce pattern used for tabPhysicallyDown_ applies per-key here too,
+// so OS auto-repeat on a held key doesn't rapid-cycle through the list
+// -- the identical bug shape already found and fixed once for Tab
+// itself.
 //
 // Delete/-/+ (see SetOnRowAction), once a session is already active, are
 // recognized and debounced the exact same way -- close/minimize-toggle/
@@ -128,10 +129,22 @@ public:
     // given point) preserves today's behavior exactly.
     void SetIsOwnUI(std::function<bool(POINT screenPt)> isOwnUI) { isOwnUI_ = std::move(isOwnUI); }
 
-    // Optional: Up/Down arrow-key navigation while a session is already
-    // active (see class comment) -- downward=true for Down, false for Up.
-    // Never fires unless sessionActive_ is already true.
-    void SetOnNavigate(std::function<void(bool downward)> onNavigate) { onNavigate_ = std::move(onNavigate); }
+    // How far, and in which direction, a navigation key moves the
+    // highlight. One enum rather than a bare "downward" bool (which is
+    // all this needed when Up/Down were the only navigation keys) --
+    // Home/End/PageUp/PageDown/Left/Right are all the same kind of
+    // request, and four more callbacks for them would be noise.
+    //
+    // PrevPanel/NextPanel move between per-monitor panels rather than
+    // within one: Up/Down already flow between a monitor's Active and
+    // Minimized sections, so Left/Right are free to mean the spatial
+    // thing they look like on a multi-monitor desktop.
+    enum class NavigateStep { Prev, Next, PageUp, PageDown, First, Last, PrevPanel, NextPanel };
+
+    // Optional: navigation-key handling while a session is already
+    // active (see class comment). Never fires unless sessionActive_ is
+    // already true.
+    void SetOnNavigate(std::function<void(NavigateStep step)> onNavigate) { onNavigate_ = std::move(onNavigate); }
 
     // Del/-/+ pressed while a session is already active -- keyboard
     // equivalents of clicking a row's close/minimize-toggle/maximize-
@@ -185,7 +198,7 @@ private:
     std::function<void()> onCommit_;
     std::function<void()> onCancel_;
     std::function<bool(POINT screenPt)> isOwnUI_;
-    std::function<void(bool downward)> onNavigate_;
+    std::function<void(NavigateStep step)> onNavigate_;
     std::function<void(RowAction action)> onRowAction_;
     HHOOK hook_ = nullptr;
     HHOOK mouseHook_ = nullptr;
@@ -206,11 +219,12 @@ private:
     // Alt+Tab does.
     bool tabPhysicallyDown_ = false;
 
-    // Same debounce shape as tabPhysicallyDown_, one per arrow key (Up and
-    // Down are independent keys, so a single shared flag can't tell them
-    // apart if both happened to be down, however unlikely).
-    bool upPhysicallyDown_ = false;
-    bool downPhysicallyDown_ = false;
+    // Same debounce shape as tabPhysicallyDown_, one slot per navigation
+    // key -- they're independent keys, so a single shared flag couldn't
+    // tell two held at once apart, however unlikely that is. Indexed by
+    // NavigateStep, which is 1:1 with the key that produces it.
+    static constexpr size_t kNavigateStepCount = 8;
+    bool navigateKeysDown_[kNavigateStepCount] = {};
 
     // Same debounce shape again, one per row-action key -- holding
     // Minus/Plus down shouldn't rapidly toggle minimize/maximize via OS

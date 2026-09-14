@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
+
+#include "util/Logging.h"
 
 namespace polish {
 
@@ -110,9 +113,9 @@ GroupState* GroupManager::FindGroupContaining(HWND hwnd) {
     return it == groups_.end() ? nullptr : &*it;
 }
 
-void GroupManager::EnsureReparented(HWND hwnd, HWND chromeWindow) {
+bool GroupManager::EnsureReparented(HWND hwnd, HWND chromeWindow) {
     if (reparentBackups_.contains(hwnd)) {
-        return;  // already a child of some group chrome
+        return true;  // already a child of some group chrome
     }
     // Done here, before the reparent, not via the existing
     // RestoreIfMaximized calls further down: those all run on a window
@@ -124,7 +127,17 @@ void GroupManager::EnsureReparented(HWND hwnd, HWND chromeWindow) {
     if (IsIconic(hwnd)) {
         ShowWindow(hwnd, SW_RESTORE);
     }
-    reparentBackups_[hwnd] = ReparentIntoGroup(hwnd, chromeWindow);
+    // No backup recorded when the reparent fails -- ReparentIntoGroup
+    // has already put the window back the way it found it, so recording
+    // one would later hand RestoreTopLevel a window that was never
+    // actually reparented, and (worse) make this function believe the
+    // window is already a member and skip retrying it on the next
+    // layout pass.
+    if (std::optional<ReparentBackup> backup = ReparentIntoGroup(hwnd, chromeWindow)) {
+        reparentBackups_[hwnd] = *backup;
+        return true;
+    }
+    return false;
 }
 
 void GroupManager::ReleaseGroup(const GroupState& group) {
@@ -307,10 +320,30 @@ RECT PositionMember(HWND hwnd, const RECT& rect, bool visible) {
 
 SIZE GroupManager::ApplyLayout(GroupState& group, HWND chromeWindow, const RECT& contentRectClientCoords,
                                 int tileSplitterWidthPx) {
+    // Collected rather than removed as they're found: group.Remove
+    // mutates group.Members(), the very vector this range-for is
+    // iterating, so removal has to wait until the loop is done.
+    std::vector<HWND> unreparentable;
     for (const GroupMember& member : group.Members()) {
         if (member.kind == GroupMemberKind::Window && member.window != nullptr && IsWindow(member.window)) {
-            EnsureReparented(member.window, chromeWindow);
+            if (!EnsureReparented(member.window, chromeWindow)) {
+                unreparentable.push_back(member.window);
+            }
         }
+    }
+    for (HWND hwnd : unreparentable) {
+        // Couldn't be reparented and never will be (see
+        // ReparentIntoGroup's own comment -- a UWP frame window is the
+        // known case) -- dropped from the group rather than left in
+        // place to be retried every single reflow forever, which is
+        // exactly what happened before this existed (confirmed live:
+        // dozens of identical failures a second against Calculator).
+        // The picker also greys these out before they can be added at
+        // all (GroupPickerListWindow); this is the defensive fallback
+        // for any other window this app doesn't yet know is unaddable.
+        LogDebug(std::format(L"[Polish] Group: dropping unaddable member hwnd={} from group id={}",
+                              reinterpret_cast<void*>(hwnd), group.Id()));
+        group.Remove(hwnd);
     }
 
     if (IsTiledMode(group.Mode())) {
