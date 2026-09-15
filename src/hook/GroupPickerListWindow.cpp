@@ -9,7 +9,6 @@
 #include "util/DarkMode.h"
 #include "util/UiFont.h"
 #include "util/WindowIcon.h"
-#include "windowtracking/WindowFilters.h"
 
 namespace polish {
 
@@ -32,12 +31,6 @@ constexpr int kRowCornerRadius = 6;
 constexpr int kButtonSize = 24;
 constexpr int kButtonCornerRadius = 6;
 constexpr int kGlyphMargin = 7;
-
-// Shown as this row's tooltip in place of the usual Add-button/
-// truncated-title text -- see GroupPickerRow::embeddable's own comment.
-constexpr wchar_t kAttachedOnlyTooltipText[] =
-    L"This kind of window (a Store/UWP app) can't be contained inside the group -- it will be grouped and "
-    L"positioned with it instead, keeping its own title bar";
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
@@ -681,8 +674,7 @@ void GroupPickerListWindow::SetWindows(const std::vector<HWND>& candidates) {
     rows_.clear();
     rows_.reserve(candidates.size());
     for (HWND hwnd : candidates) {
-        rows_.push_back(GroupPickerRow{hwnd, GetWindowTitle(hwnd), GetWindowIconHandle(hwnd),
-                                       !IsUnreparentableWindow(hwnd)});
+        rows_.push_back(GroupPickerRow{hwnd, GetWindowTitle(hwnd), GetWindowIconHandle(hwnd)});
     }
     hoveredIndex_.reset();
     // selectedIndex_ deliberately left untouched here -- GroupPickerWindow
@@ -720,14 +712,11 @@ void GroupPickerListWindow::UpdateTooltip() {
         return;
     }
 
-    // Three tiers: an attached-only row's explanation takes priority
-    // over everything else on that row (shown for the whole row body,
-    // not just a sub-rect, since it's relevant no matter what's hovered);
-    // then the Add button's own tooltip; otherwise, if the hovered row's
-    // title doesn't fit its column (DT_END_ELLIPSIS truncated it), show
-    // the full title -- helpful precisely when it's chopped off, so this
-    // deliberately doesn't fire for a title that already fits (see
-    // IsTitleTruncated's own comment).
+    // Two tiers: the Add button's own tooltip, when hovered; otherwise,
+    // if the hovered row's title doesn't fit its column (DT_END_ELLIPSIS
+    // truncated it), show the full title -- helpful precisely when it's
+    // chopped off, so this deliberately doesn't fire for a title that
+    // already fits (see IsTitleTruncated's own comment).
     const wchar_t* text = nullptr;
     std::wstring hoveredTitle;
     if (hoveredIndex_.has_value() && window_ != nullptr) {
@@ -735,27 +724,23 @@ void GroupPickerListWindow::UpdateTooltip() {
         const RowLayout layout = ComputeLayout(dpi);
         if (*hoveredIndex_ < layout.rowRects.size() && *hoveredIndex_ < rows_.size()) {
             const GroupPickerRow& row = rows_[*hoveredIndex_];
-            if (!row.embeddable) {
-                text = kAttachedOnlyTooltipText;
+            const RECT& rowRect = layout.rowRects[*hoveredIndex_];
+            POINT cursor{};
+            GetCursorPos(&cursor);
+            ScreenToClient(window_, &cursor);
+            cursor.y += scrollOffset_;
+            const RECT addRect = ComputeAddButtonRect(rowRect, dpi);
+            if (PtInRect(&addRect, cursor)) {
+                text = L"Add to group";
             } else {
-                const RECT& rowRect = layout.rowRects[*hoveredIndex_];
-                POINT cursor{};
-                GetCursorPos(&cursor);
-                ScreenToClient(window_, &cursor);
-                cursor.y += scrollOffset_;
-                const RECT addRect = ComputeAddButtonRect(rowRect, dpi);
-                if (PtInRect(&addRect, cursor)) {
-                    text = L"Add to group";
-                } else {
-                    int x = Scale(kPaddingX, dpi);
-                    if (row.icon != nullptr) {
-                        x += Scale(kIconSize, dpi) + Scale(kIconTextGap, dpi);
-                    }
-                    const int availableWidth = (addRect.left - Scale(kPaddingX, dpi)) - x;
-                    if (IsTitleTruncated(window_, row.title, availableWidth, dpi)) {
-                        hoveredTitle = row.title;
-                        text = hoveredTitle.c_str();
-                    }
+                int x = Scale(kPaddingX, dpi);
+                if (row.icon != nullptr) {
+                    x += Scale(kIconSize, dpi) + Scale(kIconTextGap, dpi);
+                }
+                const int availableWidth = (addRect.left - Scale(kPaddingX, dpi)) - x;
+                if (IsTitleTruncated(window_, row.title, availableWidth, dpi)) {
+                    hoveredTitle = row.title;
+                    text = hoveredTitle.c_str();
                 }
             }
         }

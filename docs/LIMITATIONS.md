@@ -50,13 +50,42 @@ gets a full pass in Phase 3; today it records what's already known.
    login.
 
 7. **A UWP/Store app window (Calculator, Settings, Photos, ...) can never
-   actually be contained inside a group** — confirmed live, `SetParent`
-   fails outright with `ERROR_INVALID_PARAMETER` for the
-   `ApplicationFrameWindow` class every time, mixed-DPI hosting or not.
-   Such a window still joins a group, but as an **attached** member
-   rather than an embedded one: it stays a real top-level window with the
-   group's chrome as its owner, instead of becoming a child of it. In
-   practice that means:
+   actually be contained inside a group** — confirmed live, both
+   `SetParent` and `SetWindowLongPtr(GWLP_HWNDPARENT)` fail outright with
+   `ERROR_INVALID_PARAMETER` for the `ApplicationFrameWindow` class every
+   time (mixed-DPI hosting or not, for the first; logged at join time as
+   `[Polish] Attach: owner did NOT stick` for the second) — Windows
+   refuses both embedding *and* ownership across this particular process
+   boundary. Such a window still joins a group, but as an **attached**
+   member rather than an embedded one: it stays an ordinary top-level
+   window, and Polish drives everything an owner relationship would
+   otherwise have provided for free, by hand:
+   - **Z-order**: kept directly above the chrome (`SetWindowPos` with
+     that as `hWndInsertAfter`) at every layout pass, and again whenever
+     the chrome is brought forward (`GroupChromeWindow::SetOnZOrderChanged`
+     → `GroupManager::RaiseAttachedMembers`) — clicking the group's title
+     bar or Alt+Tabbing back to it. An unrelated window activated in
+     between still correctly covers both, same as it would with a real
+     owner relationship.
+   - **Minimize/restore**: `ShowWindow(SW_HIDE)`/`SW_SHOWNOACTIVATE`
+     driven off the chrome's own `WM_SIZE` transitions
+     (`GroupChromeWindow::SetOnMinimizedChanged` →
+     `GroupManager::SetAttachedMembersHidden`), rather than relying on
+     Windows to hide/restore an owned window automatically.
+   - **Candidate filtering**: since it's a plain top-level window (not
+     owned, so `IsCandidateWindowShape`'s owned-window exclusion doesn't
+     apply), the picker explicitly excludes every other group's members
+     by hwnd (`GroupPickerWindow::ShowModal`'s `excludedWindows`) — an
+     attached member that wasn't excluded this way could otherwise be
+     offered to, and fought over by, a second group.
+   - **Destroy-with-owner does *not* apply** — precisely because there is
+     no real owner relationship, an attached member is *not* at risk of
+     being destroyed if the group's chrome is destroyed abruptly (unlike
+     an embedded member's `WS_CHILD` relationship, which is). Detaching
+     it (`GroupManager::ReleaseGroup`/`ReleaseMember`, on every normal
+     "close group"/remove-member path) is still done for cleanliness, but
+     isn't load-bearing against data loss the way it is on the embedded
+     side.
    - It keeps its own title bar/frame, drawn by its own process — Polish
      never strips it the way it does for an embedded member.
    - It is not clipped to the group's window; it floats above the
@@ -64,20 +93,27 @@ gets a full pass in Phase 3; today it records what's already known.
      visibly overhang when the group is partly offscreen, resized
      smaller than it, or overlapped by another window.
    - It is hidden (not merely covered) when its tab isn't the active one
-     in Tab mode, since an owned window is always above its owner in
-     Z-order and can't be covered by a sibling the way an embedded
-     member can.
-   - It moves, minimizes, restores, and closes with the group by relying
-     on Windows' owned-window semantics (`GWLP_HWNDPARENT`) — whether
-     that actually takes effect against a given UWP frame is logged at
-     join time (`[Polish] Attach: ...`) rather than assumed; if it
-     doesn't stick for some app, the member is still kept in sync
-     position-wise, just without the automatic hide/restore-with-group
-     behavior.
-   - Because it is an *owned* window, it is destroyed if the group's
-     chrome window is ever destroyed without first detaching it
-     (`GroupManager::ReleaseGroup`/`ReleaseMember`, called on every
-     normal "close group"/remove-member path) — an abrupt Polish crash
-     or kill before that runs could take an attached app down with it,
-     the same hazard an embedded member's `WS_CHILD` relationship
-     already has.
+     in Tab mode — a plain top-level window can't be covered by a sibling
+     the way an embedded member can.
+   - **It keeps its own taskbar button, and every known mechanism has
+     been tried.** All verified live against Calculator, all reporting
+     success, none removing the button:
+     - `WS_EX_TOOLWINDOW` — accepted, reads back as set (unlike
+       `GWLP_HWNDPARENT`, which is refused outright), ignored by the
+       taskbar. Also tried bracketed by the hide/show cycle that
+       normally makes the shell re-evaluate taskbar membership after a
+       style change.
+     - `ITaskbarList::DeleteTab` — returns `S_OK`, re-applied on every
+       layout pass in case the shell re-adds the button on show.
+     - `IApplicationView::SetShowInSwitchers(FALSE)` — the shell's own
+       internal interface, the one the virtual-desktop feature uses.
+       Reached successfully (its vtable layout check passes on this
+       build) and returns `S_OK`. The button still stays.
+
+     A packaged app's taskbar button is evidently driven by its package
+     identity via `ApplicationFrameHost` rather than by the window this
+     app holds a handle to. All three calls are left in place: they cost
+     nothing, and the first two are correct for any non-packaged window
+     that ever takes the attached path.
+   - It is excluded from Polish's *own* Alt+Tab, which is filtered on
+     group membership directly rather than relying on any of the above.

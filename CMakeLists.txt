@@ -35,6 +35,7 @@ add_library(polish_core STATIC
     src/windowtracking/WindowFilters.cpp
     src/windowtracking/WindowZOrder.cpp
     src/windowtracking/WindowReparenting.cpp
+    src/windowtracking/SwitcherVisibility.cpp
     src/tray/TrayIcon.cpp
     src/hook/AltTabHook.cpp
     src/hook/AltTabDimOverlay.cpp
@@ -47,6 +48,7 @@ add_library(polish_core STATIC
     src/hook/GroupHotkeyDialog.cpp
     src/hook/GroupTabThumbnail.cpp
     src/settings/Settings.cpp
+    src/util/AppIdentity.cpp
     src/util/DarkMode.cpp
     src/util/DialogKeyboard.cpp
     src/util/UiFont.cpp
@@ -72,6 +74,8 @@ target_link_libraries(polish_core PUBLIC
     gdiplus
     uxtheme
     shcore
+    ole32
+    uuid
 )
 
 if(MSVC)

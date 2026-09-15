@@ -92,18 +92,20 @@ current todo list.
   join a group as **attached** members instead of being refused — since
   `SetParent` categorically fails for the `ApplicationFrameWindow` class
   (confirmed live, `ERROR_INVALID_PARAMETER` every time), such a window
-  is kept top-level with the group's chrome as its *owner*
-  (`GWLP_HWNDPARENT`) rather than as its parent, and repositioned to its
-  slot in screen coordinates instead of being reparented into it. It
-  still moves/minimizes/closes with the group and is protected by the
-  same position-enforcement as an embedded member, but keeps its own
-  title bar and isn't visually contained inside the group's window — see
-  `docs/LIMITATIONS.md` for the full list of differences. Whether
-  Windows actually honors the owner relationship cross-process against a
-  real UWP frame is logged at join time
-  (`[Polish] Attach: owner set ok` / `did NOT stick`) rather than
-  assumed — worth checking that log line on a real machine before
-  relying on hide/restore-with-group working automatically.
+  is kept top-level and repositioned to its slot in screen coordinates
+  instead of being reparented into it. Ownership (`GWLP_HWNDPARENT`) was
+  the first design for keeping it glued to the group, but confirmed live
+  that Windows refuses that too, with the identical error — so Z-order
+  (kept directly above the chrome, re-asserted whenever the chrome is
+  raised), minimize/restore (hidden/shown off the chrome's own size
+  transitions), and candidate-list exclusion (an attached member is a
+  plain top-level window, invisible to none of the usual filters, so the
+  picker now explicitly excludes every other group's members by hwnd)
+  are all driven by hand instead of relying on owner semantics. It's
+  still protected by the same position-enforcement as an embedded
+  member, but keeps its own title bar, isn't visually contained inside
+  the group's window, and keeps its own taskbar/Alt+Tab entry — see
+  `docs/LIMITATIONS.md` for the full list of differences.
 
 ## Left to do
 

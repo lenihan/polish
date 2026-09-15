@@ -52,6 +52,27 @@ std::optional<ReparentBackup> ReparentIntoGroup(HWND hwnd, HWND newParent);
 // in) every window still in the group.
 void RestoreTopLevel(HWND hwnd, const ReparentBackup& backup);
 
+// Re-strips the frame bits (title bar, resize border, system menu, ...)
+// that ReparentIntoGroup removed, if the app has since re-applied any of
+// them to itself -- common around an app's own restore/DPI/theme
+// handling, and not something anything re-checked before this existed.
+// A member that gets its WS_THICKFRAME back also gets its resize border
+// back: its own frame starts hit-testing as resizable again, so hovering
+// its edge shows a resize cursor and dragging starts a real size loop
+// inside the group (confirmed, human-reported).
+//
+// Only ever clears bits from the *current* style, never restores the
+// backup -- an app is free to change any other style bit for its own
+// reasons, and ReparentBackup::style still holds the original for
+// RestoreTopLevel to put back on release.
+//
+// Returns whether it actually had to change anything, so a caller can
+// log only the times it fired (a member that keeps re-applying its frame
+// every reflow is worth knowing about; one that never does should be
+// silent). Meaningless for an attached member -- see AttachToGroup, whose
+// whole contract is leaving a UWP frame's styles alone.
+bool ReapplyChildFrameStyles(HWND hwnd);
+
 // The pre-change owner captured before AttachToGroup changes it -- same
 // "Windows has no query for the previous value" reasoning as
 // ReparentBackup.

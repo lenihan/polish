@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <shobjidl.h>
+
 #include <map>
 #include <vector>
 
@@ -146,6 +148,35 @@ public:
     // reflow the group to drag those along.
     bool HasAttachedMembers(const GroupState& group) const;
 
+    // Re-places whichever attached member(s) of `group` belong directly
+    // above `chromeWindow` in Z-order (see GroupManager's own class
+    // comment on why this has to be done by hand, and
+    // ApplyTabLayout/ApplyTileLayout's own PositionMember calls for the
+    // same technique at layout time) -- called whenever the chrome itself
+    // is brought forward (GroupChromeWindow::SetOnZOrderChanged) so an
+    // attached member, which is not a sibling child and so doesn't ride
+    // along with the chrome for free, comes back into its correct
+    // position relative to it instead of staying wherever it last was.
+    // In Tab mode that's only the *active* attached member -- every other
+    // one belongs behind the chrome (covered, same as an embedded
+    // sibling), and raising it too would incorrectly surface a covered
+    // tab. In Tile/Stack every member is visible in its own slot
+    // simultaneously, so every attached one is raised. A no-op for a
+    // group with no attached members.
+    void RaiseAttachedMembers(const GroupState& group, HWND chromeWindow);
+
+    // Shows or hides every attached member of `group` to match the
+    // chrome's own minimized state (GroupChromeWindow::SetOnMinimizedChanged)
+    // -- an attached member is a real top-level window, so it doesn't
+    // minimize/restore with the chrome the way an embedded (WS_CHILD) one
+    // does automatically. `hide` true on minimize; false on restore, in
+    // which case the caller should follow with a normal ApplyLayout/
+    // ReflowGroupTo pass (not done here) so each member ends up back in
+    // its slot with Tab mode's own active-only visibility re-applied,
+    // rather than this method blanket-showing every attached member
+    // regardless of which tab is active.
+    void SetAttachedMembersHidden(const GroupState& group, bool hide);
+
     // A static preview of a Tab-mode member's content, captured the
     // instant it was last hidden (switched away from) -- used for the
     // tab hover-preview popup. nullptr if hwnd has never been hidden as
@@ -231,6 +262,55 @@ private:
     // two backup maps is the source of truth for which kind a member is.
     bool IsAttached(HWND hwnd) const { return attachedBackups_.contains(hwnd); }
     void CaptureThumbnail(HWND hwnd);
+    // How many device px of `member`'s own leading edge (top in
+    // Horizontal alignment, left in Vertical) it claims for its own
+    // resize hit-testing -- confirmed live that some custom-frame apps
+    // (File Explorer) do this entirely on their own, independent of
+    // WS_THICKFRAME and without ever deferring WM_SETCURSOR to this
+    // app's chrome, so a member with a nonzero band here has its
+    // occupied rect shrunk by that much on the leading edge (see
+    // ApplyTabLayout/ApplyTileLayout) to keep that band physically
+    // outside the member's own window -- the chrome's own content-area
+    // background paints through in the reclaimed strip instead (already
+    // the active tab's own color, see PaintTabStrip, so this reads as a
+    // seamless extension rather than a visible gap). Lazily measured
+    // (WM_NCHITTEST probing -- see its own .cpp comment) and cached per
+    // member/axis, since it's a property of the app's own frame, not of
+    // the current layout pass; a member practically never changes this
+    // after joining. Cleared in ReleaseMember and ApplyLayout's
+    // unjoinable-drop loop, same as memberRects_.
+    int ResizeBandPx(HWND member, bool vertical);
+    // Lazily creates (on first use) and returns the shared ITaskbarList
+    // instance used to hide/restore an attached member's own taskbar
+    // button -- see EnsureAttached/ReleaseMember, the only two callers.
+    // An attached member is a plain top-level window with nothing else
+    // suppressing its button (no real owner relationship to do it for
+    // free -- see this class's own comment), so this is done explicitly
+    // via the shell API built for exactly this. Requires COM already
+    // initialized on this thread (main.cpp's wWinMain does this once, at
+    // startup, before any group operation can run). Returns nullptr (and
+    // every call site checks before using it) if CoCreateInstance ever
+    // fails -- a missing taskbar button is a cosmetic regression, not a
+    // reason to fail joining/leaving a group.
+    ITaskbarList* TaskbarListInstance();
+    // Keeps an attached member off the taskbar (WS_EX_TOOLWINDOW plus
+    // ITaskbarList::DeleteTab -- see the .cpp for why both), and puts it
+    // back. Suppression is re-applied on every layout pass, not just at
+    // join: the shell re-adds a button for a window it sees being shown,
+    // and every layout pass shows this one.
+    void SuppressTaskbarButton(HWND hwnd);
+    void RestoreTaskbarButton(HWND hwnd);
+    // Positions overlay `index` of `chrome`'s pool over `rect` (chrome
+    // client coordinates), creating it if the pool doesn't reach that far
+    // yet, and raises it above every member. See
+    // kResizeBandOverlayClassName's own comment for what these are for.
+    void PlaceResizeBandOverlay(HWND chrome, size_t index, const RECT& rect);
+    // Hides every overlay in `chrome`'s pool from `usedCount` on -- the
+    // ones the layout pass that just ran didn't need (a member left the
+    // group, a mode switch needs fewer, ...). Hidden rather than
+    // destroyed so the next pass can reuse them without paying
+    // CreateWindowExW again.
+    void HideUnusedResizeBandOverlays(HWND chrome, size_t usedCount);
 
     std::vector<GroupState> groups_;
     GroupId nextId_ = 1;
@@ -263,10 +343,26 @@ private:
     // this class is currently positioning," same "map membership is the
     // source of truth" shape reparentBackups_ already uses.
     std::map<HWND, RECT> memberRects_;
+    // See ResizeBandPx. Two maps, one per axis -- a member practically
+    // never needs both during its lifetime (alignment rarely changes on
+    // an already-joined group), so there's no real cost to keeping the
+    // stale one around if it ever does.
+    std::map<HWND, int> memberTopResizeBandPx_;
+    std::map<HWND, int> memberLeftResizeBandPx_;
     // Populated by ApplyTileLayout each time it runs. See
     // TileColumnBoundaries/TileRowBoundaries.
     std::map<GroupId, std::vector<int>> tileColumnBoundaries_;
     std::map<GroupId, std::vector<int>> tileRowBoundaries_;
+    // See TaskbarListInstance. nullptr until the first attached member
+    // actually needs it.
+    ITaskbarList* taskbarList_ = nullptr;
+    // Per-chrome pool of resize-band overlay windows (see
+    // kResizeBandOverlayClassName's own comment) -- Tab mode needs at
+    // most one (only the active member is visible), Tile/Stack one per
+    // member whose own frame claims a band. They're children of the
+    // chrome, so Windows destroys them along with it; the map entry is
+    // dropped in ReleaseGroup.
+    std::map<HWND, std::vector<HWND>> resizeBandOverlays_;
 };
 
 }  // namespace polish

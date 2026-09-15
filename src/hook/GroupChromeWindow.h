@@ -221,6 +221,30 @@ public:
     // confirmed bug).
     void SetOnMoved(std::function<void()> callback) { onMoved_ = std::move(callback); }
 
+    // Called whenever this window's Z-order position actually changes
+    // (WM_WINDOWPOSCHANGED with SWP_NOZORDER *not* set) -- e.g. clicking
+    // the chrome's own title bar, or Alt+Tabbing to it. Exists for an
+    // *attached* member (see GroupManager's own class comment): unlike an
+    // embedded member, it isn't a sibling child that comes along for free
+    // when the chrome is brought forward, so the owner needs to know to
+    // re-place it directly above the chrome again
+    // (GroupManager::RaiseAttachedMembers). WM_WINDOWPOSCHANGED rather
+    // than WM_ACTIVATE specifically because it also catches a
+    // non-activating raise (e.g. another of this app's own windows being
+    // brought to front without stealing focus), which WM_ACTIVATE alone
+    // would miss.
+    void SetOnZOrderChanged(std::function<void()> callback) { onZOrderChanged_ = std::move(callback); }
+
+    // Called on WM_SIZE specifically when the *minimized* state changes
+    // (true = just minimized, false = just restored out of minimized) --
+    // split out from SetOnResized because a plain reflow against a
+    // minimized window's degenerate content rect would be actively wrong
+    // for an *attached* member: harmless for an embedded (child) member,
+    // but it would shrink a real top-level attached member down to
+    // nothing instead of hiding it. See
+    // GroupManager::SetAttachedMembersHidden.
+    void SetOnMinimizedChanged(std::function<void(bool)> callback) { onMinimizedChanged_ = std::move(callback); }
+
     // Called with the client-coordinate point of a mouse-down that
     // landed inside one of the group's own members (WM_PARENTNOTIFY),
     // whichever mode the group is in. Tile/Stack's active-tile ring
@@ -428,6 +452,19 @@ private:
     GroupAlignment alignment_ = GroupAlignment::Horizontal;
     std::function<void()> onResized_;
     std::function<void()> onMoved_;
+    std::function<void()> onZOrderChanged_;
+    std::function<void(bool)> onMinimizedChanged_;
+    // Last-seen minimized state, so WM_SIZE's SIZE_MINIMIZED/other
+    // transition can be detected as an edge (only fire onMinimizedChanged_
+    // when it actually flips) rather than re-firing on every resize while
+    // already minimized/already restored.
+    bool minimized_ = false;
+    // Diagnostic instrumentation only, for the WM_SETCURSOR handler's own
+    // rate-limited log line -- see its comment. Remembers the last
+    // (window, hit-code) pair actually seen so a held-still cursor
+    // doesn't spam a line per WM_MOUSEMOVE.
+    HWND lastCursorProbeWindow_ = nullptr;
+    WORD lastCursorProbeHitCode_ = 0;
     std::function<void(POINT)> onMemberClicked_;
     std::function<void()> onClosing_;
     std::function<void(std::optional<size_t>, const RECT&)> onTabHovered_;

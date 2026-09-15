@@ -76,9 +76,24 @@ public:
     // because of a transient state at edit time. `initialName`
     // pre-fills the name field. `editing` only affects the window
     // title/confirm-button wording.
+    //
+    // `excludedWindows` are dropped from the candidate list outright (not
+    // offered, not selectable) -- every member of every *other* group,
+    // whether embedded or attached. An embedded member is already
+    // WS_CHILD and therefore invisible to EnumWindows on its own (see
+    // EnumPickerCandidatesProc's own comment), but an *attached* member
+    // is a perfectly ordinary top-level window (GroupManager could not
+    // actually make it an owned one -- see its own class comment), so
+    // nothing else keeps it from being offered to a second group, which
+    // would then fight the first one over its position. The caller is
+    // responsible for excluding only *other* groups' members -- the
+    // group being edited's own members belong in `initialSelection`
+    // instead, so they still appear (pre-selected) rather than
+    // disappearing entirely.
     std::optional<GroupPickerResult> ShowModal(HWND owner, const std::vector<HWND>& initialSelection = {},
                                                 const std::wstring& initialName = L"New Group",
-                                                bool editing = false);
+                                                bool editing = false,
+                                                const std::vector<HWND>& excludedWindows = {});
 
 private:
     static LRESULT CALLBACK WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -180,6 +195,11 @@ private:
     // comment for why), but offering a group to itself as a member is
     // nonsense -- and would reparent a window into itself.
     HWND editedGroupChrome_ = nullptr;
+    // ShowModal's own `excludedWindows` argument -- every other group's
+    // member, dropped from PopulateLists/RefreshCandidates the same way
+    // editedGroupChrome_ is (see ShowModal's own comment for why this is
+    // needed on top of that).
+    std::vector<HWND> excludedWindows_;
     bool editing_ = false;
     std::optional<GroupPickerResult> result_;
     bool done_ = false;

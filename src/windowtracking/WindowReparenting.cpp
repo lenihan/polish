@@ -94,6 +94,21 @@ std::optional<ReparentBackup> ReparentIntoGroup(HWND hwnd, HWND newParent) {
     return backup;
 }
 
+bool ReapplyChildFrameStyles(HWND hwnd) {
+    const LONG_PTR currentStyle = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    const LONG_PTR strippedStyle = currentStyle & ~kFrameStyleBits;
+    if (strippedStyle == currentStyle) {
+        return false;  // nothing to strip -- the common, every-reflow case
+    }
+    SetWindowLongPtrW(hwnd, GWL_STYLE, strippedStyle);
+    ApplyFrameChange(hwnd);
+    LogDebug(std::format(L"[Polish] Group: re-stripped frame styles for {} -- app re-applied its own frame "
+                          L"(was 0x{:x}, now 0x{:x})",
+                          DescribeWindow(hwnd), static_cast<unsigned long long>(currentStyle),
+                          static_cast<unsigned long long>(strippedStyle)));
+    return true;
+}
+
 void RestoreTopLevel(HWND hwnd, const ReparentBackup& backup) {
     SetWindowLongPtrW(hwnd, GWL_STYLE, backup.style);
     // Same mixed-hosting opt-in as ReparentIntoGroup, for the same
