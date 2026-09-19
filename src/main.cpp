@@ -152,6 +152,10 @@ std::vector<std::unique_ptr<polish::AltTabDimOverlay>> g_altTabOverlays;
 // MINIMIZESTART cases) don't need to ask the halo object itself.
 std::unique_ptr<polish::ActiveWindowHalo> g_activeWindowHalo;
 HWND g_haloTarget = nullptr;
+// The foreground window UpdateActiveWindowHalo last evaluated, whether or
+// not it currently qualifies for a halo (maximized, full-screen, ...) --
+// unlike g_haloTarget, which is nullptr while the halo is hidden.
+HWND g_haloWatched = nullptr;
 // Set for the duration of g_haloTarget's Win11 minimize animation (between
 // EVENT_SYSTEM_MINIMIZESTART and MINIMIZEEND) -- LOCATIONCHANGE fires
 // continuously through that animation while IsIconic is still false, so
@@ -535,6 +539,13 @@ void UpdateActiveWindowHalo(HWND hwnd) {
     // target leaves no EVENT_OBJECT_DESTROY and no reliable foreground
     // change to react to, so re-checking here on every call this app
     // already makes for other reasons is what actually catches it.
+    //
+    // Remembered separately from g_haloTarget (which goes nullptr whenever
+    // the halo is hidden): a maximized foreground window hides the halo,
+    // and its restore fires only LOCATIONCHANGE -- no foreground change --
+    // so the location handler needs to still know which window to
+    // re-evaluate after it stops covering the monitor.
+    g_haloWatched = hwnd;
     if (polish::IsCandidateWindow(hwnd) && IsWindowInNormalState(hwnd) && !CoversWholeMonitor(hwnd)) {
         g_activeWindowHalo->ShowAroundTarget(hwnd);
         g_haloTarget = hwnd;
@@ -674,8 +685,8 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                     SetTimer(g_messageWindow, kSettleTimerId, kSettleTimerDelayMs, nullptr);
                 }
             }
-            if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF && hwnd == g_haloTarget &&
-                !g_haloMinimizeSuppressed) {
+            if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF && hwnd == g_haloWatched &&
+                !g_haloMinimizeSuppressed && !g_altTabSessionOpen) {
                 // Same size as the halo's own last render -> the cheap
                 // move-only path, safe to call inline on every event, no
                 // matter how often they arrive. A different size (an
@@ -723,6 +734,9 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                     g_inMoveSizeLoop = false;
                     g_pendingSettleRect.reset();
                     KillTimer(g_messageWindow, kSettleTimerId);
+                }
+                if (hwnd == g_haloWatched) {
+                    g_haloWatched = nullptr;
                 }
                 if (hwnd == g_haloTarget && g_activeWindowHalo) {
                     g_activeWindowHalo->Hide();
@@ -2699,8 +2713,8 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 StabilizeHoveredThumbnail();
             } else if (wParam == kHaloRenderTimerId) {
                 KillTimer(hwnd, kHaloRenderTimerId);
-                if (g_haloTarget != nullptr) {
-                    UpdateActiveWindowHalo(g_haloTarget);
+                if (g_haloWatched != nullptr) {
+                    UpdateActiveWindowHalo(g_haloWatched);
                 }
             }
             return 0;
