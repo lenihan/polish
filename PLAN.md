@@ -21,8 +21,10 @@ current todo list.
   windows.
 - Alt+Tab: candidate list live-updates for opened/closed windows but
   keeps a stable order while cycling.
-- Alt+Tab: highlight border is a thin solid line that matches the
-  screen's own rounded corners on maximized/fullscreen windows.
+- Alt+Tab: the highlighted candidate gets the same theme-aware halo as
+  the active window (`ActiveWindowHalo`, shared instance), replacing the
+  earlier thin blue border; `AltTabHighlightBorder` remains only for the
+  group active-tile ring.
 - Alt+Tab: a list panel shows every candidate window with the current
   selection highlighted, in normal-sized text.
 - Alt+Tab: multi-monitor support — one panel per monitor, Tab flows from
@@ -101,7 +103,8 @@ current todo list.
 - Active window halo: a soft white/black (theme-aware) glow around the
   focused window's own edge, fading out over ~a quarter inch, so it's
   obvious at a glance which window has focus (`ActiveWindowHalo`). No
-  halo on a maximized/full-screen window or during an Alt+Tab session;
+  halo on a maximized/full-screen window; during an Alt+Tab session the
+  same halo instance moves to the highlighted candidate instead;
   follows focus across virtual desktops and theme changes live; toggle in
   the tray menu. Deliberately a separate class from `AltTabHighlightBorder`
   (see its own class comment), Polish's first continuously-rendering

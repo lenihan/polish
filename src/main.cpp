@@ -138,17 +138,15 @@ std::vector<HWND> g_altTabMinimized;
 bool g_altTabSelectionInMinimized = false;
 size_t g_altTabMinimizedHighlightIndex = 0;
 std::vector<std::unique_ptr<polish::AltTabDimOverlay>> g_altTabOverlays;
-// Only one window is ever highlighted at a time, unlike the dim overlays
-// (one per non-highlighted candidate), so this is a single instance, not
-// a pool.
-std::unique_ptr<polish::AltTabHighlightBorder> g_altTabHighlightBorder;
-
 // The theme-aware glow around whichever window is currently focused (see
 // ActiveWindowHalo's own class comment for why this is a separate class
-// from AltTabHighlightBorder above, not a generalization of it) -- a
+// from AltTabHighlightBorder, not a generalization of it) -- a
 // single persistent instance, unlike every overlay above (session-scoped)
 // or below (one per group's chrome): this is Polish's first continuously
-// rendering overlay. g_haloTarget mirrors whichever window the halo is
+// rendering overlay. It's also what marks the highlighted candidate during
+// an Alt+Tab session (only one window is ever highlighted at a time, unlike
+// the dim overlays, so one instance serves both -- see ApplyAltTabDimming;
+// g_haloTarget stays nullptr for that use). g_haloTarget mirrors whichever window the halo is
 // currently shown around (nullptr while hidden), so callers that only
 // have an HWND to compare against (e.g. OnWinEvent's LOCATIONCHANGE/
 // MINIMIZESTART cases) don't need to ask the halo object itself.
@@ -166,7 +164,7 @@ bool g_haloMinimizeSuppressed = false;
 // monitor's subset of g_altTabCandidates, with a highlighted row only on
 // whichever monitor's subset actually contains the globally-highlighted
 // window. Enumerated and created once at startup (pre-warmed, same
-// lifecycle as g_altTabHighlightBorder) -- a monitor connected/
+// lifecycle as the Alt+Tab dim overlays) -- a monitor connected/
 // disconnected while the app is already running isn't picked up until
 // restart, an accepted v1 simplification.
 struct AltTabMonitorPanel {
@@ -202,8 +200,8 @@ std::map<polish::GroupId, std::unique_ptr<polish::GroupChromeWindow>> g_groupChr
 // keyed the same way as g_groupChromeWindows (a single shared instance,
 // used until this map replaced it, let one group's reflow silently
 // Hide() a different group's ring -- see EnsureGroupActiveTileHighlight's
-// own comment). Same AltTabHighlightBorder class Alt+Tab cycling uses
-// (g_altTabHighlightBorder, a separate instance) -- nothing in
+// own comment). Uses AltTabHighlightBorder (Alt+Tab itself now uses
+// ActiveWindowHalo instead) -- nothing in
 // AltTabHighlightBorder assumes its target is top-level, and a
 // reparented member's GetWindowRect/DwmGetWindowAttribute both still
 // return real screen coordinates. See
@@ -505,7 +503,15 @@ void UpdateActiveWindowHalo(HWND hwnd) {
     if (!g_activeWindowHalo) {
         return;
     }
-    if (!g_settings.haloEnabled || g_altTabSessionOpen || g_haloMinimizeSuppressed) {
+    // During an Alt+Tab session the same halo instance belongs to
+    // ApplyAltTabDimming (it glows around the highlighted candidate, not
+    // the foreground window) -- leave it exactly as-is rather than hiding
+    // it out from under the session. The session start already hid it
+    // (see OnAltTabCycle) and EndAltTabSession re-runs this afterward.
+    if (g_altTabSessionOpen) {
+        return;
+    }
+    if (!g_settings.haloEnabled || g_haloMinimizeSuppressed) {
         g_activeWindowHalo->Hide();
         g_haloTarget = nullptr;
         return;
@@ -971,12 +977,6 @@ void EnsureAltTabOverlayPoolSize(size_t count) {
     }
 }
 
-void EnsureAltTabHighlightBorder() {
-    if (!g_altTabHighlightBorder) {
-        g_altTabHighlightBorder = std::make_unique<polish::AltTabHighlightBorder>(GetModuleHandleW(nullptr));
-    }
-}
-
 // Creates group `id`'s own ring on demand, owned by its chrome window --
 // see AltTabHighlightBorder's own `owner` comment for what that gets for
 // free (always in front of its owner, hidden/shown with minimize/
@@ -1220,11 +1220,14 @@ void ApplyAltTabDimming() {
         }
         t2 = GetTickCount64();
 
-        EnsureAltTabHighlightBorder();
-        g_altTabHighlightBorder->ShowAroundTarget(highlighted);
+        // Called after PromoteWindowToFront so the halo (HWND_TOP) lands
+        // above the just-promoted window and any dim overlays.
+        if (g_activeWindowHalo) {
+            g_activeWindowHalo->ShowAroundTarget(highlighted);
+        }
         t3 = GetTickCount64();
-    } else if (g_altTabHighlightBorder) {
-        g_altTabHighlightBorder->Hide();
+    } else if (g_activeWindowHalo) {
+        g_activeWindowHalo->Hide();
     }
 
     // Timing breadcrumbs to chase a human-reported "flash of the
@@ -1289,8 +1292,8 @@ void EndAltTabSession() {
     for (auto& overlay : g_altTabOverlays) {
         overlay->Hide();
     }
-    if (g_altTabHighlightBorder) {
-        g_altTabHighlightBorder->Hide();
+    if (g_activeWindowHalo) {
+        g_activeWindowHalo->Hide();
     }
     for (auto& panel : g_altTabPanels) {
         panel.window->Hide();
@@ -2804,7 +2807,6 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             g_trayIcon.reset();
             g_altTabHook.reset();
             g_altTabOverlays.clear();
-            g_altTabHighlightBorder.reset();
             g_activeWindowHalo.reset();
             // Before g_groupChromeWindows.clear() below -- each ring is
             // owned by its group's chrome (see AltTabHighlightBorder's
@@ -2978,7 +2980,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // if more windows open than were open right now.
     RebuildAltTabCandidates();
     EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
-    EnsureAltTabHighlightBorder();
     RefreshAltTabPanels();
 
     // Same pre-creation reasoning as the Alt+Tab overlays above -- pay
