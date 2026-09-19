@@ -162,7 +162,7 @@ current todo list.
   easier to understand (exact treatment still unscoped).
 - Add mouse "sticky" to keep pointer on app rather than traveling to next
   screen. Like for snapping and trying to access tools on the border.
-- Ad mouse "sticky" for hidden taskbar to keep pointer on app rather than 
+- Add mouse "sticky" for hidden taskbar to keep pointer on app rather than 
   making taskbar unhide
 - Do a full `docs/LIMITATIONS.md` pass and manual test matrix.
 - Backlog, not yet scoped: clipboard copy flash, paste history popup,
