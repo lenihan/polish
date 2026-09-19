@@ -70,3 +70,33 @@ gets a full pass in Phase 3; today it records what's already known.
    nothing — an OS-level restriction, not a Polish bug), and there was an
    unresolved sizing glitch switching Tile/Stack alignment with such a
    member.
+
+8. **The active-window halo (`ActiveWindowHalo`) sits in the normal
+   (`HWND_TOP`) Z-order band, not `WS_EX_TOPMOST`, so any always-on-top
+   window still covers it wherever they overlap.** Confirmed live: for a
+   window sized to the work area (i.e. right up against the taskbar,
+   the extremely common near-maximized case), the bottom edge's glow band
+   is drawn correctly but sits entirely underneath the (always-on-top)
+   taskbar, making it invisible in practice on that one edge. This is the
+   deliberate tradeoff described in the halo's own class comment — being
+   topmost would mean the halo painting over every other app's window
+   too, not just the target's own — not something planned to change.
+
+9. **The halo's virtual-desktop-follow fix is not yet built, only logged.**
+   A layered top-level window belongs to whichever virtual desktop it was
+   created on, so a halo created once at startup could in theory stop
+   appearing after switching desktops. `ActiveWindowHalo` already logs
+   every virtual-desktop-id change it observes via
+   `IVirtualDesktopManager::GetWindowDesktopId` (see
+   `FollowTargetVirtualDesktop`), but doesn't yet call
+   `MoveWindowToDesktop` — that's deliberately deferred until the log
+   confirms this is a real, observable problem on a real multi-desktop
+   session, not a hypothetical one.
+
+10. **The halo follows the OS theme, not the desktop wallpaper**, so a
+    white halo on a light wallpaper in dark mode (or a black halo on a
+    dark wallpaper in light mode) reads faint. `polish::GetAccentColor()`
+    is the documented fallback if this turns out to matter in practice —
+    not implemented, since it would mean reinstating a real per-pixel
+    premultiply (today's renderer exploits pure white/black to premultiply
+    with a single store).

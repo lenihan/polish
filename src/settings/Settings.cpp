@@ -34,6 +34,7 @@ Settings LoadSettings() {
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kSettingsKeyPath, 0, KEY_READ, &key) == ERROR_SUCCESS) {
         settings.restoreSyncEnabled = ReadDword(key, L"RestoreSyncEnabled", 1) != 0;
         settings.altTabEnabled = ReadDword(key, L"AltTabEnabled", 1) != 0;
+        settings.haloEnabled = ReadDword(key, L"HaloEnabled", 1) != 0;
         settings.groupHotkeyModifiers = ReadDword(key, L"GroupHotkeyModifiers", MOD_WIN | MOD_ALT);
         settings.groupHotkeyVirtualKey = ReadDword(key, L"GroupHotkeyVirtualKey", 'G');
         RegCloseKey(key);
@@ -51,6 +52,7 @@ void SaveSettings(const Settings& settings) {
     }
     WriteDword(key, L"RestoreSyncEnabled", settings.restoreSyncEnabled ? 1 : 0);
     WriteDword(key, L"AltTabEnabled", settings.altTabEnabled ? 1 : 0);
+    WriteDword(key, L"HaloEnabled", settings.haloEnabled ? 1 : 0);
     WriteDword(key, L"GroupHotkeyModifiers", settings.groupHotkeyModifiers);
     WriteDword(key, L"GroupHotkeyVirtualKey", settings.groupHotkeyVirtualKey);
     RegCloseKey(key);

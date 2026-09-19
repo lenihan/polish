@@ -12,6 +12,7 @@
 #include <tuple>
 #include <vector>
 
+#include "hook/ActiveWindowHalo.h"
 #include "hook/AltTabDimOverlay.h"
 #include "hook/AltTabHighlightBorder.h"
 #include "hook/AltTabHook.h"
@@ -69,6 +70,17 @@ constexpr UINT_PTR kThumbnailStabilizeTimerId = 3;
 constexpr UINT kThumbnailStabilizeIntervalMs = 150;
 constexpr int kThumbnailStabilizeMaxAttempts = 3;
 
+// Debounces a burst of EVENT_OBJECT_LOCATIONCHANGE events that each carry
+// a *different* target size (e.g. dragging a resize border) into one
+// real render, the same way kSettleTimerId debounces a settling drag into
+// one commit -- without this, an event storm during a resize drag on a
+// large window could ask ActiveWindowHalo to fully re-render faster than
+// it can actually produce frames. Short enough to still feel live; see
+// ActiveWindowHalo's class comment for the measured full-render cost this
+// was tuned against.
+constexpr UINT_PTR kHaloRenderTimerId = 4;
+constexpr UINT kHaloRenderTimerDelayMs = 8;
+
 HWND g_messageWindow = nullptr;
 HWINEVENTHOOK g_foregroundHook = nullptr;
 HWINEVENTHOOK g_locationChangeHook = nullptr;
@@ -77,6 +89,8 @@ HWINEVENTHOOK g_moveSizeEndHook = nullptr;
 HWINEVENTHOOK g_destroyHook = nullptr;
 HWINEVENTHOOK g_nameChangeHook = nullptr;
 HWINEVENTHOOK g_objectFocusHook = nullptr;
+HWINEVENTHOOK g_minimizeStartHook = nullptr;
+HWINEVENTHOOK g_minimizeEndHook = nullptr;
 UINT g_taskbarCreatedMessage = 0;
 
 std::unique_ptr<polish::TrayIcon> g_trayIcon;
@@ -128,6 +142,25 @@ std::vector<std::unique_ptr<polish::AltTabDimOverlay>> g_altTabOverlays;
 // (one per non-highlighted candidate), so this is a single instance, not
 // a pool.
 std::unique_ptr<polish::AltTabHighlightBorder> g_altTabHighlightBorder;
+
+// The theme-aware glow around whichever window is currently focused (see
+// ActiveWindowHalo's own class comment for why this is a separate class
+// from AltTabHighlightBorder above, not a generalization of it) -- a
+// single persistent instance, unlike every overlay above (session-scoped)
+// or below (one per group's chrome): this is Polish's first continuously
+// rendering overlay. g_haloTarget mirrors whichever window the halo is
+// currently shown around (nullptr while hidden), so callers that only
+// have an HWND to compare against (e.g. OnWinEvent's LOCATIONCHANGE/
+// MINIMIZESTART cases) don't need to ask the halo object itself.
+std::unique_ptr<polish::ActiveWindowHalo> g_activeWindowHalo;
+HWND g_haloTarget = nullptr;
+// Set for the duration of g_haloTarget's Win11 minimize animation (between
+// EVENT_SYSTEM_MINIMIZESTART and MINIMIZEEND) -- LOCATIONCHANGE fires
+// continuously through that animation while IsIconic is still false, so
+// without this the halo would fly down to the taskbar and pop along with
+// the window instead of just disappearing.
+bool g_haloMinimizeSuppressed = false;
+
 // One always-shown active-window list panel *per connected monitor* (see
 // PLAN.md's Alt+Tab-improvements plan) -- each showing only its own
 // monitor's subset of g_altTabCandidates, with a highlighted row only on
@@ -418,7 +451,101 @@ bool IsGroupChromeWindow(HWND hwnd) {
     return false;
 }
 
+// Whether hwnd belongs to this process -- used to keep our own windows
+// (the hidden message window TrackPopupMenu briefly foregrounds, the tray
+// menu itself, ...) from disturbing the halo, without excluding group
+// chrome, which is ours too but a legitimate halo target. See
+// UpdateActiveWindowHalo's own comment for why this check exists at all.
+bool IsOwnProcessWindow(HWND hwnd) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    return pid != 0 && pid == GetCurrentProcessId();
+}
+
+// True if hwnd's own visible rect covers its entire monitor -- IsZoomed
+// isn't enough, since most full-screen apps (games, video players,
+// browser F11) are borderless WS_POPUP windows sized to the monitor
+// rather than actually maximized. Deliberately rcMonitor, not rcWork
+// (the halo shouldn't appear just because a window fills the space above
+// the taskbar -- only when it fills the literal screen), with a small
+// tolerance and <=/>= so a window even slightly larger than the monitor
+// still counts.
+bool CoversWholeMonitor(HWND hwnd) {
+    QUERY_USER_NOTIFICATION_STATE notificationState;
+    if (SUCCEEDED(SHQueryUserNotificationState(&notificationState)) &&
+        (notificationState == QUNS_RUNNING_D3D_FULL_SCREEN || notificationState == QUNS_PRESENTATION_MODE)) {
+        // Beyond looking wrong, a halo window sitting at HWND_TOP over a
+        // borderless-fullscreen game can knock DWM out of its
+        // fullscreen-optimization path -- worth suppressing on this
+        // signal alone, even for a window whose rect this check might
+        // otherwise miss.
+        return true;
+    }
+    HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (monitor == nullptr || !GetMonitorInfoW(monitor, &monitorInfo)) {
+        return false;
+    }
+    RECT rect;
+    if (!polish::GetVisibleWindowRect(hwnd, rect)) {
+        return false;
+    }
+    constexpr int kTolerance = 2;
+    const RECT& screen = monitorInfo.rcMonitor;
+    return rect.left <= screen.left + kTolerance && rect.top <= screen.top + kTolerance &&
+           rect.right >= screen.right - kTolerance && rect.bottom >= screen.bottom - kTolerance;
+}
+
+// Shows/hides/repositions the active-window halo to match hwnd's current
+// state -- called any time something might have changed which window
+// should have it, modeled on UpdateGroupActiveTileHighlight below. Always
+// safe to call speculatively.
+void UpdateActiveWindowHalo(HWND hwnd) {
+    if (!g_activeWindowHalo) {
+        return;
+    }
+    if (!g_settings.haloEnabled || g_altTabSessionOpen || g_haloMinimizeSuppressed) {
+        g_activeWindowHalo->Hide();
+        g_haloTarget = nullptr;
+        return;
+    }
+    // Own process and not group chrome -> leave the halo exactly as-is,
+    // rather than hiding it. Without this, the tray menu blinks the halo
+    // off every time it's opened: TrackPopupMenu needs
+    // SetForegroundWindow on our own hidden message window first (see
+    // CreateMessageWindow), and the menu window itself is ours too --
+    // both would otherwise fail IsCandidateWindow below and hide the
+    // halo, only for it to reappear once real focus returns. Group
+    // chrome windows are ours *and* legitimate targets, hence the
+    // exception -- without it, focusing a group would leave a stale halo
+    // on whatever was focused before it.
+    if (IsOwnProcessWindow(hwnd) && !IsGroupChromeWindow(hwnd)) {
+        return;
+    }
+    // Re-validates hwnd is still a real, visible, non-cloaked candidate
+    // every time this runs (not just once when it was first chosen as
+    // g_haloTarget) -- a ShowWindow(SW_HIDE) on the halo's own current
+    // target leaves no EVENT_OBJECT_DESTROY and no reliable foreground
+    // change to react to, so re-checking here on every call this app
+    // already makes for other reasons is what actually catches it.
+    if (polish::IsCandidateWindow(hwnd) && IsWindowInNormalState(hwnd) && !CoversWholeMonitor(hwnd)) {
+        g_activeWindowHalo->ShowAroundTarget(hwnd);
+        g_haloTarget = hwnd;
+    } else {
+        g_activeWindowHalo->Hide();
+        g_haloTarget = nullptr;
+    }
+}
+
 void OnForegroundChanged(HWND newForeground) {
+    // Before the early return below -- the halo needs to react to every
+    // real foreground change, including ones that don't touch
+    // g_trackedWindow at all (e.g. a group chrome window, which
+    // OnForegroundChanged otherwise ignores entirely -- see `candidate`
+    // below).
+    UpdateActiveWindowHalo(newForeground);
+
     if (newForeground == g_trackedWindow) {
         return;
     }
@@ -461,6 +588,13 @@ void OnForegroundChanged(HWND newForeground) {
 
 void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG idObject, LONG idChild,
                           DWORD /*eventThread*/, DWORD /*eventTime*/) {
+    // The halo's own UpdateLayeredWindow/SetWindowPos calls generate a
+    // LOCATIONCHANGE per rendered frame -- without this guard it falls
+    // through to KeepGroupMemberInPlace's map lookup (harmless, just
+    // wasted work) below every single time the halo moves or redraws.
+    if (g_activeWindowHalo && hwnd == g_activeWindowHalo->Handle()) {
+        return;
+    }
     switch (event) {
         case EVENT_SYSTEM_FOREGROUND:
             OnForegroundChanged(hwnd);
@@ -534,6 +668,30 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                     SetTimer(g_messageWindow, kSettleTimerId, kSettleTimerDelayMs, nullptr);
                 }
             }
+            if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF && hwnd == g_haloTarget &&
+                !g_haloMinimizeSuppressed) {
+                // Same size as the halo's own last render -> the cheap
+                // move-only path, safe to call inline on every event, no
+                // matter how often they arrive. A different size (an
+                // actual resize-border drag) instead (re)arms a short
+                // debounce timer, so an event storm during that drag
+                // can't ask for full re-renders faster than
+                // ActiveWindowHalo can actually produce them -- same
+                // reasoning as kSettleTimerId's own debounce, just for
+                // rendering cost instead of a settle commit.
+                RECT currentTargetRect;
+                if (polish::GetVisibleWindowRect(hwnd, currentTargetRect)) {
+                    const SIZE currentSize{currentTargetRect.right - currentTargetRect.left,
+                                            currentTargetRect.bottom - currentTargetRect.top};
+                    const SIZE cachedSize = g_activeWindowHalo->CachedTargetSize();
+                    if (currentSize.cx == cachedSize.cx && currentSize.cy == cachedSize.cy) {
+                        KillTimer(g_messageWindow, kHaloRenderTimerId);
+                        UpdateActiveWindowHalo(hwnd);
+                    } else {
+                        SetTimer(g_messageWindow, kHaloRenderTimerId, kHaloRenderTimerDelayMs, nullptr);
+                    }
+                }
+            }
             break;
 
         case EVENT_SYSTEM_MOVESIZEEND:
@@ -560,7 +718,30 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                     g_pendingSettleRect.reset();
                     KillTimer(g_messageWindow, kSettleTimerId);
                 }
+                if (hwnd == g_haloTarget && g_activeWindowHalo) {
+                    g_activeWindowHalo->Hide();
+                    g_haloTarget = nullptr;
+                    KillTimer(g_messageWindow, kHaloRenderTimerId);
+                }
             }
+            break;
+
+        case EVENT_SYSTEM_MINIMIZESTART:
+            if (hwnd == g_haloTarget && g_activeWindowHalo) {
+                // LOCATIONCHANGE fires continuously through Win11's
+                // minimize animation while IsIconic is still false, so
+                // without this suppression the halo would fly down to the
+                // taskbar and pop along with the window instead of just
+                // disappearing.
+                g_activeWindowHalo->Hide();
+                g_haloMinimizeSuppressed = true;
+                KillTimer(g_messageWindow, kHaloRenderTimerId);
+            }
+            break;
+
+        case EVENT_SYSTEM_MINIMIZEEND:
+            g_haloMinimizeSuppressed = false;
+            UpdateActiveWindowHalo(GetForegroundWindow());
             break;
 
         case EVENT_OBJECT_NAMECHANGE:
@@ -1128,6 +1309,16 @@ void EndAltTabSession() {
     g_altTabSelectionInMinimized = false;
     g_altTabMinimizedHighlightIndex = 0;
     g_altTabSessionOpen = false;
+    // On Esc-cancel there's no foreground change to otherwise react to,
+    // so the halo (hidden for the whole session -- see the
+    // g_altTabSessionOpen check at the top of UpdateActiveWindowHalo)
+    // would stay hidden indefinitely without this. Harmless to also run
+    // on commit (OnAltTabCommit calls EndAltTabSession before its own
+    // SetForegroundWindow): this just re-shows the halo on the
+    // about-to-be-replaced foreground window for a moment, immediately
+    // superseded by the real OnForegroundChanged once the commit's
+    // SetForegroundWindow actually lands.
+    UpdateActiveWindowHalo(GetForegroundWindow());
 }
 
 void OnAltTabCycle(bool backward) {
@@ -1216,6 +1407,10 @@ void OnAltTabCycle(bool backward) {
             // likely explained by committing to one of these instead of
             // a genuinely new process.
             candidateDump += std::format(L"{}:\"{}\"[{}]", reinterpret_cast<void*>(hwnd), title, className);
+        }
+        if (g_activeWindowHalo) {
+            g_activeWindowHalo->Hide();
+            g_haloTarget = nullptr;
         }
         polish::LogDebug(std::format(L"[Polish] AltTab: session starting, {} candidate(s): {}",
                                       g_altTabCandidates.size(), candidateDump));
@@ -1658,6 +1853,7 @@ constexpr UINT kMenuIdChangeGroupHotkey = 4;
 constexpr UINT kMenuIdStartAtLogin = 5;
 constexpr UINT kMenuIdAbout = 6;
 constexpr UINT kMenuIdExit = 7;
+constexpr UINT kMenuIdHalo = 8;
 
 constexpr wchar_t kAboutUrl[] = L"https://www.linkedin.com/in/davidlenihan/";
 
@@ -2421,6 +2617,8 @@ void PopulateTrayMenu(HMENU menu) {
                 L"Restore remembers Snap position");
     AppendMenuW(menu, MF_STRING | (g_settings.altTabEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdAltTab,
                 L"Alt+Tab (skip minimized)");
+    AppendMenuW(menu, MF_STRING | (g_settings.haloEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdHalo,
+                L"Halo around active window");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuIdNewGroup,
                 (L"New Group...\t" + FormatHotkey(g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey))
@@ -2447,6 +2645,12 @@ void HandleTrayCommand(UINT commandId) {
             polish::SaveSettings(g_settings);
             polish::LogDebug(
                 std::format(L"[Polish] Alt+Tab {}", g_settings.altTabEnabled ? L"enabled" : L"disabled"));
+            break;
+        case kMenuIdHalo:
+            g_settings.haloEnabled = !g_settings.haloEnabled;
+            polish::SaveSettings(g_settings);
+            polish::LogDebug(std::format(L"[Polish] Halo {}", g_settings.haloEnabled ? L"enabled" : L"disabled"));
+            UpdateActiveWindowHalo(GetForegroundWindow());
             break;
         case kMenuIdStartAtLogin: {
             const bool newValue = !polish::IsStartAtLoginEnabled();
@@ -2490,6 +2694,11 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 RefreshAllHiddenThumbnails();
             } else if (wParam == kThumbnailStabilizeTimerId) {
                 StabilizeHoveredThumbnail();
+            } else if (wParam == kHaloRenderTimerId) {
+                KillTimer(hwnd, kHaloRenderTimerId);
+                if (g_haloTarget != nullptr) {
+                    UpdateActiveWindowHalo(g_haloTarget);
+                }
             }
             return 0;
 
@@ -2523,6 +2732,25 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             // new reality. See RefreshAltTabPanels' own comment for the
             // real, human-reported bug this fixes.
             RefreshAltTabPanels();
+            // Monitor topology changing can change which monitor the
+            // halo's own target is on (and therefore its DPI and flush-
+            // edge inflation) without any LOCATIONCHANGE for the target
+            // itself.
+            UpdateActiveWindowHalo(GetForegroundWindow());
+            return 0;
+
+        case WM_SETTINGCHANGE:
+            // ImmersiveColorSet -- the user flipped Settings > Personalization
+            // > Colors' light/dark toggle. This message window is a real,
+            // if invisible, WS_OVERLAPPEDWINDOW top-level window (see
+            // CreateMessageWindow), so it does receive the broadcast.
+            // IsDarkModeEnabled() is read fresh on every halo render
+            // already (never cached -- the codebase-wide convention), so
+            // just asking for a re-render is enough to pick up the change
+            // live.
+            if (lParam != 0 && lstrcmpiW(reinterpret_cast<LPCWSTR>(lParam), L"ImmersiveColorSet") == 0) {
+                UpdateActiveWindowHalo(GetForegroundWindow());
+            }
             return 0;
 
         case kCloseGroupMessage: {
@@ -2567,10 +2795,17 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             if (g_objectFocusHook != nullptr) {
                 UnhookWinEvent(g_objectFocusHook);
             }
+            if (g_minimizeStartHook != nullptr) {
+                UnhookWinEvent(g_minimizeStartHook);
+            }
+            if (g_minimizeEndHook != nullptr) {
+                UnhookWinEvent(g_minimizeEndHook);
+            }
             g_trayIcon.reset();
             g_altTabHook.reset();
             g_altTabOverlays.clear();
             g_altTabHighlightBorder.reset();
+            g_activeWindowHalo.reset();
             // Before g_groupChromeWindows.clear() below -- each ring is
             // owned by its group's chrome (see AltTabHighlightBorder's
             // `owner`), so clearing this first is the same predictable-
@@ -2650,8 +2885,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     g_settings = polish::LoadSettings();
-    polish::LogDebug(std::format(L"[Polish] settings loaded: restoreSyncEnabled={} altTabEnabled={}",
-                                  g_settings.restoreSyncEnabled, g_settings.altTabEnabled));
+    polish::LogDebug(std::format(L"[Polish] settings loaded: restoreSyncEnabled={} altTabEnabled={} haloEnabled={}",
+                                  g_settings.restoreSyncEnabled, g_settings.altTabEnabled, g_settings.haloEnabled));
 
     g_messageWindow = CreateMessageWindow(instance);
     if (g_messageWindow == nullptr) {
@@ -2676,6 +2911,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                                         WINEVENT_OUTOFCONTEXT);
     g_objectFocusHook = SetWinEventHook(EVENT_OBJECT_FOCUS, EVENT_OBJECT_FOCUS, nullptr, OnWinEvent, 0, 0,
                                          WINEVENT_OUTOFCONTEXT);
+    g_minimizeStartHook = SetWinEventHook(EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZESTART, nullptr,
+                                           OnWinEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
+    g_minimizeEndHook = SetWinEventHook(EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZEEND, nullptr, OnWinEvent, 0,
+                                         0, WINEVENT_OUTOFCONTEXT);
 
     g_trayIcon = std::make_unique<polish::TrayIcon>(g_messageWindow, PopulateTrayMenu, HandleTrayCommand);
 
@@ -2741,6 +2980,11 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     EnsureAltTabOverlayPoolSize(g_altTabCandidates.size());
     EnsureAltTabHighlightBorder();
     RefreshAltTabPanels();
+
+    // Same pre-creation reasoning as the Alt+Tab overlays above -- pay
+    // CreateWindowExW's cost now rather than on the first real foreground
+    // change.
+    g_activeWindowHalo = std::make_unique<polish::ActiveWindowHalo>(instance);
 
     OnForegroundChanged(GetForegroundWindow());
 

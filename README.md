@@ -39,7 +39,17 @@ have to match up. A few things worth knowing:
 - If there are fewer than two non-minimized windows to switch between,
   Polish gets out of the way and native Alt+Tab runs as normal.
 
-Both features can be turned off independently from the tray icon's
+**A soft halo around the active window.** A quick, theme-aware glow —
+white in dark mode, black in light mode — around whichever window
+currently has focus, fading out over about a quarter inch on all four
+sides. Windows 11's own focus cues (a subtly different title bar, the
+DWM shadow) are easy to miss on a busy desktop; the halo makes it
+obvious at a glance which window you're typing into. It doesn't appear
+on a maximized or full-screen window (there's no room outside their
+edges, and it's already unambiguous which one is focused) or during an
+Alt+Tab session.
+
+All three features can be turned off independently from the tray icon's
 right-click menu, which also has a **Start with Windows** option and
 Exit.
 

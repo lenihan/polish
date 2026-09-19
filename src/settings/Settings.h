@@ -11,6 +11,10 @@ namespace polish {
 struct Settings {
     bool restoreSyncEnabled = true;
     bool altTabEnabled = true;
+    // The soft glow drawn around the active window's own edge (see
+    // ActiveWindowHalo) -- on by default like every other feature toggle
+    // here, since it's meant to help by default, not be discovered.
+    bool haloEnabled = true;
 
     // The "New Group" global hotkey -- RegisterHotKey's own modifier
     // flags (MOD_ALT/MOD_CONTROL/MOD_SHIFT/MOD_WIN, OR'd together) and

@@ -36,6 +36,7 @@ add_library(polish_core STATIC
     src/windowtracking/WindowZOrder.cpp
     src/windowtracking/WindowReparenting.cpp
     src/tray/TrayIcon.cpp
+    src/hook/ActiveWindowHalo.cpp
     src/hook/AltTabHook.cpp
     src/hook/AltTabDimOverlay.cpp
     src/hook/AltTabHighlightBorder.cpp

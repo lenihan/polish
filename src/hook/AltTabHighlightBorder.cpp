@@ -1,7 +1,5 @@
 #include "hook/AltTabHighlightBorder.h"
 
-#include <dwmapi.h>
-
 // GDI+ headers need IStream from <objidl.h>, which WIN32_LEAN_AND_MEAN
 // (defined project-wide) otherwise excludes from <windows.h>.
 #include <objidl.h>
@@ -9,6 +7,8 @@
 #include <gdiplus.h>
 
 #include <algorithm>
+
+#include "windowtracking/RectUtils.h"
 
 namespace polish {
 
@@ -100,26 +100,6 @@ void BuildRoundedRectPath(Gdiplus::GraphicsPath& path, int width, int height, Co
 // with ULW_ALPHA; GDI+ does not do this for us when drawing into an
 // external buffer directly (see the class comment for why that's the
 // only alpha-correct way to draw into it at all).
-// GetWindowRect includes the modern invisible resize border (present even
-// on a window with no visible frame there), which Windows deliberately
-// hangs a few px *off* the monitor's edges for a maximized window so the
-// window's actually-visible edge lines up exactly with the screen edge.
-// Drawing a thin ring on the raw GetWindowRect rect of a maximized window
-// therefore lands most or all of it off-screen -- confirmed as a real,
-// human-reported bug (invisible ring on a maximized/full-screen app).
-// DWMWA_EXTENDED_FRAME_BOUNDS gives the tighter, actually-visible rect
-// instead (excludes that invisible border), which is what this class
-// wants to draw *on*. This is a single fresh query for a one-off visual
-// rect, not a stored/round-tripped value mixed with GetWindowRect from
-// another code path -- unrelated to the restore-position-sync gotcha
-// elsewhere in this app about not mixing the two across a round trip.
-bool GetVisibleWindowRect(HWND hwnd, RECT& rect) {
-    if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rect, sizeof(rect)))) {
-        return true;
-    }
-    return GetWindowRect(hwnd, &rect) != FALSE;
-}
-
 void PremultiplyAlpha(BYTE* pixels, int pixelCount) {
     for (int i = 0; i < pixelCount; ++i) {
         BYTE* p = pixels + i * 4;

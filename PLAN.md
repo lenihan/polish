@@ -98,6 +98,16 @@ current todo list.
   top-level "attached" mode was tried and abandoned — its taskbar button
   couldn't be hidden by any mechanism (OS-level restriction), and there
   was an unresolved Tile/Stack sizing glitch — see `docs/LIMITATIONS.md`.
+- Active window halo: a soft white/black (theme-aware) glow around the
+  focused window's own edge, fading out over ~a quarter inch, so it's
+  obvious at a glance which window has focus (`ActiveWindowHalo`). No
+  halo on a maximized/full-screen window or during an Alt+Tab session;
+  follows focus across virtual desktops and theme changes live; toggle in
+  the tray menu. Deliberately a separate class from `AltTabHighlightBorder`
+  (see its own class comment), Polish's first continuously-rendering
+  overlay, using a hand-written per-pixel signed-distance-field rasterizer
+  (not GDI+) for perf reasons — measured cost is imperceptible (sub-tick)
+  even at roughly half-screen target size.
 
 ## Left to do
 
@@ -139,8 +149,6 @@ current todo list.
   thumbnails for active ones and plain text for minimized ones.
 - Taskbar: that hover preview should let you minimize/maximize/restore/
   close each window directly, without switching to it first.
-- Add theme-aware window shadows: white/light shadows in dark mode, dark
-  shadows in light mode, so windows stand out against the background.
 - Virtual desktops: remember which apps were on a desktop and offer to
   reload them.
 - Virtual desktops: an app pinned to show on all desktops should keep
