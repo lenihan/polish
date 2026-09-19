@@ -111,6 +111,17 @@ current todo list.
   overlay, using a hand-written per-pixel signed-distance-field rasterizer
   (not GDI+) for perf reasons — measured cost is imperceptible (sub-tick)
   even at roughly half-screen target size.
+- Bullseye: a large soft theme-aware ring plays on top of all windows
+  (`BullseyeOverlay`, `WS_EX_TOPMOST`, click-through) at the point of a
+  copy (collapses onto it) or paste (expands out of it) — Polish's first
+  animated overlay, `QueryPerformanceCounter`-timed off a 16 ms tick.
+  Copy is detected with a clipboard listener (`WM_CLIPBOARDUPDATE`, so
+  right-click > Copy counts, filtered to the foreground app's own
+  writes); paste rides the existing keyboard hook (`AltTabHook::
+  SetOnPasteChord`, Ctrl+V / Shift+Insert, never swallowed). Anchor is
+  caret → mouse → window centre (`ResolveInteractionAnchor`). Tray toggle.
+  Tuning constants (radius/stroke/duration/alpha) are first guesses to be
+  adjusted by eye live.
 
 ## Left to do
 
@@ -165,6 +176,6 @@ current todo list.
 - Add mouse "sticky" for hidden taskbar to keep pointer on app rather than 
   making taskbar unhide
 - Do a full `docs/LIMITATIONS.md` pass and manual test matrix.
-- Backlog, not yet scoped: clipboard copy flash, paste history popup,
+- Backlog, not yet scoped: paste history popup,
   Quick Access rename without renaming the file, radial start menu,
   reorder windows within a taskbar group, consider a WinUI3 rewrite.

@@ -100,3 +100,25 @@ gets a full pass in Phase 3; today it records what's already known.
     not implemented, since it would mean reinstating a real per-pixel
     premultiply (today's renderer exploits pure white/black to premultiply
     with a single store).
+
+11. **Bullseye only flashes for Ctrl+V and Shift+Insert pastes.** Copy is
+    detected via the OS clipboard listener, so every real copy counts
+    (Ctrl+C, right-click > Copy, a toolbar button). Paste has no such
+    signal -- the OS never says "an app just pasted" -- so it's inferred
+    from the keystroke, and right-click > Paste, menu Paste and
+    drag-and-drop don't flash.
+
+12. **Bullseye's anchor falls back for apps with no Win32 caret.**
+    Chromium, Electron and UWP apps draw their own text caret and expose
+    none through `GetGUIThreadInfo`, so the ring centers on the mouse
+    pointer (if it's over the window) or the window's middle instead. The
+    log line for each animation records which one was used.
+
+13. **Bullseye is `WS_EX_TOPMOST`, unlike the halo** (see #8) -- it
+    deliberately draws over every window, the taskbar included, for its
+    third of a second. It's suppressed during a full-screen game or
+    presentation, but not over a maximized window.
+
+14. **Bullseye may not appear on another virtual desktop.** Like the halo
+    (#9), its window belongs to the desktop it was created on and isn't
+    moved with the foreground window. Not yet confirmed or fixed.

@@ -49,7 +49,17 @@ on a maximized or full-screen window (there's no room outside their
 edges, and it's already unambiguous which one is focused) or during an
 Alt+Tab session.
 
-All three features can be turned off independently from the tray icon's
+**A bullseye for copy and paste.** Windows gives no feedback that a copy
+took, or where a paste landed. Now a large, soft, theme-aware ring (white
+in dark mode, black in light mode) plays on top of every window for a
+third of a second: on a copy it fades in and collapses onto the spot you
+copied from; on a paste (Ctrl+V or Shift+Insert) it does the reverse,
+bursting out of the spot the text lands. It centers on your text caret
+where the app exposes one, falling back to the mouse pointer, then the
+middle of the window. Click-through, and silent during an Alt+Tab
+session or a full-screen game.
+
+All four features can be turned off independently from the tray icon's
 right-click menu, which also has a **Start with Windows** option and
 Exit.
 

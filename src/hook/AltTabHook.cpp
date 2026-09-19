@@ -19,7 +19,8 @@ AltTabHook* g_instance = nullptr;
 // Navigate carries the specific AltTabHook::NavigateStep in lParam, the
 // same way RowKeyAction carries its RowAction -- one action rather than
 // one per direction, now that there are eight of them.
-enum class HookAction : WPARAM { CycleForward, CycleBackward, Commit, Cancel, Navigate, RowKeyAction };
+// PasteChord is unrelated to Alt+Tab sessions -- see SetOnPasteChord.
+enum class HookAction : WPARAM { CycleForward, CycleBackward, Commit, Cancel, Navigate, RowKeyAction, PasteChord };
 
 // The navigation key -> step mapping, and the definition of which keys
 // count as navigation keys at all (anything this returns nullopt for is
@@ -243,6 +244,27 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         return false;
     }
 
+    if (data.vkCode == 'V' || data.vkCode == VK_INSERT) {
+        // Purely observational -- never returns true from here, so the
+        // paste itself always reaches the target app untouched. Ctrl+V
+        // (any Shift state, so Ctrl+Shift+V plain-text paste counts) or
+        // Shift+Insert, with Alt not held. Falls through afterward: neither
+        // key is used by any block below.
+        const bool isV = data.vkCode == 'V';
+        bool& physicallyDown = isV ? vPhysicallyDown_ : insertPhysicallyDown_;
+        if (IsDown(wParam)) {
+            if (!physicallyDown) {
+                physicallyDown = true;
+                const bool isChord = !altHeld && (isV ? ctrlHeld_ : (shiftHeld_ && !ctrlHeld_));
+                if (isChord) {
+                    PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::PasteChord), 0);
+                }
+            }
+        } else if (IsUp(wParam)) {
+            physicallyDown = false;
+        }
+    }
+
     if (sessionActive_) {
         // Strictly gated on sessionActive_ already being true -- unlike
         // Tab, these keys are used constantly system-wide and must never
@@ -338,6 +360,11 @@ void AltTabHook::HandleHookMessage(WPARAM wParam, LPARAM lParam) {
         case HookAction::RowKeyAction:
             if (onRowAction_) {
                 onRowAction_(static_cast<RowAction>(lParam));
+            }
+            break;
+        case HookAction::PasteChord:
+            if (onPasteChord_) {
+                onPasteChord_();
             }
             break;
     }

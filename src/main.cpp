@@ -17,12 +17,14 @@
 #include "hook/AltTabHighlightBorder.h"
 #include "hook/AltTabHook.h"
 #include "hook/AltTabListWindow.h"
+#include "hook/BullseyeOverlay.h"
 #include "hook/GroupChromeWindow.h"
 #include "hook/GroupHotkeyDialog.h"
 #include "hook/GroupPickerWindow.h"
 #include "hook/GroupTabThumbnail.h"
 #include "settings/Settings.h"
 #include "tray/TrayIcon.h"
+#include "util/AnchorPoint.h"
 #include "util/Logging.h"
 #include "util/WindowIcon.h"
 #include "windowtracking/ActivationHistory.h"
@@ -80,6 +82,17 @@ constexpr int kThumbnailStabilizeMaxAttempts = 3;
 // was tuned against.
 constexpr UINT_PTR kHaloRenderTimerId = 4;
 constexpr UINT kHaloRenderTimerDelayMs = 8;
+
+// The bullseye copy/paste ring's frame tick -- unlike every timer above, a
+// genuinely repeating one, killed by its own handler once the animation
+// reports it has finished. ~60 Hz; the animation's own progress is
+// wall-clock-based (see BullseyeOverlay), so a late tick just skips a frame.
+constexpr UINT_PTR kBullseyeFrameTimerId = 5;
+constexpr UINT kBullseyeFrameIntervalMs = 16;
+
+// Some apps write the clipboard more than once per user-visible copy;
+// updates closer together than this count as one.
+constexpr ULONGLONG kBullseyeCopyDebounceMs = 150;
 
 HWND g_messageWindow = nullptr;
 HWINEVENTHOOK g_foregroundHook = nullptr;
@@ -162,6 +175,11 @@ HWND g_haloWatched = nullptr;
 // without this the halo would fly down to the taskbar and pop along with
 // the window instead of just disappearing.
 bool g_haloMinimizeSuppressed = false;
+
+// The copy/paste ring animation (see BullseyeOverlay) -- a single
+// persistent, pre-created instance like the halo.
+std::unique_ptr<polish::BullseyeOverlay> g_bullseye;
+ULONGLONG g_lastBullseyeCopyTick = 0;
 
 // One always-shown active-window list panel *per connected monitor* (see
 // PLAN.md's Alt+Tab-improvements plan) -- each showing only its own
@@ -464,6 +482,15 @@ bool IsOwnProcessWindow(HWND hwnd) {
     return pid != 0 && pid == GetCurrentProcessId();
 }
 
+// The OS's own "a full-screen Direct3D game or a presentation is running"
+// signal -- shared by the halo (via CoversWholeMonitor) and bullseye, both
+// of which shouldn't draw over such a thing.
+bool IsPresentationOrFullScreenGame() {
+    QUERY_USER_NOTIFICATION_STATE notificationState;
+    return SUCCEEDED(SHQueryUserNotificationState(&notificationState)) &&
+           (notificationState == QUNS_RUNNING_D3D_FULL_SCREEN || notificationState == QUNS_PRESENTATION_MODE);
+}
+
 // True if hwnd's own visible rect covers its entire monitor -- IsZoomed
 // isn't enough, since most full-screen apps (games, video players,
 // browser F11) are borderless WS_POPUP windows sized to the monitor
@@ -473,9 +500,7 @@ bool IsOwnProcessWindow(HWND hwnd) {
 // tolerance and <=/>= so a window even slightly larger than the monitor
 // still counts.
 bool CoversWholeMonitor(HWND hwnd) {
-    QUERY_USER_NOTIFICATION_STATE notificationState;
-    if (SUCCEEDED(SHQueryUserNotificationState(&notificationState)) &&
-        (notificationState == QUNS_RUNNING_D3D_FULL_SCREEN || notificationState == QUNS_PRESENTATION_MODE)) {
+    if (IsPresentationOrFullScreenGame()) {
         // Beyond looking wrong, a halo window sitting at HWND_TOP over a
         // borderless-fullscreen game can knock DWM out of its
         // fullscreen-optimization path -- worth suppressing on this
@@ -555,6 +580,69 @@ void UpdateActiveWindowHalo(HWND hwnd) {
     }
 }
 
+// Starts a bullseye animation at the best guess of where the copy/paste
+// just happened. The single funnel for both triggers (clipboard update,
+// paste chord), modeled on UpdateActiveWindowHalo -- always safe to call
+// speculatively; every suppression rule lives here.
+void PlayBullseye(polish::BullseyePhase phase) {
+    if (!g_bullseye || !g_settings.bullseyeEnabled) {
+        return;
+    }
+    // The Alt+Tab session owns the screen (dim overlays, panels).
+    if (g_altTabSessionOpen || IsPresentationOrFullScreenGame()) {
+        return;
+    }
+    const polish::Anchor anchor = polish::ResolveInteractionAnchor();
+    if (anchor.source == polish::AnchorSource::None) {
+        return;
+    }
+    g_bullseye->Start(phase, anchor.point);
+    if (!g_bullseye->IsActive()) {
+        return;
+    }
+    // Re-arming an already-running timer id just restarts its interval.
+    SetTimer(g_messageWindow, kBullseyeFrameTimerId, kBullseyeFrameIntervalMs, nullptr);
+
+    const wchar_t* sourceName = anchor.source == polish::AnchorSource::Caret    ? L"caret"
+                                 : anchor.source == polish::AnchorSource::Cursor ? L"cursor"
+                                                                                  : L"window";
+    polish::LogDebug(std::format(L"[Polish] Bullseye: {} anchor={} at=({},{})",
+                                  phase == polish::BullseyePhase::Copy ? L"copy" : L"paste", sourceName,
+                                  anchor.point.x, anchor.point.y));
+}
+
+// WM_CLIPBOARDUPDATE -- the clipboard just changed. Only plays for a copy
+// the user actually made in the app they're looking at.
+void OnClipboardUpdated() {
+    const ULONGLONG now = GetTickCount64();
+    if (now - g_lastBullseyeCopyTick < kBullseyeCopyDebounceMs) {
+        return;
+    }
+    // Cleared rather than filled (EmptyClipboard with nothing set after).
+    if (CountClipboardFormats() == 0) {
+        return;
+    }
+    // A background app writing the clipboard (a clipboard manager, a sync
+    // tool) isn't something the user just did in front of them. Suppress
+    // only on a *confident* mismatch -- a null owner (delayed rendering,
+    // or an owner-less writer) still plays, since a false negative on a
+    // real copy is worse than a stray animation.
+    HWND owner = GetClipboardOwner();
+    if (owner != nullptr) {
+        DWORD ownerPid = 0;
+        GetWindowThreadProcessId(owner, &ownerPid);
+        DWORD foregroundPid = 0;
+        if (HWND foreground = GetForegroundWindow()) {
+            GetWindowThreadProcessId(foreground, &foregroundPid);
+        }
+        if (ownerPid != 0 && foregroundPid != 0 && ownerPid != foregroundPid && ownerPid != GetCurrentProcessId()) {
+            return;
+        }
+    }
+    g_lastBullseyeCopyTick = now;
+    PlayBullseye(polish::BullseyePhase::Copy);
+}
+
 void OnForegroundChanged(HWND newForeground) {
     // Before the early return below -- the halo needs to react to every
     // real foreground change, including ones that don't touch
@@ -610,6 +698,10 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
     // through to KeepGroupMemberInPlace's map lookup (harmless, just
     // wasted work) below every single time the halo moves or redraws.
     if (g_activeWindowHalo && hwnd == g_activeWindowHalo->Handle()) {
+        return;
+    }
+    // Same for bullseye's topmost overlay, which updates every animation frame.
+    if (g_bullseye && hwnd == g_bullseye->Handle()) {
         return;
     }
     switch (event) {
@@ -1871,6 +1963,7 @@ constexpr UINT kMenuIdStartAtLogin = 5;
 constexpr UINT kMenuIdAbout = 6;
 constexpr UINT kMenuIdExit = 7;
 constexpr UINT kMenuIdHalo = 8;
+constexpr UINT kMenuIdBullseye = 9;
 
 constexpr wchar_t kAboutUrl[] = L"https://www.linkedin.com/in/davidlenihan/";
 
@@ -2636,6 +2729,8 @@ void PopulateTrayMenu(HMENU menu) {
                 L"Alt+Tab (skip minimized)");
     AppendMenuW(menu, MF_STRING | (g_settings.haloEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdHalo,
                 L"Halo around active window");
+    AppendMenuW(menu, MF_STRING | (g_settings.bullseyeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdBullseye,
+                L"Bullseye (copy/paste flash)");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuIdNewGroup,
                 (L"New Group...\t" + FormatHotkey(g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey))
@@ -2668,6 +2763,18 @@ void HandleTrayCommand(UINT commandId) {
             polish::SaveSettings(g_settings);
             polish::LogDebug(std::format(L"[Polish] Halo {}", g_settings.haloEnabled ? L"enabled" : L"disabled"));
             UpdateActiveWindowHalo(GetForegroundWindow());
+            break;
+        case kMenuIdBullseye:
+            g_settings.bullseyeEnabled = !g_settings.bullseyeEnabled;
+            polish::SaveSettings(g_settings);
+            polish::LogDebug(
+                std::format(L"[Polish] Bullseye {}", g_settings.bullseyeEnabled ? L"enabled" : L"disabled"));
+            if (!g_settings.bullseyeEnabled && g_bullseye) {
+                // Mid-animation toggle-off should disappear now, not
+                // after the ring finishes; the frame timer's next tick
+                // sees an inactive overlay and kills itself.
+                g_bullseye->Hide();
+            }
             break;
         case kMenuIdStartAtLogin: {
             const bool newValue = !polish::IsStartAtLoginEnabled();
@@ -2716,7 +2823,15 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 if (g_haloWatched != nullptr) {
                     UpdateActiveWindowHalo(g_haloWatched);
                 }
+            } else if (wParam == kBullseyeFrameTimerId) {
+                if (!g_bullseye || !g_bullseye->AdvanceFrame()) {
+                    KillTimer(hwnd, kBullseyeFrameTimerId);
+                }
             }
+            return 0;
+
+        case WM_CLIPBOARDUPDATE:
+            OnClipboardUpdated();
             return 0;
 
         case polish::TrayIcon::kCallbackMessage:
@@ -2790,6 +2905,8 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         }
 
         case WM_DESTROY:
+            RemoveClipboardFormatListener(hwnd);
+            KillTimer(hwnd, kBullseyeFrameTimerId);
             UnregisterHotKey(hwnd, kNewGroupHotkeyId);
             if (g_foregroundHook != nullptr) {
                 UnhookWinEvent(g_foregroundHook);
@@ -2822,6 +2939,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             g_altTabHook.reset();
             g_altTabOverlays.clear();
             g_activeWindowHalo.reset();
+            g_bullseye.reset();
             // Before g_groupChromeWindows.clear() below -- each ring is
             // owned by its group's chrome (see AltTabHighlightBorder's
             // `owner`), so clearing this first is the same predictable-
@@ -2901,13 +3019,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     }
 
     g_settings = polish::LoadSettings();
-    polish::LogDebug(std::format(L"[Polish] settings loaded: restoreSyncEnabled={} altTabEnabled={} haloEnabled={}",
-                                  g_settings.restoreSyncEnabled, g_settings.altTabEnabled, g_settings.haloEnabled));
+    polish::LogDebug(std::format(
+        L"[Polish] settings loaded: restoreSyncEnabled={} altTabEnabled={} haloEnabled={} bullseyeEnabled={}",
+        g_settings.restoreSyncEnabled, g_settings.altTabEnabled, g_settings.haloEnabled,
+        g_settings.bullseyeEnabled));
 
     g_messageWindow = CreateMessageWindow(instance);
     if (g_messageWindow == nullptr) {
         CloseHandle(singleInstanceMutex);
         return 1;
+    }
+
+    if (!AddClipboardFormatListener(g_messageWindow)) {
+        polish::LogDebug(std::format(L"[Polish] WARNING: failed to register the clipboard listener (bullseye "
+                                      L"copy detection unavailable). GetLastError={}",
+                                      GetLastError()));
     }
 
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
@@ -2955,6 +3081,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         polish::LogDebug(L"[Polish] Alt+Tab keyboard hook installed successfully");
     }
     g_altTabHook->SetOnNavigate(OnAltTabNavigate);
+    g_altTabHook->SetOnPasteChord([] { PlayBullseye(polish::BullseyePhase::Paste); });
     // Del/-/+ act on whichever row Tab-cycling currently has highlighted
     // -- there's no keyboard equivalent of a mouse hover, so this is
     // always CurrentAltTabHighlightedWindow(), unlike the panel's own
@@ -3000,6 +3127,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // CreateWindowExW's cost now rather than on the first real foreground
     // change.
     g_activeWindowHalo = std::make_unique<polish::ActiveWindowHalo>(instance);
+    g_bullseye = std::make_unique<polish::BullseyeOverlay>(instance);
 
     OnForegroundChanged(GetForegroundWindow());
 

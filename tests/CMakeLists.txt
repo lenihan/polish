@@ -13,6 +13,7 @@ add_executable(polish_tests
     GroupStateTests.cpp
     GroupManagerTests.cpp
     HaloFalloffTests.cpp
+    BullseyeMathTests.cpp
 )
 
 target_link_libraries(polish_tests PRIVATE polish_core doctest::doctest)

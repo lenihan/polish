@@ -15,6 +15,8 @@ struct Settings {
     // ActiveWindowHalo) -- on by default like every other feature toggle
     // here, since it's meant to help by default, not be discovered.
     bool haloEnabled = true;
+    // The copy/paste ring animation (see BullseyeOverlay).
+    bool bullseyeEnabled = true;
 
     // The "New Group" global hotkey -- RegisterHotKey's own modifier
     // flags (MOD_ALT/MOD_CONTROL/MOD_SHIFT/MOD_WIN, OR'd together) and

@@ -94,6 +94,13 @@ namespace polish {
 // Delete/-/+ (see SetOnRowAction), once a session is already active, are
 // recognized and debounced the exact same way -- close/minimize-toggle/
 // maximize-toggle the currently Tab-highlighted row without a mouse.
+//
+// A second, unrelated job rides on the same app-lifetime keyboard hook
+// rather than paying for another global hook (see SetOnPasteChord): the
+// bullseye copy/paste animation needs to know when Ctrl+V / Shift+Insert
+// is pressed, and pasting is invisible to the OS otherwise (unlike copy,
+// which has a clipboard listener). It is purely observational -- never
+// swallows a key -- and works whether or not Alt+Tab itself is enabled.
 class AltTabHook {
 public:
     // hasEligibleCandidates(): called synchronously, only when a session
@@ -156,6 +163,13 @@ public:
     enum class RowAction { Close, MinimizeToggle, MaximizeToggle };
     void SetOnRowAction(std::function<void(RowAction action)> onRowAction) { onRowAction_ = std::move(onRowAction); }
 
+    // Ctrl+V or Shift+Insert (Alt not held) was pressed. A fresh press only
+    // -- OS key-repeat while held is debounced like Tab's. The keystroke is
+    // never swallowed, and the callback is posted rather than run inside
+    // the hook, so it typically fires before the target app has processed
+    // the key: the caret is still where the pasted text is about to land.
+    void SetOnPasteChord(std::function<void()> onPasteChord) { onPasteChord_ = std::move(onPasteChord); }
+
     // Routes the hook's private message. The hook callback runs on this
     // thread already (low-level hooks are called on the installing
     // thread), so this posts via PostMessage to messageWindow rather
@@ -200,6 +214,7 @@ private:
     std::function<bool(POINT screenPt)> isOwnUI_;
     std::function<void(NavigateStep step)> onNavigate_;
     std::function<void(RowAction action)> onRowAction_;
+    std::function<void()> onPasteChord_;
     HHOOK hook_ = nullptr;
     HHOOK mouseHook_ = nullptr;
 
@@ -232,6 +247,12 @@ private:
     bool deletePhysicallyDown_ = false;
     bool minusPhysicallyDown_ = false;
     bool plusPhysicallyDown_ = false;
+
+    // Same debounce shape again, for the paste chord's two main keys (V
+    // and Insert) -- tracked per key, not per chord, so a held V never
+    // re-fires the animation.
+    bool vPhysicallyDown_ = false;
+    bool insertPhysicallyDown_ = false;
 
     // True for the rest of the current Alt-hold once Ctrl+Alt+Tab (the
     // deliberate escape hatch to native Alt+Tab -- see HandleKeyEvent)

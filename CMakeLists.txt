@@ -37,6 +37,7 @@ add_library(polish_core STATIC
     src/windowtracking/WindowReparenting.cpp
     src/tray/TrayIcon.cpp
     src/hook/ActiveWindowHalo.cpp
+    src/hook/BullseyeOverlay.cpp
     src/hook/AltTabHook.cpp
     src/hook/AltTabDimOverlay.cpp
     src/hook/AltTabHighlightBorder.cpp
@@ -48,6 +49,7 @@ add_library(polish_core STATIC
     src/hook/GroupHotkeyDialog.cpp
     src/hook/GroupTabThumbnail.cpp
     src/settings/Settings.cpp
+    src/util/AnchorPoint.cpp
     src/util/AppIdentity.cpp
     src/util/DarkMode.cpp
     src/util/DialogKeyboard.cpp

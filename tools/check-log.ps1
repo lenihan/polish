@@ -30,7 +30,8 @@ $failureMarkers = @(
     'UNCOVERED resize band',
     'overlay creation FAILED',
     'keeps refusing its slot',
-    'dropping unjoinable member'
+    'dropping unjoinable member',
+    'failed to register the clipboard listener'
 )
 
 $anyFailure = $false
