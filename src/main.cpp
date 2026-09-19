@@ -591,17 +591,14 @@ void PlayBullseye(polish::BullseyePhase phase) {
     }
     // The Alt+Tab session owns the screen (dim overlays, panels).
     if (g_altTabSessionOpen || IsPresentationOrFullScreenGame()) {
-        polish::LogDebug(L"[Polish] Bullseye[play]: skipped (alt-tab session or full-screen)");
         return;
     }
     const polish::Anchor anchor = polish::ResolveInteractionAnchor();
     if (anchor.source == polish::AnchorSource::None) {
-        polish::LogDebug(L"[Polish] Bullseye[play]: skipped (no anchor)");
         return;
     }
     g_bullseye->Start(phase, anchor.point);
     if (!g_bullseye->IsActive()) {
-        polish::LogDebug(L"[Polish] Bullseye[play]: skipped (overlay did not activate)");
         return;
     }
     // Re-arming an already-running timer id just restarts its interval.
@@ -651,12 +648,10 @@ bool IsProcessDescendantOf(DWORD descendant, DWORD ancestor) {
 void OnClipboardUpdated() {
     const ULONGLONG now = GetTickCount64();
     if (now - g_lastBullseyeCopyTick < kBullseyeCopyDebounceMs) {
-        polish::LogDebug(L"[Polish] Bullseye[clip]: skipped (debounce)");
         return;
     }
     // Cleared rather than filled (EmptyClipboard with nothing set after).
     if (CountClipboardFormats() == 0) {
-        polish::LogDebug(L"[Polish] Bullseye[clip]: skipped (clipboard empty)");
         return;
     }
     // A background app writing the clipboard (a clipboard manager, a sync
@@ -674,11 +669,8 @@ void OnClipboardUpdated() {
             GetWindowThreadProcessId(foreground, &foregroundPid);
         }
     }
-    polish::LogDebug(std::format(L"[Polish] Bullseye[clip]: update owner=0x{:X} ownerPid={} foregroundPid={}",
-                                  reinterpret_cast<uintptr_t>(owner), ownerPid, foregroundPid));
     if (ownerPid != 0 && foregroundPid != 0 && ownerPid != foregroundPid && ownerPid != GetCurrentProcessId() &&
         !IsProcessDescendantOf(ownerPid, foregroundPid) && !IsProcessDescendantOf(foregroundPid, ownerPid)) {
-        polish::LogDebug(L"[Polish] Bullseye[clip]: skipped (owner unrelated to foreground process)");
         return;
     }
     g_lastBullseyeCopyTick = now;

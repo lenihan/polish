@@ -117,7 +117,8 @@ current todo list.
   animated overlay, `QueryPerformanceCounter`-timed off a 16 ms tick.
   Copy is detected with a clipboard listener (`WM_CLIPBOARDUPDATE`, so
   right-click > Copy counts, filtered to the foreground app's own
-  writes); paste rides the existing keyboard hook (`AltTabHook::
+  writes, where "own" includes parent/child processes so WebView2-hosted
+  apps like the new Outlook count); paste rides the existing keyboard hook (`AltTabHook::
   SetOnPasteChord`, Ctrl+V / Shift+Insert, never swallowed). Anchor is
   caret → mouse → window centre (`ResolveInteractionAnchor`). Tray toggle.
   Tuning constants (radius/stroke/duration/alpha) are first guesses to be
