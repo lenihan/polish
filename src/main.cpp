@@ -2,6 +2,7 @@
 
 #include <objbase.h>
 #include <shellapi.h>
+#include <tlhelp32.h>
 
 #include <algorithm>
 #include <format>
@@ -590,14 +591,17 @@ void PlayBullseye(polish::BullseyePhase phase) {
     }
     // The Alt+Tab session owns the screen (dim overlays, panels).
     if (g_altTabSessionOpen || IsPresentationOrFullScreenGame()) {
+        polish::LogDebug(L"[Polish] Bullseye[play]: skipped (alt-tab session or full-screen)");
         return;
     }
     const polish::Anchor anchor = polish::ResolveInteractionAnchor();
     if (anchor.source == polish::AnchorSource::None) {
+        polish::LogDebug(L"[Polish] Bullseye[play]: skipped (no anchor)");
         return;
     }
     g_bullseye->Start(phase, anchor.point);
     if (!g_bullseye->IsActive()) {
+        polish::LogDebug(L"[Polish] Bullseye[play]: skipped (overlay did not activate)");
         return;
     }
     // Re-arming an already-running timer id just restarts its interval.
@@ -611,33 +615,71 @@ void PlayBullseye(polish::BullseyePhase phase) {
                                   anchor.point.x, anchor.point.y));
 }
 
+// True if `descendant` has `ancestor` somewhere up its parent-process chain.
+// WebView2-hosted apps (new Outlook, Teams, ...) write the clipboard from a
+// msedgewebview2.exe child of the process that owns the visible window, so
+// "same pid" alone would reject their real copies.
+bool IsProcessDescendantOf(DWORD descendant, DWORD ancestor) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    std::map<DWORD, DWORD> parentOf;
+    PROCESSENTRY32W entry{sizeof(entry)};
+    for (BOOL ok = Process32FirstW(snapshot, &entry); ok; ok = Process32NextW(snapshot, &entry)) {
+        parentOf[entry.th32ProcessID] = entry.th32ParentProcessID;
+    }
+    CloseHandle(snapshot);
+
+    DWORD current = descendant;
+    // Bounded: guards against pid-reuse cycles in the parent links.
+    for (int depth = 0; depth < 16; ++depth) {
+        auto it = parentOf.find(current);
+        if (it == parentOf.end()) {
+            return false;
+        }
+        current = it->second;
+        if (current == ancestor) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // WM_CLIPBOARDUPDATE -- the clipboard just changed. Only plays for a copy
 // the user actually made in the app they're looking at.
 void OnClipboardUpdated() {
     const ULONGLONG now = GetTickCount64();
     if (now - g_lastBullseyeCopyTick < kBullseyeCopyDebounceMs) {
+        polish::LogDebug(L"[Polish] Bullseye[clip]: skipped (debounce)");
         return;
     }
     // Cleared rather than filled (EmptyClipboard with nothing set after).
     if (CountClipboardFormats() == 0) {
+        polish::LogDebug(L"[Polish] Bullseye[clip]: skipped (clipboard empty)");
         return;
     }
     // A background app writing the clipboard (a clipboard manager, a sync
     // tool) isn't something the user just did in front of them. Suppress
     // only on a *confident* mismatch -- a null owner (delayed rendering,
     // or an owner-less writer) still plays, since a false negative on a
-    // real copy is worse than a stray animation.
+    // real copy is worse than a stray animation. "Match" means the same
+    // process or a parent/child of it (see IsProcessDescendantOf).
     HWND owner = GetClipboardOwner();
+    DWORD ownerPid = 0;
+    DWORD foregroundPid = 0;
     if (owner != nullptr) {
-        DWORD ownerPid = 0;
         GetWindowThreadProcessId(owner, &ownerPid);
-        DWORD foregroundPid = 0;
         if (HWND foreground = GetForegroundWindow()) {
             GetWindowThreadProcessId(foreground, &foregroundPid);
         }
-        if (ownerPid != 0 && foregroundPid != 0 && ownerPid != foregroundPid && ownerPid != GetCurrentProcessId()) {
-            return;
-        }
+    }
+    polish::LogDebug(std::format(L"[Polish] Bullseye[clip]: update owner=0x{:X} ownerPid={} foregroundPid={}",
+                                  reinterpret_cast<uintptr_t>(owner), ownerPid, foregroundPid));
+    if (ownerPid != 0 && foregroundPid != 0 && ownerPid != foregroundPid && ownerPid != GetCurrentProcessId() &&
+        !IsProcessDescendantOf(ownerPid, foregroundPid) && !IsProcessDescendantOf(foregroundPid, ownerPid)) {
+        polish::LogDebug(L"[Polish] Bullseye[clip]: skipped (owner unrelated to foreground process)");
+        return;
     }
     g_lastBullseyeCopyTick = now;
     PlayBullseye(polish::BullseyePhase::Copy);
