@@ -165,17 +165,6 @@ bool IsResizeHitCode(WORD hitCode) {
     }
 }
 
-// hwnd:"title"[class] -- the same shape WindowReparenting.cpp's own
-// DescribeWindow uses, for the same reason: the class name is what makes
-// a UWP host frame (ApplicationFrameWindow) recognizable in the log.
-std::wstring DescribeWindow(HWND hwnd) {
-    wchar_t title[128] = L"";
-    GetWindowTextW(hwnd, title, static_cast<int>(std::size(title)));
-    wchar_t className[128] = L"";
-    GetClassNameW(hwnd, className, static_cast<int>(std::size(className)));
-    return std::format(L"{}:\"{}\"[{}]", reinterpret_cast<void*>(hwnd), title, className);
-}
-
 // Draws the concave quarter-circle join where a narrower element (the
 // active tab) meets a wider surface beside it (the full-length connector
 // band/column) -- the exact transition Windows 11 File Explorer uses
@@ -539,28 +528,6 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             // wParam != hwnd: the chrome's *own* resize border reports
             // these same codes with wParam == hwnd and must keep its
             // normal resize cursors.
-            // Diagnostic probe (Part 2 of the "resize cursor" investigation
-            // -- see PLAN.md): last round's override above looked right on
-            // paper but the cursor still showed, so rather than guess a
-            // third fix, log what this handler is actually being told,
-            // whenever it changes for a given window. If lines never
-            // appear while hovering a member's edge, this handler is never
-            // even reached for that member (it's deciding its own cursor
-            // without deferring to DefWindowProc) and no change to this
-            // override could ever matter; if lines appear with HTCLIENT
-            // rather than a resize code, the member is doing client-area
-            // cursor logic of its own, which is why IsResizeHitCode below
-            // never matches.
-            {
-                const HWND cursorTarget = reinterpret_cast<HWND>(wParam);
-                const WORD hitCode = LOWORD(lParam);
-                if (cursorTarget != lastCursorProbeWindow_ || hitCode != lastCursorProbeHitCode_) {
-                    lastCursorProbeWindow_ = cursorTarget;
-                    lastCursorProbeHitCode_ = hitCode;
-                    LogDebug(std::format(L"[Polish] Cursor: WM_SETCURSOR target={} hitCode={} msg=0x{:x}",
-                                          DescribeWindow(cursorTarget), hitCode, HIWORD(lParam)));
-                }
-            }
             if (reinterpret_cast<HWND>(wParam) != hwnd && IsResizeHitCode(LOWORD(lParam))) {
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
                 return TRUE;
@@ -967,25 +934,6 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         }
 
         case WM_SIZE:
-            // Minimizing/restoring is handled entirely separately, via
-            // onMinimizedChanged_ -- see that callback's own comment for
-            // why a plain reflow (onResized_) would be actively wrong for
-            // an attached member here. minimized_ tracks the last-seen
-            // state so this only fires on the actual transition, not on
-            // every WM_SIZE while already minimized (Windows sends more
-            // than one) or every ordinary resize once restored.
-            if (const bool nowMinimized = (wParam == SIZE_MINIMIZED); nowMinimized != minimized_) {
-                minimized_ = nowMinimized;
-                if (onMinimizedChanged_) {
-                    onMinimizedChanged_(nowMinimized);
-                }
-                return 0;
-            }
-            if (minimized_) {
-                // Still minimized (e.g. a redundant WM_SIZE) -- nothing
-                // to relayout against a degenerate content rect.
-                return 0;
-            }
             // Members are real children now -- they already move for
             // free when the chrome itself moves (no callback needed for
             // that at all, unlike the old reposition-only design). A
@@ -1004,16 +952,6 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                 onMoved_();
             }
             return 0;
-
-        case WM_WINDOWPOSCHANGED: {
-            // See SetOnZOrderChanged's own comment for why this exists
-            // and why WM_WINDOWPOSCHANGED rather than WM_ACTIVATE.
-            const auto* pos = reinterpret_cast<const WINDOWPOS*>(lParam);
-            if ((pos->flags & SWP_NOZORDER) == 0 && onZOrderChanged_) {
-                onZOrderChanged_();
-            }
-            return DefWindowProcW(hwnd, message, wParam, lParam);
-        }
 
         case WM_PARENTNOTIFY:
             // A member (a real WS_CHILD now) was clicked -- forward the

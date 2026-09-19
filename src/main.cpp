@@ -1,5 +1,6 @@
 #include <windows.h>
 
+#include <objbase.h>
 #include <shellapi.h>
 
 #include <algorithm>
@@ -67,16 +68,6 @@ constexpr UINT kThumbnailRefreshDelayMs = 1200;
 constexpr UINT_PTR kThumbnailStabilizeTimerId = 3;
 constexpr UINT kThumbnailStabilizeIntervalMs = 150;
 constexpr int kThumbnailStabilizeMaxAttempts = 3;
-
-// Diagnostic only (see ProbeCursorOverGroup): polls while the cursor is
-// inside a group's chrome, to record which window actually owns the
-// pixel under it and which cursor shape is showing there. Four separate
-// attempts to stop a resize cursor appearing at the tab-header/content
-// boundary each failed against a different theory of where that cursor
-// comes from; this stops theorizing and records the answer directly.
-// Rate-limited to log only on change, so a still cursor logs once.
-constexpr UINT_PTR kCursorProbeTimerId = 4;
-constexpr UINT kCursorProbeIntervalMs = 200;
 
 HWND g_messageWindow = nullptr;
 HWINEVENTHOOK g_foregroundHook = nullptr;
@@ -218,7 +209,7 @@ void OnMemberTitleChanged(HWND hwnd);
 // inside) a Tile-mode group's member window.
 void OnObjectFocusChanged(HWND hwnd);
 
-// Forward-declared so ReflowGroupTo (defined above these) can call them
+// Forward-declared so ReflowGroupTo (defined further down) can call them
 // after GroupManager::ApplyLayout drops a member that turned out to be
 // unreparentable -- the chrome's own tab labels/icons otherwise stay
 // stale (one tab too many) until some unrelated event happens to
@@ -235,75 +226,6 @@ std::vector<HICON> CollectMemberIcons(const polish::GroupState& group);
 // sites read as intent ("keep this in place") rather than reaching into
 // g_groupManager directly three times.
 void KeepGroupMemberInPlace(HWND hwnd) { g_groupManager.EnforceMemberRect(hwnd); }
-
-// Diagnostic only -- see kCursorProbeTimerId. Records, whenever the
-// cursor is inside a group's chrome, the three facts that between them
-// pin down where a stray resize cursor is coming from: which window owns
-// the pixel (WindowFromPoint + its class), what that window says the
-// point is (its own WM_NCHITTEST answer), and which cursor shape is
-// actually on screen right now. Logs only when that combination
-// changes, so resting the cursor somewhere produces exactly one line.
-void ProbeCursorOverGroup() {
-    if (g_groupChromeWindows.empty()) {
-        return;
-    }
-    POINT pt{};
-    if (!GetCursorPos(&pt)) {
-        return;
-    }
-    bool insideAGroup = false;
-    for (const auto& [id, chrome] : g_groupChromeWindows) {
-        RECT chromeRect{};
-        if (chrome != nullptr && GetWindowRect(chrome->Handle(), &chromeRect) && PtInRect(&chromeRect, pt)) {
-            insideAGroup = true;
-            break;
-        }
-    }
-    if (!insideAGroup) {
-        return;
-    }
-
-    const HWND under = WindowFromPoint(pt);
-    CURSORINFO cursorInfo{};
-    cursorInfo.cbSize = sizeof(cursorInfo);
-    const HCURSOR shownCursor = GetCursorInfo(&cursorInfo) ? cursorInfo.hCursor : nullptr;
-    const wchar_t* shapeName = L"other";
-    if (shownCursor == LoadCursorW(nullptr, IDC_ARROW)) {
-        shapeName = L"arrow";
-    } else if (shownCursor == LoadCursorW(nullptr, IDC_SIZENS)) {
-        shapeName = L"size-NS";
-    } else if (shownCursor == LoadCursorW(nullptr, IDC_SIZEWE)) {
-        shapeName = L"size-WE";
-    } else if (shownCursor == LoadCursorW(nullptr, IDC_SIZENWSE)) {
-        shapeName = L"size-NWSE";
-    } else if (shownCursor == LoadCursorW(nullptr, IDC_SIZENESW)) {
-        shapeName = L"size-NESW";
-    } else if (shownCursor == LoadCursorW(nullptr, IDC_IBEAM)) {
-        shapeName = L"ibeam";
-    }
-
-    DWORD_PTR hit = 0;
-    if (under != nullptr) {
-        SendMessageTimeoutW(under, WM_NCHITTEST, 0, MAKELPARAM(pt.x, pt.y), SMTO_ABORTIFHUNG, 50, &hit);
-    }
-
-    wchar_t className[128] = L"";
-    if (under != nullptr) {
-        GetClassNameW(under, className, static_cast<int>(std::size(className)));
-    }
-
-    static HWND lastUnder = nullptr;
-    static HCURSOR lastCursor = nullptr;
-    static DWORD_PTR lastHit = 0;
-    if (under == lastUnder && shownCursor == lastCursor && hit == lastHit) {
-        return;
-    }
-    lastUnder = under;
-    lastCursor = shownCursor;
-    lastHit = hit;
-    polish::LogDebug(std::format(L"[Polish] CursorProbe: at ({},{}) over {}[{}] ownNCHITTEST={} cursor={}", pt.x,
-                                  pt.y, reinterpret_cast<void*>(under), className, hit, shapeName));
-}
 
 // The window currently being live-tracked for settle events -- i.e. the
 // foreground window, whenever it's a candidate window (see
@@ -573,29 +495,6 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 // two before this event was delivered.
                 PostMessageW(hwnd, WM_CANCELMODE, 0, 0);
                 KeepGroupMemberInPlace(hwnd);
-                // Diagnostic probe (Part 2 of the "resize cursor"
-                // investigation -- see PLAN.md), the counterpart to
-                // GroupChromeWindow::WM_SETCURSOR's own probe: this fires
-                // exactly when a drag attempt is being cancelled, so it's
-                // the member's *own* answer, at the exact point being
-                // dragged, for what it thinks is there -- independent of
-                // whether the chrome's WM_SETCURSOR override above even
-                // gets a chance to run. GWL_STYLE is logged too so
-                // WS_THICKFRAME's actual current state is on record
-                // rather than inferred from the absence of a
-                // "re-stripped frame styles" line.
-                {
-                    POINT cursorPos{};
-                    GetCursorPos(&cursorPos);
-                    const LRESULT hitTest =
-                        SendMessageW(hwnd, WM_NCHITTEST, 0, MAKELPARAM(cursorPos.x, cursorPos.y));
-                    const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-                    polish::LogDebug(std::format(
-                        L"[Polish] Group: move/size start hwnd={} style=0x{:x} thickframe={} "
-                        L"cursor=({},{}) ownNCHITTEST={}",
-                        reinterpret_cast<void*>(hwnd), static_cast<unsigned long long>(style),
-                        (style & WS_THICKFRAME) != 0, cursorPos.x, cursorPos.y, hitTest));
-                }
             }
             break;
 
@@ -729,15 +628,9 @@ std::vector<HMONITOR> GetMonitorsCurrentFirst() {
 BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
     // A group member is reachable through its group, not on its own --
     // the group's chrome is the single Alt+Tab entry standing in for all
-    // of them, which is the whole point of grouping. An *embedded*
-    // member excludes itself for free (it's WS_CHILD, so EnumWindows
-    // never offers it here at all), but an *attached* one is still an
-    // ordinary top-level window -- see GroupManager's class comment --
-    // so it has to be filtered explicitly or it shows up twice: once as
-    // itself and once inside its group.
-    if (g_groupManager.FindGroupContaining(hwnd) != nullptr) {
-        return TRUE;
-    }
+    // of them, which is the whole point of grouping. A member excludes
+    // itself for free (it's WS_CHILD, so EnumWindows never offers it
+    // here at all).
     if (polish::IsCandidateWindow(hwnd) && !IsIconic(hwnd)) {
         reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
     }
@@ -2089,29 +1982,6 @@ std::vector<HICON> CollectMemberIcons(const polish::GroupState& group) {
     return icons;
 }
 
-// Every member window of every group *except* `excludeId`, for
-// GroupPickerWindow::ShowModal's own `excludedWindows` parameter (see its
-// comment for why this is needed at all -- an attached member is a plain
-// top-level window with nothing else keeping it out of a second group's
-// candidate list). `excludeId` is the group being edited, or
-// polish::GroupId{0} (never a real id -- see GroupManager::CreateGroup's
-// nextId_ starting at 1) for New Group, which has nothing to exclude by
-// id.
-std::vector<HWND> CollectOtherGroupsMembers(polish::GroupId excludeId) {
-    std::vector<HWND> windows;
-    for (const polish::GroupState& group : g_groupManager.Groups()) {
-        if (group.Id() == excludeId) {
-            continue;
-        }
-        for (const polish::GroupMember& member : group.Members()) {
-            if (member.kind == polish::GroupMemberKind::Window && member.window != nullptr) {
-                windows.push_back(member.window);
-            }
-        }
-    }
-    return windows;
-}
-
 // Called from OnWinEvent's EVENT_OBJECT_NAMECHANGE case (see the
 // forward declaration near the group globals for why): if hwnd is a
 // group member, refreshes its group's chrome tab labels from every
@@ -2409,8 +2279,7 @@ void EditGroupWindows(polish::GroupId id) {
     }
 
     polish::GroupPickerWindow picker(GetModuleHandleW(nullptr));
-    const auto result =
-        picker.ShowModal(chromeIt->second->Handle(), currentMembers, group->Name(), true, CollectOtherGroupsMembers(id));
+    const auto result = picker.ShowModal(chromeIt->second->Handle(), currentMembers, group->Name(), true);
     if (!result.has_value()) {
         polish::LogDebug(L"[Polish] Group: edit-windows picker cancelled");
         return;
@@ -2479,10 +2348,7 @@ void CloseGroup(polish::GroupId id) {
 // already falls back on (primary monitor).
 void TriggerNewGroup(HWND owner) {
     polish::GroupPickerWindow picker(GetModuleHandleW(nullptr));
-    // GroupId{0} never matches a real group (GroupManager::CreateGroup's
-    // nextId_ starts at 1) -- there is no group being edited here, so
-    // every group's members are excluded.
-    const auto selection = picker.ShowModal(owner, {}, L"New Group", false, CollectOtherGroupsMembers(polish::GroupId{0}));
+    const auto selection = picker.ShowModal(owner, {}, L"New Group", false);
     if (!selection.has_value()) {
         polish::LogDebug(L"[Polish] New Group: picker cancelled");
         return;
@@ -2525,55 +2391,10 @@ void TriggerNewGroup(HWND owner) {
     chrome->SetOnEditWindowsRequested([id]() { EditGroupWindows(id); });
     chrome->SetOnResized([id]() { ReflowGroupTo(id); });
     // Deliberately UpdateGroupActiveTileHighlight, not a full
-    // ReflowGroupTo, for the common case -- an *embedded* member moves
-    // for free with its parent (see GroupChromeWindow's own WM_MOVE
-    // comment), only the ring needs repositioning. An *attached* member
-    // is a top-level window of its own, though, and not parented *or*
-    // owned by the chrome (GWLP_HWNDPARENT is refused cross-process for a
-    // UWP frame the same way SetParent is -- confirmed live, see
-    // GroupManager's own class comment), so it does not move with the
-    // chrome on its own -- a group with any (HasAttachedMembers) needs
-    // the full reflow every time the chrome moves, to drag those along.
-    // WM_MOVE fires continuously during a drag, so this full-reflow path
-    // is deliberately not the default for every group -- only groups that
-    // actually have something needing it pay for it.
-    chrome->SetOnMoved([id]() {
-        polish::GroupState* group = g_groupManager.FindGroup(id);
-        if (group != nullptr && g_groupManager.HasAttachedMembers(*group)) {
-            ReflowGroupTo(id);
-        } else {
-            UpdateGroupActiveTileHighlight(id);
-        }
-    });
-    // See GroupChromeWindow::SetOnZOrderChanged's own comment -- without
-    // this, clicking the chrome's own title bar (or Alt+Tabbing to it)
-    // brings the chrome forward but leaves its attached members exactly
-    // where they were, which reads as the chrome now sitting *in front
-    // of* Calculator instead of the other way around.
-    chrome->SetOnZOrderChanged([id]() {
-        polish::GroupState* group = g_groupManager.FindGroup(id);
-        auto chromeIt = g_groupChromeWindows.find(id);
-        if (group != nullptr && chromeIt != g_groupChromeWindows.end()) {
-            g_groupManager.RaiseAttachedMembers(*group, chromeIt->second->Handle());
-        }
-    });
-    // See GroupChromeWindow::SetOnMinimizedChanged's own comment.
-    // Restoring goes through the normal ReflowGroupTo, not a blanket
-    // show, so Tab mode's per-member visibility (only the active one
-    // shown) and Z-order (RaiseAttachedMembers' own job, folded into a
-    // full reflow) both come back correctly rather than every attached
-    // member reappearing regardless of which tab is active.
-    chrome->SetOnMinimizedChanged([id](bool minimized) {
-        polish::GroupState* group = g_groupManager.FindGroup(id);
-        if (group == nullptr) {
-            return;
-        }
-        if (minimized) {
-            g_groupManager.SetAttachedMembersHidden(*group, true);
-        } else {
-            ReflowGroupTo(id);
-        }
-    });
+    // ReflowGroupTo -- a member moves for free with its parent (see
+    // GroupChromeWindow's own WM_MOVE comment), only the ring needs
+    // repositioning.
+    chrome->SetOnMoved([id]() { UpdateGroupActiveTileHighlight(id); });
     chrome->SetOnMemberClicked([id](POINT pt) { OnGroupMemberClicked(id, pt); });
     chrome->SetOnClosing([id]() { CloseGroup(id); });
     chrome->SetOnTabHovered(
@@ -2669,8 +2490,6 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 RefreshAllHiddenThumbnails();
             } else if (wParam == kThumbnailStabilizeTimerId) {
                 StabilizeHoveredThumbnail();
-            } else if (wParam == kCursorProbeTimerId) {
-                ProbeCursorOverGroup();
             }
             return 0;
 
@@ -2813,21 +2632,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     // COINIT_APARTMENTTHREADED -- this app has exactly one thread that
     // ever touches a window or COM object, the classic STA shape.
-    // Needed before anything can call GroupManager::TaskbarListInstance
-    // (CoCreateInstance requires COM to already be initialized on the
-    // calling thread) -- done once, here, rather than lazily at first
-    // use, so a failure is visible in the log right at startup instead
-    // of buried inside whatever group happens to attach a UWP member
-    // first. A failure here isn't fatal to the rest of the app (every
-    // TaskbarListInstance call site already tolerates a null result) --
-    // it would just mean an attached member keeps its own taskbar
-    // button, a cosmetic regression, not a reason to refuse to start.
+    // Needed before anything can resolve a packaged app's real icon
+    // (util/WindowIcon.cpp's GetPackagedAppIcon, via IShellItem/
+    // IShellItemImageFactory -- CoCreateInstance and friends require COM
+    // to already be initialized on the calling thread) -- done once,
+    // here, rather than lazily at first use, so a failure is visible in
+    // the log right at startup instead of buried inside whatever picker
+    // row happens to need an icon first. A failure here isn't fatal to
+    // the rest of the app -- it would just mean a packaged app's row
+    // falls back to the generic executable icon, a cosmetic regression,
+    // not a reason to refuse to start.
     const HRESULT comInitResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     if (FAILED(comInitResult)) {
-        polish::LogDebug(
-            std::format(L"[Polish] CoInitializeEx failed, hr=0x{:08x} -- attached members will keep their own "
-                        L"taskbar button",
-                        static_cast<unsigned long>(comInitResult)));
+        polish::LogDebug(std::format(L"[Polish] CoInitializeEx failed, hr=0x{:08x} -- packaged apps will fall back "
+                                      L"to their generic executable icon",
+                                      static_cast<unsigned long>(comInitResult)));
     }
 
     g_settings = polish::LoadSettings();
@@ -2924,10 +2743,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     RefreshAltTabPanels();
 
     OnForegroundChanged(GetForegroundWindow());
-
-    // Diagnostic only, and cheap: it bails immediately unless a group
-    // exists *and* the cursor is inside one. See kCursorProbeTimerId.
-    SetTimer(g_messageWindow, kCursorProbeTimerId, kCursorProbeIntervalMs, nullptr);
 
     MSG msg;
     BOOL getMessageResult;

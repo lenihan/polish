@@ -88,27 +88,21 @@ current todo list.
 - Groups: the picker's selection now stays in the list a run of adds/
   removes is happening in (the row that took the moved window's place),
   instead of jumping to the other panel after every single one.
-- Groups: UWP/Store app windows (Calculator, Settings, Photos, ...) now
-  join a group as **attached** members instead of being refused — since
-  `SetParent` categorically fails for the `ApplicationFrameWindow` class
-  (confirmed live, `ERROR_INVALID_PARAMETER` every time), such a window
-  is kept top-level and repositioned to its slot in screen coordinates
-  instead of being reparented into it. Ownership (`GWLP_HWNDPARENT`) was
-  the first design for keeping it glued to the group, but confirmed live
-  that Windows refuses that too, with the identical error — so Z-order
-  (kept directly above the chrome, re-asserted whenever the chrome is
-  raised), minimize/restore (hidden/shown off the chrome's own size
-  transitions), and candidate-list exclusion (an attached member is a
-  plain top-level window, invisible to none of the usual filters, so the
-  picker now explicitly excludes every other group's members by hwnd)
-  are all driven by hand instead of relying on owner semantics. It's
-  still protected by the same position-enforcement as an embedded
-  member, but keeps its own title bar, isn't visually contained inside
-  the group's window, and keeps its own taskbar/Alt+Tab entry — see
-  `docs/LIMITATIONS.md` for the full list of differences.
+- Groups: UWP/Store app windows (Calculator, Settings, Photos, ...) are
+  refused outright rather than joined — `SetParent` categorically fails
+  for the `ApplicationFrameWindow` class (confirmed live,
+  `ERROR_INVALID_PARAMETER` every time). The picker lists such a window
+  greyed out, unaddable, with a tooltip explaining why
+  (`WindowFilters::IsUnreparentableWindow`); `GroupManager::ApplyLayout`
+  drops one defensively if it ever arrives some other way. A prior
+  top-level "attached" mode was tried and abandoned — its taskbar button
+  couldn't be hidden by any mechanism (OS-level restriction), and there
+  was an unresolved Tile/Stack sizing glitch — see `docs/LIMITATIONS.md`.
 
 ## Left to do
 
+
+- Groups: Active window title should look very different than inactive
 - Need a more unique icon...current icon looks like Google Gemini
 - Add Alt+` to cycle a single app's own windows by most-recently-used
   order (native Windows does this by Z-order, not MRU).

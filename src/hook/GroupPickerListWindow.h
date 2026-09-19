@@ -17,6 +17,15 @@ struct GroupPickerRow {
     HWND hwnd = nullptr;
     std::wstring title;
     HICON icon = nullptr;  // borrowed, may be nullptr (falls back to text-only)
+    // False for a window this app already knows can never actually join
+    // a group (see WindowFilters::IsUnreparentableWindow) -- a UWP frame
+    // window (Calculator, Settings, ...), whose SetParent fails outright
+    // every time. Such a row is still listed (so its absence doesn't
+    // read as a bug) but painted dimmed, never shows its Add button, and
+    // its tooltip explains why instead of showing the truncated-title
+    // fallback. Computed once in SetWindows, not re-checked per paint --
+    // this property of a window class doesn't change at runtime.
+    bool addable = true;
 };
 
 // The "Available windows" half of GroupPickerWindow's picker: every

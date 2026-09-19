@@ -737,13 +737,6 @@ void GroupPickerWindow::PopulateLists() {
     // where it's load-bearing (see that method's comment).
     std::erase(allCandidates_, window_);
     std::erase(allCandidates_, editedGroupChrome_);
-    // Every *other* group's member -- see excludedWindows_'s own comment
-    // for why this is needed on top of editedGroupChrome_ above (an
-    // attached member is a plain top-level window, not WS_CHILD, so
-    // nothing else keeps it from being offered here a second time).
-    for (HWND hwnd : excludedWindows_) {
-        std::erase(allCandidates_, hwnd);
-    }
     LogCandidates(L"populate");
 
     // Existing group members are always kept selected even if they'd
@@ -850,9 +843,6 @@ void GroupPickerWindow::RefreshCandidates() {
     // so after opening.
     std::erase(freshCandidates, window_);
     std::erase(freshCandidates, editedGroupChrome_);
-    for (HWND hwnd : excludedWindows_) {
-        std::erase(freshCandidates, hwnd);
-    }
 
     // Order-preserving merge, the same way src/main.cpp's
     // UpdateAltTabCandidatesPreservingOrder reconciles Alt+Tab's own
@@ -914,12 +904,10 @@ void GroupPickerWindow::Commit() {
 }
 
 std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const std::vector<HWND>& initialSelection,
-                                                                const std::wstring& initialName, bool editing,
-                                                                const std::vector<HWND>& excludedWindows) {
+                                                                const std::wstring& initialName, bool editing) {
     initialSelection_ = initialSelection;
     initialName_ = initialName;
     editing_ = editing;
-    excludedWindows_ = excludedWindows;
     // When editing, `owner` *is* the edited group's own chrome (main.cpp
     // passes it); when creating a new group it's nullptr and nothing
     // gets excluded. See editedGroupChrome_'s own comment.
