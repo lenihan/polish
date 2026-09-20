@@ -107,9 +107,11 @@ constexpr UINT_PTR kBullseyeFrameTimerId = 5;
 // exposed per-frame rect to follow instead, so the only honest options are
 // "wait" or "draw it early", and waiting looks right.
 //
-// A duration rather than an event because Windows raises nothing when the
-// animation ends. First guess, to be adjusted by eye live -- the system
-// animation is in the same ballpark.
+// A duration, because the animation is not observable. Measured live:
+// EVENT_OBJECT_LOCATIONCHANGE fires exactly once for a restore, at the
+// same moment as EVENT_SYSTEM_MINIMIZEEND and already carrying the final
+// rect, with IsIconic already false -- there is no stream of intermediate
+// rects to follow and no event when the animation finishes. Tuned by eye.
 constexpr UINT_PTR kHaloRestoreTimerId = 6;
 constexpr UINT kHaloRestoreDelayMs = 300;
 

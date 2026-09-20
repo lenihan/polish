@@ -142,7 +142,12 @@ current todo list.
   was buried under whatever was on screen. Now pinned directly beneath
   its target. Also fixed the halo sitting out the grow-from-taskbar
   restore animation: the re-render debounce was re-armed by every
-  animation frame and so could never fire.
+  animation frame and so could never fire. The halo now holds off for
+  `kHaloRestoreDelayMs` while a restore animation plays (it cannot be
+  followed -- see docs/LIMITATIONS.md #20), started by whichever of the
+  foreground change or `EVENT_SYSTEM_MINIMIZEEND` arrives first: they
+  race, and the delay was silently doing nothing whenever the foreground
+  change won and drew the halo before the suppression flag was set.
 
 ## Left to do
 

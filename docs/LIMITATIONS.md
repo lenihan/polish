@@ -171,3 +171,15 @@ gets a full pass in Phase 3; today it records what's already known.
     by hand several times between two Alt+` presses is only observed as
     the last of those switches, and a window's order is unknown until
     the switcher has been used in it once.
+
+20. **The halo waits out a restore animation rather than following it.**
+    When a window is restored from the taskbar, Windows animates it
+    growing into place -- but that animation is a DWM visual effect and
+    is invisible to an outside process. Measured live:
+    `EVENT_OBJECT_LOCATIONCHANGE` fires exactly once, at the same moment
+    as `EVENT_SYSTEM_MINIMIZEEND`, already carrying the window's final
+    rect, with `IsIconic` already false. There are no intermediate rects
+    to follow and no event marking the animation's end, so the halo is
+    held off for a fixed delay instead (`kHaloRestoreDelayMs`) and then
+    shown. A window restored on a machine with minimize/restore animation
+    switched off skips the wait entirely.
