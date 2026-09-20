@@ -120,9 +120,15 @@ current todo list.
   writes, where "own" includes parent/child processes so WebView2-hosted
   apps like the new Outlook count); paste rides the existing keyboard hook (`AltTabHook::
   SetOnPasteChord`, Ctrl+V / Shift+Insert, never swallowed). Anchor is
-  caret → mouse → window centre (`ResolveInteractionAnchor`). Tray toggle.
-  Tuning constants (radius/stroke/duration/alpha) are first guesses to be
-  adjusted by eye live.
+  the centre of the selected text where there is a selection (UIA
+  TextPattern, resolved on `UiaWorker`'s thread at 4-12 ms, with a 90 ms
+  timeout), else caret → mouse → window centre
+  (`ResolveInteractionAnchor`). A *collapsed* range is deliberately not
+  used: Chromium's omnibox reports a plausible but fixed caret rect at the
+  control's left edge (docs/LIMITATIONS.md #21). Ring is two-tone -- a
+  theme-coloured core plus a contrasting edge -- so it reads against any
+  background, which one colour could not. Tray toggle. Tuning constants
+  (radius/stroke/duration/alpha/outline) are adjusted by eye live.
 - Alt+`: the Alt+Tab switcher over the *tabs of the foreground window*
   (`SessionKind::Tabs`, no second hook -- `g_instance` is a single
   static). Tabs are read through UI Automation on a dedicated MTA worker

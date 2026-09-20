@@ -81,6 +81,7 @@ target_link_libraries(polish_core PUBLIC
     shcore
     ole32
     oleaut32  # BSTR/VARIANT helpers used by the UI Automation tab worker
+    oleacc    # MSAA, for the text caret the bullseye aims at
     uuid
     version
 )

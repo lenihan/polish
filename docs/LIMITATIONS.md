@@ -183,3 +183,18 @@ gets a full pass in Phase 3; today it records what's already known.
     held off for a fixed delay instead (`kHaloRestoreDelayMs`) and then
     shown. A window restored on a machine with minimize/restore animation
     switched off skips the wait entirely.
+
+21. **A text caret's reported position can't be trusted, so the bullseye
+    only follows real selections.** UI Automation exposes the current text
+    selection, which is what the copy/paste ring aims at. When nothing is
+    selected the same call returns a *collapsed* range at the caret --
+    and that rect is unreliable: Chromium's omnibox (Edge's address bar)
+    reports a plausible-looking 2px caret rect pinned 8px inside the
+    control's left edge, identical no matter where the caret actually is,
+    confirmed live across repeated pastes. A RichEdit control in the same
+    test reported the truth and tracked correctly. Nothing distinguishes a
+    genuine "caret at position 0" from that, so a collapsed range is
+    ignored entirely and the ring falls back to the Win32 caret, then the
+    mouse, then the window centre. In practice a paste still lands
+    accurately anywhere a Win32 caret exists; Chromium and Electron apps
+    expose none and fall back to the mouse pointer.

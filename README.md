@@ -82,14 +82,22 @@ edges, and it's already unambiguous which one is focused) or during an
 Alt+Tab session.
 
 **A bullseye for copy and paste.** Windows gives no feedback that a copy
-took, or where a paste landed. Now a large, soft, theme-aware ring (white
-in dark mode, black in light mode) plays on top of every window for a
-third of a second: on a copy it fades in and collapses onto the spot you
-copied from; on a paste (Ctrl+V or Shift+Insert) it does the reverse,
-bursting out of the spot the text lands. It centers on your text caret
-where the app exposes one, falling back to the mouse pointer, then the
-middle of the window. Click-through, and silent during an Alt+Tab
-session or a full-screen game.
+took, or where a paste landed. Now a large, soft ring plays on top of
+every window for a third of a second: on a copy it fades in and collapses
+onto the spot you copied from; on a paste (Ctrl+V or Shift+Insert) it
+does the reverse, bursting out of the spot the text lands. Click-through,
+and silent during an Alt+Tab session or a full-screen game.
+
+- **It aims at what you actually selected.** On a copy, the ring centres
+  on the middle of the selected text, however many lines it spans.
+  Failing that -- a paste, where nothing is selected, or an app that
+  doesn't report its text -- it falls back to the text caret, then the
+  mouse pointer, then the middle of the window.
+- **It stays visible on any background.** The ring is drawn in two tones,
+  a light core and a dark edge (or the reverse, following your theme), so
+  one of the two always contrasts with whatever is behind it -- the same
+  trick that keeps a mouse cursor visible everywhere. A single-coloured
+  ring disappeared against a white document.
 
 All four features can be turned off independently from the tray icon's
 right-click menu, which also has a **Start with Windows** option and

@@ -102,6 +102,19 @@ public:
         // means for a caller aiming at it.
         RECT bounds{};
         bool found = false;  // false when nothing is selected, or the focused control exposes no text
+
+        // Where the text caret is, via MSAA's OBJID_CARET, resolved in the
+        // same trip and used when there is no selection to aim at.
+        //
+        // A second mechanism rather than UI Automation's own caret because
+        // UIA's is not dependable: Chromium reports a fixed, wrong caret
+        // rect through TextPattern (docs/LIMITATIONS.md #21). MSAA exposes
+        // the caret as an object in its own right, which is how screen
+        // magnifiers follow it in Chrome, and covers apps that draw their
+        // own caret and expose no Win32 one.
+        RECT caret{};
+        bool caretFound = false;
+
         uint64_t generation = 0;
     };
     SelectionSnapshot LatestSelection() const;

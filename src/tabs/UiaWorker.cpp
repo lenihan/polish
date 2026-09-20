@@ -6,6 +6,7 @@
 // WIN32_LEAN_AND_MEAN, so windows.h alone does not, and every one of
 // those declarations fails to parse without this.
 #include <objbase.h>
+#include <oleacc.h>
 #include <uiautomation.h>
 #include <wrl/client.h>
 
@@ -57,6 +58,61 @@ std::vector<int> RuntimeIdOf(IUIAutomationElement* element) {
     }
     SafeArrayDestroy(array);
     return id;
+}
+
+// The text caret's rectangle via MSAA, in screen coordinates.
+//
+// Deliberately not UI Automation: its caret is a collapsed text range,
+// which Chromium fills in with a fixed wrong value (see the header).
+// MSAA models the caret as an object of its own, and Chromium implements
+// that one -- it is what screen magnifiers follow.
+//
+// The caret belongs to the focused *child* window, not the top-level one,
+// so GetGUIThreadInfo is used to find it. rcCaret from that same call is
+// not used: apps that draw their own caret (anything Chromium or Electron)
+// leave it empty, which is the case this exists to cover.
+bool CaretRectViaMsaa(RECT& out) {
+    const HWND foreground = GetForegroundWindow();
+    if (foreground == nullptr) {
+        return false;
+    }
+    GUITHREADINFO info{};
+    info.cbSize = sizeof(info);
+    HWND target = foreground;
+    const DWORD thread = GetWindowThreadProcessId(foreground, nullptr);
+    if (GetGUIThreadInfo(thread, &info)) {
+        if (info.hwndCaret != nullptr) {
+            target = info.hwndCaret;
+        } else if (info.hwndFocus != nullptr) {
+            target = info.hwndFocus;
+        }
+    }
+
+    ComPtr<IAccessible> caret;
+    if (FAILED(AccessibleObjectFromWindow(target, static_cast<DWORD>(OBJID_CARET), IID_PPV_ARGS(&caret))) ||
+        !caret) {
+        return false;
+    }
+    VARIANT self;
+    VariantInit(&self);
+    self.vt = VT_I4;
+    self.lVal = CHILDID_SELF;
+    LONG left = 0;
+    LONG top = 0;
+    LONG width = 0;
+    LONG height = 0;
+    const HRESULT hr = caret->accLocation(&left, &top, &width, &height, self);
+    VariantClear(&self);
+    if (FAILED(hr)) {
+        return false;
+    }
+    // A zero-area caret is still a position, but one at the origin is the
+    // "no caret here" answer some implementations give.
+    if (width < 0 || height <= 0 || (left == 0 && top == 0)) {
+        return false;
+    }
+    out = RECT{left, top, left + width, top + height};
+    return true;
 }
 
 }  // namespace
@@ -301,6 +357,8 @@ void UiaWorker::Enumerate(const Request& request) {
 void UiaWorker::ResolveSelection(const Request& request) {
     RECT bounds{};
     bool found = false;
+    RECT caret{};
+    const bool caretFound = CaretRectViaMsaa(caret);
 
     IUIAutomation* uia = state_->uia.Get();
     ComPtr<IUIAutomationElement> focused;
@@ -337,6 +395,27 @@ void UiaWorker::ResolveSelection(const Request& request) {
                 for (int i = 0; i < rangeCount; ++i) {
                     ComPtr<IUIAutomationTextRange> range;
                     if (FAILED(ranges->GetElement(i, &range)) || !range) {
+                        continue;
+                    }
+                    // A caret is not a selection, and its reported rect
+                    // cannot be trusted. Chromium's omnibox hands back a
+                    // plausible-looking 2px caret rect pinned to the
+                    // control's left edge no matter where the caret really
+                    // is -- confirmed live in Edge, identical coordinates
+                    // across every paste, while RichEdit reported the true
+                    // position and tracked it. There is no way to tell a
+                    // truthful "caret at position 0" from that lie, so a
+                    // collapsed range is not used at all: this feature is
+                    // about aiming at what is selected, and with nothing
+                    // selected the caret/cursor/window chain in
+                    // AnchorPoint is both older and more reliable.
+                    //
+                    // Emptiness, not geometry, decides: GetText on a
+                    // collapsed range returns nothing, which is exact,
+                    // where "narrower than some pixel threshold" would be
+                    // a guess that a one-character selection could fail.
+                    ScopedBstr rangeText;
+                    if (FAILED(range->GetText(1, rangeText.Receive())) || rangeText.ToString().empty()) {
                         continue;
                     }
                     SAFEARRAY* rects = nullptr;
@@ -384,6 +463,8 @@ void UiaWorker::ResolveSelection(const Request& request) {
         std::lock_guard<std::mutex> lock(mutex_);
         selectionSnapshot_.bounds = bounds;
         selectionSnapshot_.found = found;
+        selectionSnapshot_.caret = caret;
+        selectionSnapshot_.caretFound = caretFound;
         selectionSnapshot_.generation = request.generation;
     }
     PostMessageW(notifyWindow_, kSelectionReadyMessage, static_cast<WPARAM>(request.generation), 0);

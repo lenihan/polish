@@ -785,11 +785,22 @@ void ResolveBullseyeAnchor(bool timedOut) {
 
     if (!timedOut && g_uiaWorker != nullptr) {
         const polish::UiaWorker::SelectionSnapshot selection = g_uiaWorker->LatestSelection();
-        if (selection.found && selection.generation == g_pendingBullseyeGeneration) {
-            const POINT centre{(selection.bounds.left + selection.bounds.right) / 2,
-                               (selection.bounds.top + selection.bounds.bottom) / 2};
-            StartBullseyeAt(phase, centre, L"selection");
-            return;
+        if (selection.generation == g_pendingBullseyeGeneration) {
+            if (selection.found) {
+                const POINT centre{(selection.bounds.left + selection.bounds.right) / 2,
+                                   (selection.bounds.top + selection.bounds.bottom) / 2};
+                StartBullseyeAt(phase, centre, L"selection");
+                return;
+            }
+            // No selection -- a paste, typically. The accessibility caret
+            // is the next best thing and, unlike the Win32 one, exists in
+            // apps that draw their own (Chromium, Electron).
+            if (selection.caretFound) {
+                const POINT centre{(selection.caret.left + selection.caret.right) / 2,
+                                   (selection.caret.top + selection.caret.bottom) / 2};
+                StartBullseyeAt(phase, centre, L"msaa-caret");
+                return;
+            }
         }
     }
     StartBullseyeFromFallbackAnchor(phase);
