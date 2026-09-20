@@ -1293,6 +1293,54 @@ void RebuildAltTabMinimizedCandidates() {
     EnumWindows(EnumMinimizedCandidateWindowsProc, reinterpret_cast<LPARAM>(&g_altTabMinimized));
 }
 
+// The cheap "is a session worth opening at all?" pass, for the one
+// caller that runs on the low-level hook thread (AltTabEligibility) and
+// so wants an answer without building either real list. Stops at the
+// first window of either kind -- active *or* minimized, since a session
+// has something to offer either way (see AltTabHasAnythingToShow).
+BOOL CALLBACK EnumAnySwitchableWindowProc(HWND hwnd, LPARAM lParam) {
+    // IsCandidateWindowShape is exactly "active candidate or minimized
+    // candidate" -- the two only split on IsIconic, which doesn't matter
+    // here.
+    if (polish::IsCandidateWindowShape(hwnd)) {
+        *reinterpret_cast<bool*>(lParam) = true;
+        return FALSE;  // one is enough -- stop enumerating
+    }
+    return TRUE;
+}
+
+// Whether an open session still has anything to show. Deliberately *not*
+// "two or more active windows": a lone active window is still worth a
+// session, because its row's minimize/maximize/close buttons act on it
+// without switching anywhere, and any minimized window is worth one on
+// its own because restoring it is the only way back to it. The single
+// case with nothing to offer is a desktop with no windows at all --
+// nothing active and nothing minimized.
+bool AltTabHasAnythingToShow() {
+    return !g_altTabCandidates.empty() || !g_altTabMinimized.empty();
+}
+
+// Keeps the invariant the rest of the session code reads off
+// g_altTabSelectionInMinimized: selection may only sit in a section that
+// actually has rows, and its index must be in range for that section.
+// Called after every mid-session rebuild, since either list can empty
+// out under an open session (the last active window minimized or
+// closed, the last minimized one restored).
+void NormalizeAltTabSelectionSection() {
+    if (g_altTabCandidates.empty() && !g_altTabMinimized.empty()) {
+        g_altTabSelectionInMinimized = true;
+    } else if (g_altTabMinimized.empty()) {
+        g_altTabSelectionInMinimized = false;
+    }
+    if (g_altTabSelectionInMinimized) {
+        if (g_altTabMinimizedHighlightIndex >= g_altTabMinimized.size()) {
+            g_altTabMinimizedHighlightIndex = 0;
+        }
+    } else if (g_altTabHighlightIndex >= g_altTabCandidates.size()) {
+        g_altTabHighlightIndex = 0;
+    }
+}
+
 // Which monitor a minimized window's row belongs to, grouping it the same
 // way BuildAltTabListRowsForMonitor groups active candidates. Deliberately
 // NOT MonitorFromWindow(hwnd, ...) -- GetWindowRect (which that resolves
@@ -1566,10 +1614,9 @@ polish::AltTabHook::Eligibility AltTabEligibility(polish::AltTabHook::SessionKin
     }
 
     if (kind == polish::AltTabHook::SessionKind::Windows) {
-        std::vector<HWND> active;
-        EnumWindows(EnumCandidateWindowsProc, reinterpret_cast<LPARAM>(&active));
-        return active.size() >= polish::kMinimumSwitcherCandidates ? Eligibility::Ready
-                                                                   : Eligibility::NothingToSwitchTo;
+        bool anything = false;
+        EnumWindows(EnumAnySwitchableWindowProc, reinterpret_cast<LPARAM>(&anything));
+        return anything ? Eligibility::Ready : Eligibility::NothingToSwitchTo;
     }
 
     // Tabs. Always the foreground window, even when a window session is
@@ -1647,7 +1694,17 @@ void ApplyAltTabDimming() {
     // Dims g_altTabDimTargets (every window, whatever the scope), not
     // g_altTabCandidates, and finds the highlighted window by identity
     // rather than index -- the two lists only line up under AllWindows.
-    const HWND highlightedWindow = selectionIsMinimized ? nullptr : g_altTabCandidates[g_altTabHighlightIndex];
+    //
+    // Null whenever there is no on-screen window to highlight: selection
+    // in the minimized section, or an active list that is simply empty
+    // (a session over nothing but minimized windows -- see
+    // AltTabHasAnythingToShow). Everything below keys off the null, not
+    // off selectionIsMinimized, so both cases skip the promote/halo step
+    // that needs a real rect.
+    const HWND highlightedWindow =
+        (!selectionIsMinimized && g_altTabHighlightIndex < g_altTabCandidates.size())
+            ? g_altTabCandidates[g_altTabHighlightIndex]
+            : nullptr;
     for (size_t i = 0; i < g_altTabDimTargets.size(); ++i) {
         HWND hwnd = g_altTabDimTargets[i];
         if (hwnd == highlightedWindow) {
@@ -1669,7 +1726,7 @@ void ApplyAltTabDimming() {
 
     ULONGLONG t2 = t1;
     ULONGLONG t3 = t1;
-    if (!selectionIsMinimized) {
+    if (highlightedWindow != nullptr) {
         const HWND highlighted = highlightedWindow;
         const bool promoted = polish::PromoteWindowToFront(highlighted);
         if (!promoted) {
@@ -2042,6 +2099,15 @@ void OnAltTabCycle(bool backward, polish::AltTabHook::SessionKind kind) {
         (wasSessionOpen && g_altTabHighlightIndex < g_altTabCandidates.size())
             ? g_altTabCandidates[g_altTabHighlightIndex]
             : nullptr;
+    // The minimized section's own anchor, kept separately because the
+    // active one above is captured even when selection was sitting in
+    // the minimized section (Tab pulls it back to the active list, so
+    // the active anchor is the one that matters there). Only used when
+    // Tab has to cycle the minimized section itself -- see below.
+    const HWND previouslyHighlightedMinimized =
+        (wasSessionOpen && g_altTabMinimizedHighlightIndex < g_altTabMinimized.size())
+            ? g_altTabMinimized[g_altTabMinimizedHighlightIndex]
+            : nullptr;
     // Refreshed on every cycle, not just once at session start, so a
     // window opening/closing/minimizing mid-session (via any means other
     // than this app's own Alt+Tab) is reflected the next time Tab is
@@ -2064,28 +2130,36 @@ void OnAltTabCycle(bool backward, polish::AltTabHook::SessionKind kind) {
         RebuildAltTabCandidates();
     }
     RebuildAltTabMinimizedCandidates();
-    // Tab/Shift+Tab always operate on the active section, regardless of
-    // where arrow-navigation (OnAltTabNavigate) last left selection --
-    // see g_altTabSelectionInMinimized's own comment.
-    g_altTabSelectionInMinimized = false;
 
     // Overlays left over from a longer previous target list are hidden by
     // ApplyAltTabDimming itself, so no shrink handling is needed here.
 
-    if (g_altTabCandidates.size() < polish::kMinimumSwitcherCandidates) {
-        // A live rebuild can drop the count below the feature's minimum
-        // mid-session (candidates closing) in a way session start's own
-        // eligibility guard can't prevent. End cleanly rather than
-        // divide/mod by a degenerate count below.
+    if (!AltTabHasAnythingToShow()) {
+        // A live rebuild can empty both lists mid-session (the last
+        // candidates closing) in a way session start's own eligibility
+        // guard can't prevent. End cleanly rather than divide/mod by a
+        // degenerate count below.
         if (wasSessionOpen) {
-            polish::LogDebug(L"[Polish] AltTab: candidate count dropped below the minimum mid-session, ending session");
+            polish::LogDebug(L"[Polish] AltTab: no windows left at all mid-session, ending session");
             EndAltTabSession();
         }
         return;
     }
 
+    // Tab/Shift+Tab normally operate on the active section, regardless of
+    // where arrow-navigation (OnAltTabNavigate) last left selection --
+    // see g_altTabSelectionInMinimized's own comment. With nothing active
+    // at all, though, the minimized list is the only list there is, so
+    // Tab cycles that instead of having nowhere to go: the whole point of
+    // opening a session with no active windows is reaching a minimized
+    // one.
+    const bool cycleMinimized = g_altTabCandidates.empty();
+    g_altTabSelectionInMinimized = cycleMinimized;
+    std::vector<HWND>& cycleList = cycleMinimized ? g_altTabMinimized : g_altTabCandidates;
+    size_t& cycleIndex = cycleMinimized ? g_altTabMinimizedHighlightIndex : g_altTabHighlightIndex;
+
     EnsureAltTabOverlayPoolSize(g_altTabDimTargets.size());
-    const size_t count = g_altTabCandidates.size();
+    const size_t count = cycleList.size();
 
     if (!wasSessionOpen) {
         std::wstring candidateDump;
@@ -2115,7 +2189,10 @@ void OnAltTabCycle(bool backward, polish::AltTabHook::SessionKind kind) {
         // Index 0 is the current window itself (freshest in the MRU
         // order); the first Tab press should land on the previous
         // window, matching native Alt+Tab's single-tap-swap behavior.
-        g_altTabHighlightIndex = 1 % count;
+        // When the minimized list is what's being cycled there is no
+        // "current window" sitting at index 0 to skip past, so the first
+        // press lands on its first row instead.
+        cycleIndex = cycleMinimized ? 0 : (1 % count);
         g_altTabSessionOpen = true;
     } else {
         // A scope change that was triggered while the selection sat in the
@@ -2130,23 +2207,23 @@ void OnAltTabCycle(bool backward, polish::AltTabHook::SessionKind kind) {
         // so identity is the only thing that carries over; the anchor is
         // guaranteed to be in the new list when narrowing (it defined the
         // scope) and in it when widening (the wider list is a superset).
-        size_t baseIndex = std::min(g_altTabHighlightIndex, count - 1);
-        const HWND relocate = previouslyHighlighted;
+        size_t baseIndex = std::min(cycleIndex, count - 1);
+        const HWND relocate = cycleMinimized ? previouslyHighlightedMinimized : previouslyHighlighted;
         if (relocate) {
-            const auto it = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), relocate);
-            if (it != g_altTabCandidates.end()) {
-                baseIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), it));
+            const auto it = std::find(cycleList.begin(), cycleList.end(), relocate);
+            if (it != cycleList.end()) {
+                baseIndex = static_cast<size_t>(std::distance(cycleList.begin(), it));
             }
         }
         // Advancing on a scope change too, so every Alt+` press means
         // "next window of this app" and every Tab "next window overall",
         // whether it is the first press of a session or a later one.
-        g_altTabHighlightIndex = polish::AdvanceHighlight(baseIndex, count, backward);
+        cycleIndex = polish::AdvanceHighlight(baseIndex, count, backward);
     }
     ApplyAltTabDimming();
     polish::LogDebug(std::format(L"[Polish] AltTab: cycle {} -> highlighting hwnd={}",
                                   backward ? L"backward" : L"forward",
-                                  reinterpret_cast<void*>(g_altTabCandidates[g_altTabHighlightIndex])));
+                                  reinterpret_cast<void*>(cycleList[cycleIndex])));
 }
 
 // Windows restricts SetForegroundWindow from background processes (a
@@ -2243,12 +2320,13 @@ constexpr size_t kAltTabPageStep = 10;
 // meaning on a multi-monitor desktop. A no-op with fewer than two
 // panels.
 void MoveAltTabHighlightToAdjacentPanel(bool forward) {
-    if (g_altTabCandidates.empty() || g_altTabPanels.size() < 2 ||
-        g_altTabHighlightIndex >= g_altTabCandidates.size()) {
+    const HWND current = CurrentAltTabHighlightedWindow();
+    if (current == nullptr || g_altTabPanels.size() < 2) {
         return;
     }
-    const HMONITOR currentMonitor =
-        MonitorFromWindow(g_altTabCandidates[g_altTabHighlightIndex], MONITOR_DEFAULTTONEAREST);
+    const HMONITOR currentMonitor = g_altTabSelectionInMinimized
+                                        ? MonitorForMinimizedCandidate(current)
+                                        : MonitorFromWindow(current, MONITOR_DEFAULTTONEAREST);
     size_t panelIndex = 0;
     for (size_t i = 0; i < g_altTabPanels.size(); ++i) {
         if (g_altTabPanels[i].monitor == currentMonitor) {
@@ -2261,14 +2339,34 @@ void MoveAltTabHighlightToAdjacentPanel(bool forward) {
     for (size_t step = 1; step <= panelCount; ++step) {
         const size_t candidatePanel =
             forward ? (panelIndex + step) % panelCount : (panelIndex + panelCount - step) % panelCount;
+        const HMONITOR target = g_altTabPanels[candidatePanel].monitor;
+        bool landed = false;
         for (size_t i = 0; i < g_altTabCandidates.size(); ++i) {
-            if (MonitorFromWindow(g_altTabCandidates[i], MONITOR_DEFAULTTONEAREST) ==
-                g_altTabPanels[candidatePanel].monitor) {
+            if (MonitorFromWindow(g_altTabCandidates[i], MONITOR_DEFAULTTONEAREST) == target) {
                 g_altTabHighlightIndex = i;
                 g_altTabSelectionInMinimized = false;
-                ApplyAltTabDimming();
-                return;
+                landed = true;
+                break;
             }
+        }
+        // A panel can be showing nothing but minimized rows (its monitor
+        // has no active windows, or none of them do) -- landing on its
+        // first minimized row is still the move the user asked for, and
+        // skipping the panel entirely would make Left/Right dead in a
+        // session opened over minimized windows alone.
+        if (!landed) {
+            for (size_t i = 0; i < g_altTabMinimized.size(); ++i) {
+                if (MonitorForMinimizedCandidate(g_altTabMinimized[i]) == target) {
+                    g_altTabMinimizedHighlightIndex = i;
+                    g_altTabSelectionInMinimized = true;
+                    landed = true;
+                    break;
+                }
+            }
+        }
+        if (landed) {
+            ApplyAltTabDimming();
+            return;
         }
     }
 }
@@ -2289,6 +2387,14 @@ void OnAltTabNavigate(polish::AltTabHook::NavigateStep step) {
     // in either section depending on prior state would be unpredictable.
     if (step == Step::First || step == Step::Last) {
         if (g_altTabCandidates.empty()) {
+            // No active section to jump within -- with only minimized
+            // windows on screen, its ends are the only ones there are.
+            if (g_altTabMinimized.empty()) {
+                return;
+            }
+            g_altTabSelectionInMinimized = true;
+            g_altTabMinimizedHighlightIndex = (step == Step::First) ? 0 : g_altTabMinimized.size() - 1;
+            ApplyAltTabDimming();
             return;
         }
         g_altTabSelectionInMinimized = false;
@@ -2351,10 +2457,16 @@ void OnAltTabNavigate(polish::AltTabHook::NavigateStep step) {
                 ++g_altTabMinimizedHighlightIndex;
             }
         } else if (g_altTabMinimizedHighlightIndex == 0) {
-            g_altTabSelectionInMinimized = false;
+            // Up off the top of the minimized section moves back into the
+            // active one -- unless there isn't one, in which case this is
+            // already the first row on screen and Up just stays put.
+            if (!g_altTabCandidates.empty()) {
+                g_altTabSelectionInMinimized = false;
+            }
         } else {
             --g_altTabMinimizedHighlightIndex;
         }
+        NormalizeAltTabSelectionSection();
         ApplyAltTabDimming();
         return;
     }
@@ -2429,11 +2541,12 @@ void OnAltTabRowMinimizeToggle(HWND hwnd) {
 
     UpdateAltTabCandidatesPreservingOrder();
     RebuildAltTabMinimizedCandidates();
-    if (g_altTabCandidates.size() < polish::kMinimumSwitcherCandidates) {
-        // Same degenerate-count guard as OnAltTabCycle -- minimizing the
-        // second-to-last active window can drop the active list below
-        // the feature's minimum mid-session.
-        polish::LogDebug(L"[Polish] AltTab: candidate count dropped below the minimum after row minimize toggle, ending session");
+    if (!AltTabHasAnythingToShow()) {
+        // Same empty-desktop guard as OnAltTabCycle. Minimizing can't
+        // actually reach it (the window just moves to the other list),
+        // but the rebuild above also picks up windows closed by other
+        // means since the last refresh, which can.
+        polish::LogDebug(L"[Polish] AltTab: no windows left at all after row minimize toggle, ending session");
         EndAltTabSession();
         return;
     }
@@ -2445,7 +2558,7 @@ void OnAltTabRowMinimizeToggle(HWND hwnd) {
         // there is the point of having pressed restore.
         g_altTabHighlightIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), activeIt));
         g_altTabSelectionInMinimized = false;
-    } else if (minimizing && hadActiveIndex) {
+    } else if (minimizing && hadActiveIndex && !g_altTabCandidates.empty()) {
         // Minimized, so it has left the active list. Stay in that list and
         // land on whichever window took its place -- minimizing is
         // normally one step of clearing several windows out of the way,
@@ -2458,17 +2571,21 @@ void OnAltTabRowMinimizeToggle(HWND hwnd) {
         g_altTabHighlightIndex = std::min(activeIndexBefore, g_altTabCandidates.size() - 1);
         g_altTabSelectionInMinimized = false;
     } else {
+        // Also reached when hwnd was the *last* active window: there is
+        // no active row left to stay on, so the selection follows it down
+        // into the minimized section rather than pointing at nothing.
         const auto minimizedIt = std::find(g_altTabMinimized.begin(), g_altTabMinimized.end(), hwnd);
         if (minimizedIt != g_altTabMinimized.end()) {
             g_altTabMinimizedHighlightIndex = static_cast<size_t>(std::distance(g_altTabMinimized.begin(), minimizedIt));
             g_altTabSelectionInMinimized = true;
-        } else {
+        } else if (!g_altTabCandidates.empty()) {
             // hwnd vanished entirely (closed itself in response, or some
             // other race) -- clamp rather than reference a stale index.
             g_altTabHighlightIndex = std::min(g_altTabHighlightIndex, g_altTabCandidates.size() - 1);
             g_altTabSelectionInMinimized = false;
         }
     }
+    NormalizeAltTabSelectionSection();
     ApplyAltTabDimming();
 }
 
@@ -2542,12 +2659,18 @@ void OnAltTabRowClose(HWND hwnd) {
         // leaving it there would keep dimming a closing window.
         g_altTabDimTargets.erase(std::remove(g_altTabDimTargets.begin(), g_altTabDimTargets.end(), hwnd),
                                  g_altTabDimTargets.end());
-        if (g_altTabCandidates.size() < polish::kMinimumSwitcherCandidates) {
-            polish::LogDebug(L"[Polish] AltTab: candidate count dropped below the minimum after row close, ending session");
+        if (!AltTabHasAnythingToShow()) {
+            polish::LogDebug(L"[Polish] AltTab: no windows left at all after row close, ending session");
             EndAltTabSession();
             return;
         }
-        if (removedIndex == g_altTabHighlightIndex) {
+        if (g_altTabCandidates.empty()) {
+            // That was the last active window, but minimized ones remain
+            // -- the session stays open over those, with selection moved
+            // into the only section still holding rows.
+            g_altTabSelectionInMinimized = true;
+            g_altTabMinimizedHighlightIndex = 0;
+        } else if (removedIndex == g_altTabHighlightIndex) {
             g_altTabHighlightIndex = removedIndex % g_altTabCandidates.size();
         } else if (removedIndex < g_altTabHighlightIndex) {
             --g_altTabHighlightIndex;
@@ -2560,6 +2683,11 @@ void OnAltTabRowClose(HWND hwnd) {
     if (minimizedIt != g_altTabMinimized.end()) {
         const size_t removedIndex = static_cast<size_t>(std::distance(g_altTabMinimized.begin(), minimizedIt));
         g_altTabMinimized.erase(minimizedIt);
+        if (!AltTabHasAnythingToShow()) {
+            polish::LogDebug(L"[Polish] AltTab: no windows left at all after row close, ending session");
+            EndAltTabSession();
+            return;
+        }
         if (g_altTabMinimized.empty()) {
             g_altTabSelectionInMinimized = false;
         } else if (removedIndex == g_altTabMinimizedHighlightIndex) {

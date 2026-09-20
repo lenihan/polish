@@ -15,9 +15,4 @@ namespace polish {
 // single-entry list (where every step lands back on the only entry).
 size_t AdvanceHighlight(size_t base, size_t count, bool backward);
 
-// Fewest candidates a switcher session needs to be worth opening, for
-// either switcher: with one there is nowhere to switch to. It is also
-// the smallest count the arithmetic above survives meaningfully.
-inline constexpr size_t kMinimumSwitcherCandidates = 2;
-
 }  // namespace polish

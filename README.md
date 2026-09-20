@@ -36,8 +36,12 @@ have to match up. A few things worth knowing:
 - **Ctrl+Alt+Tab** is a deliberate escape hatch: it bypasses Polish
   entirely and hands off to Windows' own native Alt+Tab, in case you
   ever want the original behavior back for one switch.
-- If there are fewer than two non-minimized windows to switch between,
-  Polish gets out of the way and native Alt+Tab runs as normal.
+- The switcher opens whenever there's any window at all to show, even
+  when there's nothing to switch *to*: with a single window open it still
+  gives you that window's minimize/maximize/close buttons, and with none
+  open but some minimized it's how you get one of them back. Only a
+  desktop with no windows whatsoever -- none active, none minimized --
+  leaves Polish out of the way, handing off to native Alt+Tab as normal.
 
 **Alt+\` switches between the tabs of the window you're in.** Hold Alt and
 press the backtick key (the one above Tab) to get the same switcher, but

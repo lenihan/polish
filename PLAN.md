@@ -41,6 +41,14 @@ current todo list.
   highlighted row in view) with a chevron+count strip ("▾ N more") when
   there are more candidates than fit on screen, and the keyboard-shortcut
   footer stays pinned in view instead of scrolling away.
+- Alt+Tab: opens whenever there is any window at all, rather than
+  requiring two non-minimized ones — one active window still gets its
+  row's minimize/maximize/close buttons, and zero active windows is
+  exactly when reaching a minimized one matters most. Only a desktop
+  with nothing active *and* nothing minimized hands off to native
+  Alt+Tab. With no active windows, Tab/Shift+Tab cycle the Minimized
+  section itself (starting on its first row, since there is no current
+  window at index 0 to skip).
 - Window groups (tab/tile mode): merged to main — combine multiple real
   windows into one taskbar entry, switchable via tabs or shown as tiles.
 - Groups: real window reparenting so members can't be dragged out
