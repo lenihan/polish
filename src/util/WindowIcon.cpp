@@ -25,24 +25,12 @@ namespace {
 // query the process) rather than throwing -- this is a last-resort
 // fallback, not a load-bearing path.
 HICON GetProcessExecutableIcon(HWND hwnd) {
-    DWORD processId = 0;
-    GetWindowThreadProcessId(hwnd, &processId);
-    if (processId == 0) {
-        return nullptr;
-    }
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
-    if (process == nullptr) {
-        return nullptr;
-    }
-    wchar_t path[MAX_PATH];
-    DWORD pathLength = static_cast<DWORD>(std::size(path));
-    const bool gotPath = QueryFullProcessImageNameW(process, 0, path, &pathLength) != FALSE;
-    CloseHandle(process);
-    if (!gotPath) {
+    const std::optional<std::wstring> path = GetWindowProcessImagePath(hwnd);
+    if (!path.has_value()) {
         return nullptr;
     }
     SHFILEINFOW fileInfo{};
-    if (SHGetFileInfoW(path, 0, &fileInfo, sizeof(fileInfo), SHGFI_ICON | SHGFI_SMALLICON) == 0) {
+    if (SHGetFileInfoW(path->c_str(), 0, &fileInfo, sizeof(fileInfo), SHGFI_ICON | SHGFI_SMALLICON) == 0) {
         return nullptr;
     }
     // Caller-owned (unlike every other path in GetWindowIconHandle) --

@@ -49,8 +49,11 @@ add_library(polish_core STATIC
     src/hook/GroupHotkeyDialog.cpp
     src/hook/GroupTabThumbnail.cpp
     src/settings/Settings.cpp
+    src/tabs/TabSwitching.cpp
+    src/tabs/UiaTabWorker.cpp
     src/util/AnchorPoint.cpp
     src/util/AppIdentity.cpp
+    src/util/SwitcherCycle.cpp
     src/util/DarkMode.cpp
     src/util/DialogKeyboard.cpp
     src/util/UiFont.cpp
@@ -77,7 +80,9 @@ target_link_libraries(polish_core PUBLIC
     uxtheme
     shcore
     ole32
+    oleaut32  # BSTR/VARIANT helpers used by the UI Automation tab worker
     uuid
+    version
 )
 
 if(MSVC)

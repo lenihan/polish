@@ -1,9 +1,14 @@
 #include "util/AppIdentity.h"
 
 #include <appmodel.h>
+#include <knownfolders.h>
+#include <shlobj.h>
+#include <shobjidl.h>
+#include <winver.h>
 
 #include <cwchar>
 #include <iterator>
+#include <vector>
 
 namespace polish {
 
@@ -38,6 +43,24 @@ std::optional<std::wstring> AumidForProcess(HANDLE process) {
     return aumid;
 }
 
+std::optional<std::wstring> ImagePathForProcess(HANDLE process) {
+    // MAX_PATH is not a real ceiling on NT paths, but every other caller
+    // in this codebase (and Explorer's own icon lookup) lives with it, and
+    // a longer path simply resolves to "unknown" rather than misbehaving.
+    wchar_t path[MAX_PATH];
+    DWORD length = static_cast<DWORD>(std::size(path));
+    if (QueryFullProcessImageNameW(process, 0, path, &length) == FALSE) {
+        return std::nullopt;
+    }
+    return std::wstring(path, length);
+}
+
+DWORD ProcessIdOfWindow(HWND hwnd) {
+    DWORD processId = 0;
+    GetWindowThreadProcessId(hwnd, &processId);
+    return processId;
+}
+
 }  // namespace
 
 HWND FindCoreWindowChild(HWND hwnd) {
@@ -54,8 +77,7 @@ std::optional<std::wstring> GetPackagedAppAumid(HWND hwnd) {
     const HWND appWindow = FindCoreWindowChild(hwnd);
     const HWND target = appWindow != nullptr ? appWindow : hwnd;
 
-    DWORD processId = 0;
-    GetWindowThreadProcessId(target, &processId);
+    const DWORD processId = ProcessIdOfWindow(target);
     if (processId == 0) {
         return std::nullopt;
     }
@@ -67,5 +89,20 @@ std::optional<std::wstring> GetPackagedAppAumid(HWND hwnd) {
     CloseHandle(process);
     return aumid;
 }
+
+std::optional<std::wstring> GetWindowProcessImagePath(HWND hwnd) {
+    const DWORD processId = ProcessIdOfWindow(hwnd);
+    if (processId == 0) {
+        return std::nullopt;
+    }
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, processId);
+    if (process == nullptr) {
+        return std::nullopt;
+    }
+    std::optional<std::wstring> path = ImagePathForProcess(process);
+    CloseHandle(process);
+    return path;
+}
+
 
 }  // namespace polish

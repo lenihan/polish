@@ -78,11 +78,11 @@ void InjectHarmlessKeystroke() {
 
 }  // namespace
 
-AltTabHook::AltTabHook(HWND messageWindow, std::function<bool()> hasEligibleCandidates,
-                        std::function<void(bool)> onCycle, std::function<void()> onCommit,
+AltTabHook::AltTabHook(HWND messageWindow, std::function<Eligibility(SessionKind)> eligibility,
+                        std::function<void(bool, SessionKind)> onCycle, std::function<void()> onCommit,
                         std::function<void()> onCancel)
     : messageWindow_(messageWindow),
-      hasEligibleCandidates_(std::move(hasEligibleCandidates)),
+      eligibility_(std::move(eligibility)),
       onCycle_(std::move(onCycle)),
       onCommit_(std::move(onCommit)),
       onCancel_(std::move(onCancel)) {
@@ -111,6 +111,12 @@ void AltTabHook::UninstallMouseHook() {
         UnhookWindowsHookEx(mouseHook_);
         mouseHook_ = nullptr;
     }
+}
+
+void AltTabHook::EndSession() {
+    sessionActive_ = false;
+    sessionKind_ = SessionKind::Windows;
+    UninstallMouseHook();
 }
 
 LRESULT CALLBACK AltTabHook::LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
@@ -155,8 +161,7 @@ bool AltTabHook::HandleMouseEvent(WPARAM wParam, POINT screenPt) {
         // click both e.g. minimize some window and land Alt+Tab on
         // whatever was highlighted, which don't have to be the same
         // window.
-        sessionActive_ = false;
-        UninstallMouseHook();
+        EndSession();
         PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::Commit), 0);
     }
     return false;
@@ -203,21 +208,27 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
                 nativeHandoffActive_ = true;
                 return false;
             }
-            // Only known place this is called synchronously inside the
-            // hook -- see the class comment for why that's fine here.
-            // Returning false leaves this keystroke completely
-            // untouched, letting native Alt+Tab handle it normally
+            // One of the few places this is called synchronously inside
+            // the hook -- see the class comment for why that's fine here.
+            // Anything but Ready returns false, leaving this keystroke
+            // completely untouched so native Alt+Tab handles it normally
             // instead of swallowing into silence with nothing to show
-            // for it.
-            if (!hasEligibleCandidates_ || !hasEligibleCandidates_()) {
+            // for it -- for both "feature off" and "nowhere to go".
+            if (!eligibility_ || eligibility_(SessionKind::Windows) != Eligibility::Ready) {
                 return false;
             }
             InjectHarmlessKeystroke();  // once per session -- see comment above
             InstallMouseHook();
         }
+        // Tab always means "every window": pressing it inside an Alt+`
+        // session takes that session back out to windows. No eligibility
+        // re-check -- this session only exists because there were at
+        // least two windows a moment ago, so it cannot come up empty.
         sessionActive_ = true;
+        sessionKind_ = SessionKind::Windows;
         PostMessageW(messageWindow_, kHookMessage,
-                     static_cast<WPARAM>(shiftHeld_ ? HookAction::CycleBackward : HookAction::CycleForward), 0);
+                     static_cast<WPARAM>(shiftHeld_ ? HookAction::CycleBackward : HookAction::CycleForward),
+                     static_cast<LPARAM>(SessionKind::Windows));
         return true;
     }
     if (data.vkCode == VK_TAB && IsUp(wParam)) {
@@ -228,17 +239,77 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         return altHeld && sessionActive_;  // swallow the matching up, down was swallowed above
     }
 
+    if (data.vkCode == VK_OEM_3 && altHeld && IsDown(wParam)) {
+        // Alt+` -- the same switcher as Alt+Tab, over the foreground
+        // window's document tabs. Mirrors Tab's block above, with three
+        // differences worth knowing about:
+        //  - no native fallback: when there is nothing to switch to the
+        //    keystroke is swallowed and nothing is shown (below);
+        //  - Ctrl+Alt+` is left completely alone WITHOUT setting
+        //    nativeHandoffActive_. There is no native Alt+` to hand off
+        //    to, and setting it would only disable Tab for the rest of
+        //    the Alt-hold, which is surprising;
+        //  - an already-set nativeHandoffActive_ (from Ctrl+Alt+Tab) is
+        //    still respected, so a later backtick can't hijack it.
+        if (nativeHandoffActive_ || ctrlHeld_) {
+            return false;
+        }
+        if (backtickPhysicallyDown_) {
+            return sessionActive_;  // OS key-repeat, not a fresh press
+        }
+        backtickPhysicallyDown_ = true;
+
+        if (!sessionActive_) {
+            switch (eligibility_ ? eligibility_(SessionKind::Tabs) : Eligibility::FeatureDisabled) {
+                case Eligibility::FeatureDisabled:
+                    return false;  // untouched, exactly as Alt+Tab when off
+                case Eligibility::NothingToSwitchTo:
+                    // Swallowed, no session. That leaves the OS seeing a
+                    // standalone Alt press, so break it once per Alt-hold
+                    // -- see nakedAltSuppressedThisHold_.
+                    if (!nakedAltSuppressedThisHold_) {
+                        nakedAltSuppressedThisHold_ = true;
+                        InjectHarmlessKeystroke();
+                    }
+                    return true;
+                case Eligibility::Ready:
+                    break;
+            }
+            InjectHarmlessKeystroke();  // once per session
+            InstallMouseHook();
+        } else if (sessionKind_ != SessionKind::Tabs) {
+            // Switching a live Alt+Tab session over to tabs. The
+            // foreground app may expose none, in which case the right
+            // answer is "leave the session exactly as it is", not "tear it
+            // down" -- swallowed, nothing posted.
+            if (eligibility_ == nullptr || eligibility_(SessionKind::Tabs) != Eligibility::Ready) {
+                return true;
+            }
+        }
+        sessionActive_ = true;
+        sessionKind_ = SessionKind::Tabs;
+        PostMessageW(messageWindow_, kHookMessage,
+                     static_cast<WPARAM>(shiftHeld_ ? HookAction::CycleBackward : HookAction::CycleForward),
+                     static_cast<LPARAM>(SessionKind::Tabs));
+        return true;
+    }
+    if (data.vkCode == VK_OEM_3 && IsUp(wParam)) {
+        // Unconditional, same reason as Tab's: it must never get stuck true.
+        backtickPhysicallyDown_ = false;
+        return altHeld && sessionActive_;  // swallow the matching up, down was swallowed above
+    }
+
     if (IsAltKey(data.vkCode) && IsUp(wParam)) {
         // Unconditional reset (not gated on sessionActive_) so the next
         // fresh Alt-hold always starts clean, regardless of which path
         // (a real session, a native handoff, or neither) this one took.
         nativeHandoffActive_ = false;
+        nakedAltSuppressedThisHold_ = false;
         if (sessionActive_) {
             // Deliberately NOT swallowed (return false below) -- see
             // InjectHarmlessKeystroke's comment for why swallowing
             // Alt-up specifically must never happen.
-            sessionActive_ = false;
-            UninstallMouseHook();
+            EndSession();
             PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::Commit), 0);
         }
         return false;
@@ -321,8 +392,7 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         // stuck-state risk). If Alt is still physically held afterward
         // and the user presses Tab again, that correctly starts a fresh
         // session rather than silently doing nothing.
-        sessionActive_ = false;
-        UninstallMouseHook();
+        EndSession();
         PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::Cancel), 0);
         return true;
     }
@@ -334,12 +404,12 @@ void AltTabHook::HandleHookMessage(WPARAM wParam, LPARAM lParam) {
     switch (static_cast<HookAction>(wParam)) {
         case HookAction::CycleForward:
             if (onCycle_) {
-                onCycle_(/*backward=*/false);
+                onCycle_(/*backward=*/false, static_cast<SessionKind>(lParam));
             }
             break;
         case HookAction::CycleBackward:
             if (onCycle_) {
-                onCycle_(/*backward=*/true);
+                onCycle_(/*backward=*/true, static_cast<SessionKind>(lParam));
             }
             break;
         case HookAction::Commit:

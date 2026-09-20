@@ -39,6 +39,31 @@ have to match up. A few things worth knowing:
 - If there are fewer than two non-minimized windows to switch between,
   Polish gets out of the way and native Alt+Tab runs as normal.
 
+**Alt+\` switches between one app's windows.** Hold Alt and press the
+backtick key (the one above Tab) to get the same switcher, but showing
+only the windows of the app you're in — two File Explorer windows, three
+VS Code windows, a few Outlook message windows — while everything else on
+screen is dimmed. Windows has no equivalent, and Microsoft's own
+PowerToys has only just added one; this one cycles in most-recently-used
+order and reuses everything above (Shift, Escape, click, the list panel
+with its minimize/maximize/close buttons). The panel heading shows the
+app's name instead of "Active". A few things worth knowing:
+
+- **Mid-hold switching.** With Alt still held, press \` during an Alt+Tab
+  session to narrow it to the highlighted window's app, or Tab during an
+  Alt+\` session to widen it back to every window. The panel stays up.
+- **Nothing to switch to does nothing.** In an app with one window, Alt+\`
+  simply does nothing — unlike Alt+Tab there's no native behavior to fall
+  back on. An app whose other windows are all minimized still counts: they
+  appear in the panel's Minimized section.
+- "Same app" means the same program, so two Chrome profiles' windows are
+  one app, while Calculator and Settings — which Windows hosts inside the
+  same shared process — are correctly treated as different apps.
+- It switches *windows*, not tabs inside a window (browser tabs, editor
+  tabs). Tabs live inside a single window and aren't visible to the
+  operating system in a uniform way.
+- The tray menu's Alt+Tab checkbox controls both.
+
 **A soft halo around the active window.** A quick, theme-aware glow —
 white in dark mode, black in light mode — around whichever window
 currently has focus, fading out over about a quarter inch on all four

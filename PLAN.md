@@ -123,14 +123,34 @@ current todo list.
   caret → mouse → window centre (`ResolveInteractionAnchor`). Tray toggle.
   Tuning constants (radius/stroke/duration/alpha) are first guesses to be
   adjusted by eye live.
+- Alt+`: the Alt+Tab switcher scoped to the active app's windows in MRU
+  order (same UI, `AltTabHook::SessionScope`, no second hook -- `g_instance`
+  is a single static). "Same app" is AUMID first then exe path
+  (`AppIdentityKey`/`IsSameApp`, `AppScope`), because every UWP window
+  shares ApplicationFrameHost.exe. Holding Alt, backtick narrows a live
+  session and Tab widens it; the panel heading shows the app name. With
+  nothing to switch to the key is swallowed and nothing shows (plus a
+  once-per-hold Ctrl tap so Alt-up doesn't flash a menu bar). Eligibility
+  is now a side-effect-free tri-state (`Eligibility`), and dimming works
+  off `g_altTabDimTargets` (every window) rather than the scoped candidate
+  list. Rides on the Alt+Tab tray toggle. Not yet verified live.
 
 ## Left to do
 
 
 - Groups: Active window title should look very different than inactive
 - Need a more unique icon...current icon looks like Google Gemini
-- Add Alt+` to cycle a single app's own windows by most-recently-used
-  order (native Windows does this by Z-order, not MRU).
+- Alt+`: switch a single app's *tabs* / MDI children, not just its
+  windows (Phase 2 of the Alt+` work). Rule: only *document* surfaces
+  qualify (editor, browser and Explorer tabs; MDI children) -- never
+  ribbon/sidebar/toolbar tabs, so Outlook gets none. Do MDI first (plain
+  `EnumChildWindows` under an `MDIClient`, no UIA). UIA tabs need an
+  allowlist that fails closed, a worker thread (never the hook/UI thread,
+  40-400 ms per call), and `AltTabListRow` re-keyed off HWND. Spikes
+  first: Chromium's lazy accessibility warm-up and what keeping it on
+  costs; Explorer and Notepad (unprobed); whether VS Code's tabs support
+  `SelectionItemPattern`; Edge vertical tabs (1 of 6 exposed). Probed
+  facts: see docs/LIMITATIONS.md #17.
 - Groups: handle a member window closing while backgrounded or tiled.
 - Groups: test and fix multi-monitor / mixed-DPI support (never tried on
   real hardware).

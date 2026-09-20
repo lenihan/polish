@@ -122,3 +122,25 @@ gets a full pass in Phase 3; today it records what's already known.
 14. **Bullseye may not appear on another virtual desktop.** Like the halo
     (#9), its window belongs to the desktop it was created on and isn't
     moved with the foreground window. Not yet confirmed or fixed.
+
+15. **Alt+backtick doesn't see elevated apps' windows.** Telling which app a
+    window belongs to means opening its process, which Windows refuses for
+    an elevated (Run as administrator) app from a normal one. Such a
+    window has an unknown identity and never appears in an Alt+` list --
+    and Alt+` pressed while one is focused does nothing. Same root cause
+    as #1.
+
+16. **Alt+backtick is bound to a key, not a character.** It is the
+    `VK_OEM_3` key, which is the backtick key on US and UK layouts but a
+    letter on German and other layouts (and a dead key on some). On those
+    layouts Alt plus the key in that position triggers it instead. The
+    log records what character the key types on the active layout at
+    startup.
+
+17. **Alt+backtick switches windows, not tabs.** Tabs inside one window
+    (browser, editor, File Explorer) aren't separate windows and are only
+    reachable through UI Automation, which is app-specific: probed on this
+    project's own machine, VS Code exposes its editor tabs cleanly, Edge
+    with vertical tabs exposes one of six, and Outlook's only tabs are
+    ribbon tabs that must never be offered as switch targets. See
+    PLAN.md's tab-switching notes.

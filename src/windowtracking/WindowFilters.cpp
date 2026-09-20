@@ -5,6 +5,8 @@
 #include <cstring>
 #include <iterator>
 
+#include "util/AppIdentity.h"
+
 namespace polish {
 
 bool IsCandidateWindowShape(HWND hwnd) {
@@ -93,7 +95,7 @@ bool IsElevatedWindow(HWND hwnd) {
 bool IsUnreparentableWindow(HWND hwnd) {
     wchar_t className[64];
     return GetClassNameW(hwnd, className, static_cast<int>(std::size(className))) > 0 &&
-           wcscmp(className, L"ApplicationFrameWindow") == 0;
+           wcscmp(className, kApplicationFrameWindowClass) == 0;
 }
 
 }  // namespace polish

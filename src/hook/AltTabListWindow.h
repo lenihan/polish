@@ -131,6 +131,25 @@ public:
     // No-op if hwnd isn't currently one of this panel's rows.
     void RepaintRow(HWND hwnd);
 
+    // The text of the heading above the non-minimized rows. Defaults to
+    // "Active"; the caller sets an app's name while a session is scoped to
+    // one app (Alt+`), so the panel says what it is showing -- and must
+    // set it back to "Active" when the scope widens. Takes effect on the
+    // next Show() (which lays out and paints from scratch), so call it
+    // before Show() rather than expecting an already-visible panel to
+    // update. A setter rather than a Show() parameter because the cheap
+    // SetHighlight path never needs it.
+    void SetActiveSectionHeader(std::wstring text) { activeHeader_ = std::move(text); }
+
+    // Whether rows carry their per-row minimize/maximize/close buttons
+    // and the keyboard-shortcut footer legend that documents them.
+    //
+    // Switched off for an Alt+` tab session, whose rows stand for tabs
+    // rather than windows: a tab has no HWND, so every one of those
+    // actions is meaningless for it, and the row would otherwise reserve
+    // width for buttons it never draws. Takes effect on the next Show().
+    void SetRowActionsEnabled(bool enabled);
+
     void Hide();
     bool IsVisible() const;
     HWND WindowHandle() const { return window_; }
@@ -213,10 +232,15 @@ private:
     // the highlight within the already-visible viewport can still take
     // its own cheap narrow-invalidate path instead of a full repaint.
     bool RecomputeScrollOffset();
+    // FooterBandHeight, or zero when the legend is switched off -- the
+    // single place that distinction is made, so layout, painting and
+    // scrolling cannot disagree about how tall the viewport is.
+    int FooterBandHeightForState(UINT dpi) const;
 
     HINSTANCE instance_;
     HWND window_ = nullptr;
     std::vector<AltTabListRow> rows_;
+    std::wstring activeHeader_ = L"Active";  // see SetActiveSectionHeader
     std::optional<size_t> highlightIndex_;
     // Vertical pixel offset applied only when there are more rows than
     // fit in the panel's height-capped viewport (see kViewportMarginPx in
@@ -240,6 +264,7 @@ private:
     // arrive at all, re-armed on every WM_MOUSEMOVE since it's otherwise
     // a one-shot subscription per MSDN.
     std::optional<size_t> hoveredIndex_;
+    bool rowActionsEnabled_ = true;  // see SetRowActionsEnabled
     std::function<void(HWND)> onRowActivated_;
     std::function<void(HWND)> onRowMinimizeToggle_;
     std::function<void(HWND)> onRowMaximizeToggle_;

@@ -10,6 +10,7 @@ add_executable(polish_tests
     TestMain.cpp
     RectUtilsTests.cpp
     ActivationHistoryTests.cpp
+    TabSwitchingTests.cpp
     GroupStateTests.cpp
     GroupManagerTests.cpp
     HaloFalloffTests.cpp

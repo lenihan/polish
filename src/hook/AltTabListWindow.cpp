@@ -272,6 +272,9 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             // closing). Checked for both rows even when they're the same
             // one -- harmless duplicate work, not worth a branch to skip.
             for (std::optional<size_t> rowIndex : {highlightIndex_, hoveredIndex_}) {
+                if (!rowActionsEnabled_) {
+                    break;  // rows stand for tabs, which have no such controls
+                }
                 if (!rowIndex.has_value() || *rowIndex >= rows_.size() || *rowIndex >= layout.rowRects.size()) {
                     continue;
                 }
@@ -413,7 +416,7 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     // it, without needing to individually bound every single draw call
     // down there.
     const int scrollViewportHeight =
-        std::max(0, static_cast<int>(clientRect.bottom - clientRect.top) - FooterBandHeight(dpi));
+        std::max(0, static_cast<int>(clientRect.bottom - clientRect.top) - FooterBandHeightForState(dpi));
     RECT scrollClipRect{clientRect.left, clientRect.top, clientRect.right, clientRect.top + scrollViewportHeight};
     HRGN scrollClipRgn = CreateRectRgnIndirect(&scrollClipRect);
     SelectClipRgn(hdc, scrollClipRgn);
@@ -471,7 +474,10 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     if (layout.activeHeaderRect) {
         RECT r = *layout.activeHeaderRect;
         r.left += rowPaddingX;
-        DrawTextW(hdc, L"Active", -1, &r, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        // End-ellipsis because an app's display name (unlike the fixed
+        // "Active") can be longer than the panel is wide.
+        DrawTextW(hdc, activeHeader_.c_str(), -1, &r,
+                  DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_END_ELLIPSIS);
     }
     if (layout.minimizedHeaderRect) {
         // A divider line above the heading, but only when it's not the
@@ -502,7 +508,7 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         LineTo(hdc, x2, y2);
     };
 
-    const int actionsReservedWidth = ActionsReservedWidth(dpi);
+    const int actionsReservedWidth = rowActionsEnabled_ ? ActionsReservedWidth(dpi) : 0;
     const std::vector<RECT>& rowRects = layout.rowRects;
     for (size_t i = 0; i < rowRects.size() && i < rows_.size(); ++i) {
         const RECT& rowRect = rowRects[i];
@@ -533,7 +539,7 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         SetTextColor(hdc, highlighted ? kHighlightTextColor : (row.minimized ? kMinimizedTextColor : kTextColor));
         DrawTextW(hdc, row.title.c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 
-        if (highlighted || hovered) {
+        if (rowActionsEnabled_ && (highlighted || hovered)) {
             const RECT toggle = ComputeMinimizeToggleButtonRect(rowRect, dpi);
             const RECT close = ComputeCloseButtonRect(rowRect, dpi);
             const COLORREF rowFillColor = highlighted ? accentColor : kHoverBackgroundColor;
@@ -678,7 +684,7 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     // rows/headers above scroll underneath it, not scroll away with
     // them. A subtle divider marks that boundary, otherwise invisible
     // once scrolling is actually happening.
-    if (!rows_.empty()) {
+    if (rowActionsEnabled_ && !rows_.empty()) {
         HPEN dividerPen = CreatePen(PS_SOLID, 1, kSectionDividerColor);
         HGDIOBJ oldPen = SelectObject(hdc, dividerPen);
         MoveToEx(hdc, clientRect.left, scrollViewportHeight, nullptr);
@@ -703,7 +709,7 @@ void AltTabListWindow::Reposition(HMONITOR targetMonitor, UINT dpi) {
     const int width = Scale(kPanelWidth, dpi);
     // The footer is always reserved, on top of whatever headers/rows
     // naturally need -- see FooterBandHeight's own comment.
-    const int naturalHeight = ComputeLayout(dpi).contentHeight + FooterBandHeight(dpi);
+    const int naturalHeight = ComputeLayout(dpi).contentHeight + FooterBandHeightForState(dpi);
 
     MONITORINFO monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
@@ -855,7 +861,7 @@ bool AltTabListWindow::RecomputeScrollOffset() {
     // Rows/headers only ever scroll within the client area *minus* the
     // pinned footer band -- see FooterBandHeight's own comment.
     const int viewportHeight =
-        std::max(0, static_cast<int>(clientRect.bottom - clientRect.top) - FooterBandHeight(dpi));
+        std::max(0, static_cast<int>(clientRect.bottom - clientRect.top) - FooterBandHeightForState(dpi));
     const int maxScroll = std::max(0, layout.contentHeight - viewportHeight);
 
     int newOffset = std::clamp(scrollOffset_, 0, maxScroll);
@@ -897,6 +903,14 @@ void AltTabListWindow::RepaintRow(HWND hwnd) {
         r.bottom -= scrollOffset_;
         InvalidateRect(window_, &r, FALSE);
     }
+}
+
+int AltTabListWindow::FooterBandHeightForState(UINT dpi) const {
+    return rowActionsEnabled_ ? FooterBandHeight(dpi) : 0;
+}
+
+void AltTabListWindow::SetRowActionsEnabled(bool enabled) {
+    rowActionsEnabled_ = enabled;
 }
 
 void AltTabListWindow::Hide() {

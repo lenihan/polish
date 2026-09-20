@@ -58,14 +58,14 @@ namespace polish {
 // ~1000ms default on Win10 1709+), so the callback must stay trivial no
 // matter what.
 //
-// One deliberate exception: hasEligibleCandidates (see constructor) IS
+// One deliberate exception: the eligibility callback (see constructor) IS
 // called synchronously from inside the callback, on the first Tab of a
 // session only. Without it, the hook always swallows Tab-while-Alt
 // regardless of whether there's anywhere to switch to, and with 0 or 1
 // non-minimized windows open that ate the keystroke into total
 // silence -- confirmed, human-reported, as feeling broken rather than
 // looking like "nothing to do here." EnumWindows plus cheap per-window
-// style checks (what hasEligibleCandidates does) is a bounded,
+// style checks (what the eligibility callback does) is a bounded,
 // synchronous, no-UI operation, nowhere near the timeout risk that
 // candidate popups/DWM calls would be -- it's the *rendering* work that
 // stays deferred via the posted message below, not this.
@@ -78,7 +78,7 @@ namespace polish {
 // meant for Polish's own list-panel UI as a generic commit trigger,
 // instead of letting it reach that panel's own row/button hit-testing. A
 // WindowFromPoint-plus-handle-comparison check is the same bounded,
-// synchronous, no-UI shape as hasEligibleCandidates above.
+// synchronous, no-UI shape as the eligibility callback above.
 //
 // Navigation keys (Up/Down, Home/End, PageUp/PageDown, Left/Right),
 // once a session is already active, are recognized the same way Tab is
@@ -101,15 +101,52 @@ namespace polish {
 // is pressed, and pasting is invisible to the OS otherwise (unlike copy,
 // which has a clipboard listener). It is purely observational -- never
 // swallows a key -- and works whether or not Alt+Tab itself is enabled.
+//
+// Alt+` (backtick) rides on this same class and the same session machinery
+// rather than a second AltTabHook: g_instance (see the .cpp) is a single
+// static pointer set by the constructor, so a second instance would
+// silently steal every callback from the first. It opens the same
+// switcher over the foreground window's *document tabs* instead of over
+// windows (SessionKind::Tabs). Held Alt can switch between the two
+// mid-session -- backtick moves to the foreground window's tabs, Tab back
+// out to every window -- so the kind is carried on each onCycle rather
+// than treated as fixed for a session.
 class AltTabHook {
 public:
-    // hasEligibleCandidates(): called synchronously, only when a session
-    //   isn't already active, to decide whether to swallow Tab-while-Alt
-    //   at all. Returning false lets the keystroke fall through to
-    //   native Alt+Tab untouched -- no onCycle/onCommit/onCancel fires
-    //   for that keypress at all.
-    // onCycle(backward): Tab (backward=false) or Shift+Tab (backward=true)
-    //   pressed while Alt is held -- advance/reverse the highlight.
+    // What a session cycles through: every window (Alt+Tab), or the
+    // foreground window's own document tabs (Alt+`).
+    enum class SessionKind { Windows, Tabs };
+
+    // Why a chord may or may not open a session. Three states rather than
+    // a bool because the two chords treat "nothing to switch to"
+    // differently: Alt+Tab falls through to native Windows, whose own
+    // switcher then has something to say; Alt+` has no native behavior
+    // worth deferring to, so it swallows the keystroke and shows nothing.
+    // Both leave the keystroke completely untouched when the feature is
+    // switched off.
+    enum class Eligibility { FeatureDisabled, NothingToSwitchTo, Ready };
+
+    // eligibility(kind): called synchronously to decide whether a chord
+    //   may open a session (Tab -> Windows, backtick -> Tabs), and again
+    //   when backtick would switch an already-open one over to tabs. Must
+    //   be side-effect free: on a switch it is asked "would this window's
+    //   tabs give me anything?" while the live session's own lists are
+    //   still in use. For Tab, anything but Ready lets the keystroke fall
+    //   through to native Alt+Tab untouched -- no onCycle/onCommit/
+    //   onCancel fires for that keypress at all. For backtick, see
+    //   Eligibility.
+    //
+    //   Note for Tabs: this answers only the cheap, synchronous half of
+    //   the question -- whether the foreground app is one whose tabs can
+    //   be read at all (see TabSwitching.h's allowlist). Reading the tabs
+    //   themselves is far too slow for the hook thread and happens off
+    //   it, so a Ready here can still be followed by a session that finds
+    //   too few tabs and closes again without ever painting.
+    // onCycle(backward, kind): Tab (backward=false) or Shift+Tab
+    //   (backward=true) pressed while Alt is held -- advance/reverse the
+    //   highlight -- or the backtick equivalents. `kind` is what the
+    //   session should be cycling *from this press on*, so it is also how
+    //   a mid-hold switch between windows and tabs reaches the caller.
     // onCommit(): Alt released after at least one Tab was swallowed, OR
     //   a mouse button was pressed during an active session -- caller
     //   should focus the currently-highlighted window either way.
@@ -119,8 +156,8 @@ public:
     //   fire afterward for the same Alt-hold, and if Alt is still
     //   physically held and Tab is pressed again, that correctly starts
     //   a fresh session.
-    AltTabHook(HWND messageWindow, std::function<bool()> hasEligibleCandidates,
-               std::function<void(bool backward)> onCycle, std::function<void()> onCommit,
+    AltTabHook(HWND messageWindow, std::function<Eligibility(SessionKind)> eligibility,
+               std::function<void(bool backward, SessionKind scope)> onCycle, std::function<void()> onCommit,
                std::function<void()> onCancel);
     ~AltTabHook();
 
@@ -205,10 +242,16 @@ private:
     bool HandleMouseEvent(WPARAM wParam, POINT screenPt);
     void InstallMouseHook();
     void UninstallMouseHook();
+    // Every path that ends a session goes through here so the three of
+    // them (mouse commit, Alt-up, Escape) cannot drift apart. Missing the
+    // scope reset on one would make the next plain Alt+Tab silently open
+    // narrowed to whatever app the last session ended on; missing the
+    // mouse-hook uninstall would leak a global hook.
+    void EndSession();
 
     HWND messageWindow_;
-    std::function<bool()> hasEligibleCandidates_;
-    std::function<void(bool backward)> onCycle_;
+    std::function<Eligibility(SessionKind)> eligibility_;
+    std::function<void(bool backward, SessionKind scope)> onCycle_;
     std::function<void()> onCommit_;
     std::function<void()> onCancel_;
     std::function<bool(POINT screenPt)> isOwnUI_;
@@ -222,6 +265,8 @@ private:
     // matching Alt-up is swallowed (via commit or, if Escape cancelled
     // first, whenever Alt is eventually released) -- see class comment.
     bool sessionActive_ = false;
+    // Meaningful only while sessionActive_. Reset by EndSession().
+    SessionKind sessionKind_ = SessionKind::Windows;
     bool shiftHeld_ = false;
     bool ctrlHeld_ = false;
 
@@ -233,6 +278,19 @@ private:
     // shouldn't rapidly cycle through windows any more than native
     // Alt+Tab does.
     bool tabPhysicallyDown_ = false;
+
+    // Same debounce as tabPhysicallyDown_, for backtick.
+    bool backtickPhysicallyDown_ = false;
+
+    // Alt+` swallowed with no session to show (nothing to switch to)
+    // leaves the OS seeing Alt-down, nothing, Alt-up -- exactly the
+    // "standalone Alt press" that flashes the target's menu bar, which
+    // InjectHarmlessKeystroke exists to break. This once-per-Alt-hold flag
+    // gates that injection on the do-nothing path. Deliberately NOT shared
+    // with the per-session injection: no session exists on this path, and
+    // today's code can already legitimately inject twice in one Alt-hold
+    // (session, Escape, Tab, new session). Reset on Alt-up.
+    bool nakedAltSuppressedThisHold_ = false;
 
     // Same debounce shape as tabPhysicallyDown_, one slot per navigation
     // key -- they're independent keys, so a single shared flag couldn't
