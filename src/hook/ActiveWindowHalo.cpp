@@ -41,6 +41,82 @@ int DistanceToAlpha(float d, int halo, int peak) {
 
 namespace {
 
+// Walks the real top-level Z-order (front to back) and reports where the
+// halo sits relative to the window it is supposed to be hugging, naming
+// anything wedged between them.
+//
+// Diagnostic only, and deliberately called just on the paths that assert
+// Z-order (never per-frame during a drag): GetWindow walks every top-level
+// window in the session. Tagged HALOZ so it is easy to grep out of
+// %TEMP%\polish.log and easy to strip once this is settled.
+// Pins the halo directly beneath `target` in the Z-order, which is the
+// only placement that actually holds.
+//
+// HWND_TOP does not work here, and returns success while doing nothing:
+// Windows refuses to let a background process put a non-topmost window
+// above the *foreground* window, and the foreground window is exactly
+// what this overlay always hugs. Confirmed live -- the halo would stall
+// at a fixed Z index several slots behind its own target and get buried
+// under whatever else was on screen (a full-screen editor, typically),
+// which read as "the halo just isn't there".
+//
+// Directly beneath the target is also better than above it: the target
+// covers only the glow's own middle, which it would cover anyway, and
+// nothing that the target is in front of can ever come between the two.
+// HWND_TOP stays as the fallback for a target that has since died.
+bool PlaceHaloBehindTarget(HWND halo, HWND target, UINT extraFlags) {
+    const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | extraFlags;
+    if (target != nullptr && IsWindow(target)) {
+        return SetWindowPos(halo, target, 0, 0, 0, 0, flags) != FALSE;
+    }
+    return SetWindowPos(halo, HWND_TOP, 0, 0, 0, 0, flags) != FALSE;
+}
+
+void LogHaloZOrder(HWND halo, HWND target, const wchar_t* phase) {
+    int haloIndex = -1;
+    int targetIndex = -1;
+    int index = 0;
+    std::wstring between;
+    for (HWND w = GetTopWindow(nullptr); w != nullptr && index < 400; w = GetWindow(w, GW_HWNDNEXT), ++index) {
+        if (w == halo) {
+            haloIndex = index;
+        }
+        if (w == target) {
+            targetIndex = index;
+        }
+        // Anything visible sitting between the two is the thing that can
+        // cover the glow, which is the whole question here.
+        if (haloIndex < 0 && targetIndex >= 0 && w != target && IsWindowVisible(w)) {
+            wchar_t className[64] = L"";
+            GetClassNameW(w, className, static_cast<int>(std::size(className)));
+            wchar_t title[64] = L"";
+            GetWindowTextW(w, title, static_cast<int>(std::size(title)));
+            RECT r{};
+            GetWindowRect(w, &r);
+            if (r.right > r.left && r.bottom > r.top) {
+                if (!between.empty()) {
+                    between += L" | ";
+                }
+                const LONG_PTR ex = GetWindowLongPtrW(w, GWL_EXSTYLE);
+                between += std::format(L"{}[{}]{}", title, className,
+                                       (ex & WS_EX_TOPMOST) ? L"<TOPMOST>" : L"");
+            }
+        }
+    }
+    const LONG_PTR haloEx = GetWindowLongPtrW(halo, GWL_EXSTYLE);
+    const LONG_PTR targetEx = GetWindowLongPtrW(target, GWL_EXSTYLE);
+    LogDebug(std::format(
+        L"[Polish] HALOZ {}: haloZ={} targetZ={} haloTopmost={} targetTopmost={} haloOwner={} "
+        L"haloEx=0x{:08x}{}",
+        phase, haloIndex, targetIndex, (haloEx & WS_EX_TOPMOST) != 0, (targetEx & WS_EX_TOPMOST) != 0,
+        reinterpret_cast<void*>(GetWindow(halo, GW_OWNER)), static_cast<uint32_t>(haloEx),
+        between.empty() ? std::wstring(L"") : std::format(L" -- between them: {}", between)));
+}
+
+}  // namespace
+
+namespace {
+
 constexpr wchar_t kClassName[] = L"PolishActiveWindowHalo";
 
 // Same tolerance/meaning as AltTabHighlightBorder's own flush-edge check
@@ -241,8 +317,9 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
         // Z-order 60x/sec during a drag.
         UpdateLayeredWindow(window_, nullptr, &dstPoint, nullptr, nullptr, nullptr, 0, nullptr, 0);
         if (!visible_ || targetChanged) {
-            SetWindowPos(window_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            PlaceHaloBehindTarget(window_, target, SWP_SHOWWINDOW);
             visible_ = true;
+            LogHaloZOrder(window_, target, L"move-path");
         } else {
             SetWindowPos(window_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
@@ -274,8 +351,9 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
     // does, harmlessly, since it's session-scoped) would flash the previous
     // frame at the previous position for a persistent overlay that
     // repeatedly re-shows like this one.
-    SetWindowPos(window_, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    PlaceHaloBehindTarget(window_, target, SWP_SHOWWINDOW);
     visible_ = true;
+    LogHaloZOrder(window_, target, L"render-path");
 
     polish::LogDebug(std::format(
         L"[Polish] Halo: render target={} rect=({},{})-({},{}) dpi={} dark={} durationMs={}",
