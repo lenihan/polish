@@ -83,6 +83,32 @@ constexpr int kEdgeTolerance = 2;
 constexpr int kPeakAlphaDark = 190;
 constexpr int kPeakAlphaLight = 100;
 
+// How far the glow keeps painting, at full peak alpha, *inside* the
+// target's own edge (at 96 DPI) rather than stopping dead at d = 0.
+//
+// A Windows 11 window's outermost pixels aren't opaque: the thin frame
+// border DWM draws around one is partly transparent, so whatever sits
+// behind the window shows through it. The halo sits directly behind its
+// target (see PlaceHaloBehindTarget), so that border ends up blended
+// against the glow -- and an earlier version, which stopped painting at
+// the target's own edge (and additionally *halved* alpha in the d = 0
+// column, to antialias a seam that's covered anyway), left the border
+// blending against a column that was part glow and part raw desktop.
+// That read as a faint, uneven line hugging the window's edge, its
+// brightness wobbling with whatever wallpaper happened to be behind it
+// -- reported as the edge not looking perfectly straight, and
+// reproducible only with the halo on.
+//
+// Painting a couple of pixels further in, all at peak alpha, gives that
+// semi-transparent border a *uniform* backdrop the whole way along each
+// edge, so it reads as the straight line it is. The extra pixels are
+// free: they're always behind the target, so nothing but the target's
+// own border ever samples them. They also absorb the case where the
+// visible edge lands a pixel inside DWMWA_EXTENDED_FRAME_BOUNDS (what
+// GetVisibleWindowRect reports), which is the other way this seam opens
+// up.
+constexpr int kUnderlapDip = 2;
+
 void EnsureClassRegistered(HINSTANCE instance) {
     static bool registered = false;
     if (registered) {
@@ -392,23 +418,27 @@ void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, U
     const int halo = std::max({inflate.left, inflate.top, inflate.right, inflate.bottom});
     const int peak = isDark ? kPeakAlphaDark : kPeakAlphaLight;
 
+    // How far each band runs *past* the target's own edge, into pixels the
+    // target itself covers -- see kUnderlapDip for why it exists at all.
+    // Clamped against the corner radius, so an underlapped band can never
+    // reach into the corner boxes' own rows/columns and fight them over
+    // the same pixels, and against the target's own half-extents, so on a
+    // tiny target two opposite bands can't both claim the middle.
+    const int underlap = std::max(
+        0, std::min({MulDiv(kUnderlapDip, static_cast<int>(dpi), 96), rInt, targetWidth / 2, targetHeight / 2}));
+
     const auto pixelPtr = [this](int x, int y) { return bits_ + static_cast<size_t>(y) * capWidth_ + x; };
 
-    // The base peak-at-d=0 falloff (halo_math::DistanceToAlpha) plus two
-    // adjustments that exist purely to smooth the rasterization, not to
-    // shape the glow: a half-pixel blend at the inner (d ~ 0) boundary
-    // (the outer boundary at d = halo is already smooth on its own, since
-    // the base falloff itself reaches 0 there), and an explicit cutoff
-    // below d = -0.5 so the interior -- which this renderer otherwise
-    // never even visits -- would read as fully transparent if it ever did.
+    // The base peak-at-d<=0 falloff (halo_math::DistanceToAlpha), bounded
+    // on the outside at d = halo (where the falloff has already reached 0
+    // on its own) and on the inside at d = -underlap, past which the glow
+    // sits far enough under its own target that not even the target's
+    // semi-transparent border samples it.
     const auto colorForDistance = [&](float d) -> uint32_t {
-        if (d >= static_cast<float>(halo) || d < -0.5f) {
+        if (d >= static_cast<float>(halo) || d < -static_cast<float>(underlap)) {
             return 0;
         }
-        const int baseAlpha = halo_math::DistanceToAlpha(d, halo, peak);
-        const float innerAntialias = std::clamp(d + 0.5f, 0.0f, 1.0f);
-        const int alpha = static_cast<int>(static_cast<float>(baseAlpha) * innerAntialias + 0.5f);
-        return PremultipliedPixel(alpha, isDark);
+        return PremultipliedPixel(halo_math::DistanceToAlpha(d, halo, peak), isDark);
     };
 
     const int midLeft = tl.left + rInt;
@@ -422,13 +452,17 @@ void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, U
     // one value per row, written with fill_n rather than recomputed per
     // pixel.
     if (midRight > midLeft) {
-        for (int y = 0; y < inflate.top; ++y) {
-            const float d = std::fabs(static_cast<float>(y) - centerY) - halfHeight;
-            std::fill_n(pixelPtr(midLeft, y), midRight - midLeft, colorForDistance(d));
+        if (inflate.top > 0) {
+            for (int y = 0; y < inflate.top + underlap; ++y) {
+                const float d = std::fabs(static_cast<float>(y) - centerY) - halfHeight;
+                std::fill_n(pixelPtr(midLeft, y), midRight - midLeft, colorForDistance(d));
+            }
         }
-        for (int y = tl.bottom; y < glowHeight; ++y) {
-            const float d = std::fabs(static_cast<float>(y) - centerY) - halfHeight;
-            std::fill_n(pixelPtr(midLeft, y), midRight - midLeft, colorForDistance(d));
+        if (inflate.bottom > 0) {
+            for (int y = tl.bottom - underlap; y < glowHeight; ++y) {
+                const float d = std::fabs(static_cast<float>(y) - centerY) - halfHeight;
+                std::fill_n(pixelPtr(midLeft, y), midRight - midLeft, colorForDistance(d));
+            }
         }
     }
 
@@ -438,8 +472,9 @@ void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, U
     // every row in range via memcpy rather than recomputed per row.
     if (midBottom > midTop) {
         if (inflate.left > 0) {
-            std::vector<uint32_t> row(static_cast<size_t>(inflate.left));
-            for (int x = 0; x < inflate.left; ++x) {
+            const int bandWidth = inflate.left + underlap;
+            std::vector<uint32_t> row(static_cast<size_t>(bandWidth));
+            for (int x = 0; x < bandWidth; ++x) {
                 const float d = std::fabs(static_cast<float>(x) - centerX) - halfWidth;
                 row[static_cast<size_t>(x)] = colorForDistance(d);
             }
@@ -448,13 +483,15 @@ void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, U
             }
         }
         if (inflate.right > 0) {
-            std::vector<uint32_t> row(static_cast<size_t>(inflate.right));
-            for (int x = 0; x < inflate.right; ++x) {
-                const float d = std::fabs(static_cast<float>(tl.right + x) - centerX) - halfWidth;
+            const int bandWidth = inflate.right + underlap;
+            const int bandLeft = tl.right - underlap;
+            std::vector<uint32_t> row(static_cast<size_t>(bandWidth));
+            for (int x = 0; x < bandWidth; ++x) {
+                const float d = std::fabs(static_cast<float>(bandLeft + x) - centerX) - halfWidth;
                 row[static_cast<size_t>(x)] = colorForDistance(d);
             }
             for (int y = midTop; y < midBottom; ++y) {
-                std::memcpy(pixelPtr(tl.right, y), row.data(), row.size() * sizeof(uint32_t));
+                std::memcpy(pixelPtr(bandLeft, y), row.data(), row.size() * sizeof(uint32_t));
             }
         }
     }
@@ -487,10 +524,13 @@ void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, U
     dpi_ = dpi;
     isDark_ = isDark;
 
-    prevTopBand_ = RECT{0, 0, glowWidth, inflate.top};
-    prevBottomBand_ = RECT{0, tl.bottom, glowWidth, glowHeight};
-    prevLeftBand_ = RECT{0, inflate.top, inflate.left, tl.bottom};
-    prevRightBand_ = RECT{tl.right, inflate.top, glowWidth, tl.bottom};
+    // Each one covers its band's underlapped extent too, not just the
+    // pixels outside the target: those inner pixels are painted like any
+    // other, so the next render has to clear them like any other.
+    prevTopBand_ = RECT{0, 0, glowWidth, inflate.top + underlap};
+    prevBottomBand_ = RECT{0, tl.bottom - underlap, glowWidth, glowHeight};
+    prevLeftBand_ = RECT{0, inflate.top, inflate.left + underlap, tl.bottom};
+    prevRightBand_ = RECT{tl.right - underlap, inflate.top, glowWidth, tl.bottom};
     hasPreviousBands_ = true;
 }
 

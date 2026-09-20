@@ -27,11 +27,11 @@ float RoundedRectDistance(float px, float py, float halfWidth, float halfHeight,
 
 // The base distance -> alpha falloff, in isolation: `peak` at d <= 0,
 // fading smoothly (squared, not linear or pow) to 0 at d >= halo.
-// ActiveWindowHalo's renderer layers two more adjustments on top of this
-// pure piece for the actual painted pixel (see the .cpp): a half-pixel
-// antialiasing blend at the inner (d ~ 0) boundary, and an explicit cutoff
-// below d = -0.5 -- neither belongs in this function since both exist
-// only to smooth a rasterization seam, not describe the glow's shape.
+// ActiveWindowHalo's renderer layers one more adjustment on top of this
+// pure piece for the actual painted pixel (see the .cpp): a cutoff below
+// d = -underlap, where the glow has passed out of sight under its own
+// target. That's a bound on which pixels are worth painting at all, not
+// part of the glow's shape, which is why it lives there and not here.
 int DistanceToAlpha(float d, int halo, int peak);
 
 }  // namespace halo_math

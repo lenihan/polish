@@ -156,6 +156,17 @@ current todo list.
   foreground change or `EVENT_SYSTEM_MINIMIZEEND` arrives first: they
   race, and the delay was silently doing nothing whenever the foreground
   change won and drew the halo before the suppression flag was set.
+- Halo: fixed a faint, uneven line hugging the edge of a haloed window,
+  which made a perfectly straight edge read as slightly wavy (with the
+  halo off, the same edge looked fine). The glow stopped painting exactly
+  at the target's own edge and halved alpha in that last column to
+  antialias the seam -- but a Windows 11 window's frame border is partly
+  transparent, so the dimmed column showed through it and let the
+  wallpaper behind vary the line's brightness down the length of the
+  edge. The glow now underlaps its target by `kUnderlapDip` at full peak
+  alpha (those pixels sit behind the target, so only its own border ever
+  samples them), giving that border a uniform backdrop. Wants a live
+  look before this moves out of "needs verifying".
 
 ## Left to do
 
