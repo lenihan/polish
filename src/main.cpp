@@ -2408,6 +2408,19 @@ void OnAltTabRowMinimizeToggle(HWND hwnd) {
     if (!g_altTabSessionOpen || !IsWindow(hwnd)) {
         return;
     }
+    // Where the window sat in the active list before it moved, so the
+    // selection can stay put rather than follow it out. See below.
+    const bool minimizing = !IsIconic(hwnd);
+    size_t activeIndexBefore = 0;
+    bool hadActiveIndex = false;
+    if (minimizing) {
+        const auto before = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd);
+        if (before != g_altTabCandidates.end()) {
+            activeIndexBefore = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), before));
+            hadActiveIndex = true;
+        }
+    }
+
     if (IsIconic(hwnd)) {
         ShowWindow(hwnd, SW_RESTORE);
     } else {
@@ -2428,7 +2441,21 @@ void OnAltTabRowMinimizeToggle(HWND hwnd) {
 
     const auto activeIt = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd);
     if (activeIt != g_altTabCandidates.end()) {
+        // Restored: it has just joined the active list, and following it
+        // there is the point of having pressed restore.
         g_altTabHighlightIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), activeIt));
+        g_altTabSelectionInMinimized = false;
+    } else if (minimizing && hadActiveIndex) {
+        // Minimized, so it has left the active list. Stay in that list and
+        // land on whichever window took its place -- minimizing is
+        // normally one step of clearing several windows out of the way,
+        // and following this one down into the Minimized section would
+        // interrupt that every time. Same rule the group picker uses when
+        // a run of windows is moved between its two lists.
+        //
+        // Clamped because the window may have been last, in which case
+        // there is no row in its old position to take.
+        g_altTabHighlightIndex = std::min(activeIndexBefore, g_altTabCandidates.size() - 1);
         g_altTabSelectionInMinimized = false;
     } else {
         const auto minimizedIt = std::find(g_altTabMinimized.begin(), g_altTabMinimized.end(), hwnd);
