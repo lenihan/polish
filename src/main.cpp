@@ -899,8 +899,28 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                     if (currentSize.cx == cachedSize.cx && currentSize.cy == cachedSize.cy) {
                         KillTimer(g_messageWindow, kHaloRenderTimerId);
                         UpdateActiveWindowHalo(hwnd);
-                    } else {
+                    } else if (g_inMoveSizeLoop) {
+                        // A resize-border drag, which can fire these faster
+                        // than a full re-render can keep up with -- debounce.
                         SetTimer(g_messageWindow, kHaloRenderTimerId, kHaloRenderTimerDelayMs, nullptr);
+                    } else {
+                        // A size change outside any drag: the shell
+                        // animating a window back up from the taskbar,
+                        // typically. Debouncing here does not merely delay
+                        // the halo, it drops it for the whole animation --
+                        // every frame re-arms the timer (SetTimer restarts
+                        // it), so it cannot fire until the animation ends,
+                        // and the halo snaps into place at the end instead
+                        // of growing with the window. Worse, the one render
+                        // that did happen was from before the shell finished
+                        // raising the window, so the halo was left stranded
+                        // behind it in the Z-order -- which is why a window
+                        // restored from the taskbar showed no halo at all
+                        // the first time and a correct one the second.
+                        // Rendering inline also re-asserts Z placement (see
+                        // PlaceHaloBehindTarget) on every animation frame.
+                        KillTimer(g_messageWindow, kHaloRenderTimerId);
+                        UpdateActiveWindowHalo(hwnd);
                     }
                 }
             }

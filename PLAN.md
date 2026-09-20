@@ -123,17 +123,26 @@ current todo list.
   caret → mouse → window centre (`ResolveInteractionAnchor`). Tray toggle.
   Tuning constants (radius/stroke/duration/alpha) are first guesses to be
   adjusted by eye live.
-- Alt+`: the Alt+Tab switcher scoped to the active app's windows in MRU
-  order (same UI, `AltTabHook::SessionScope`, no second hook -- `g_instance`
-  is a single static). "Same app" is AUMID first then exe path
-  (`AppIdentityKey`/`IsSameApp`, `AppScope`), because every UWP window
-  shares ApplicationFrameHost.exe. Holding Alt, backtick narrows a live
-  session and Tab widens it; the panel heading shows the app name. With
-  nothing to switch to the key is swallowed and nothing shows (plus a
-  once-per-hold Ctrl tap so Alt-up doesn't flash a menu bar). Eligibility
-  is now a side-effect-free tri-state (`Eligibility`), and dimming works
-  off `g_altTabDimTargets` (every window) rather than the scoped candidate
-  list. Rides on the Alt+Tab tray toggle. Not yet verified live.
+- Alt+`: the Alt+Tab switcher over the *tabs of the foreground window*
+  (`SessionKind::Tabs`, no second hook -- `g_instance` is a single
+  static). Tabs are read through UI Automation on a dedicated MTA worker
+  thread (`UiaTabWorker`): ~50ms per read, far too slow for the hook
+  thread and visible as a stall on the UI thread. Which containers hold
+  *document* tabs is per-app data (`TabSwitching.h`) and fails closed --
+  probed live: VS Code, File Explorer, Terminal, Notepad, Edge work;
+  Outlook and OneNote expose only ribbon tabs and are excluded on
+  purpose. Ordered most-recently-used (per-window, keyed on UIA runtime
+  ids) so a double-tap toggles, learned by observing which tab is
+  frontmost at each enumeration rather than by holding a live listener.
+  Verified live.
+- Halo: fixed the halo vanishing behind other windows. It asked for
+  `HWND_TOP`, which Windows silently declines for a background process
+  against the *foreground* window -- returning success while changing
+  nothing, so the halo stalled several Z slots behind its own target and
+  was buried under whatever was on screen. Now pinned directly beneath
+  its target. Also fixed the halo sitting out the grow-from-taskbar
+  restore animation: the re-render debounce was re-armed by every
+  animation frame and so could never fire.
 
 ## Left to do
 
@@ -142,17 +151,17 @@ current todo list.
 - Fix halo: halo goes under explorer windows even when active app is in front (not always)
 - Groups: Active window title should look very different than inactive
 - Need a more unique icon...current icon looks like Google Gemini
-- Alt+`: switch a single app's *tabs* / MDI children, not just its
-  windows (Phase 2 of the Alt+` work). Rule: only *document* surfaces
-  qualify (editor, browser and Explorer tabs; MDI children) -- never
-  ribbon/sidebar/toolbar tabs, so Outlook gets none. Do MDI first (plain
-  `EnumChildWindows` under an `MDIClient`, no UIA). UIA tabs need an
-  allowlist that fails closed, a worker thread (never the hook/UI thread,
-  40-400 ms per call), and `AltTabListRow` re-keyed off HWND. Spikes
-  first: Chromium's lazy accessibility warm-up and what keeping it on
-  costs; Explorer and Notepad (unprobed); whether VS Code's tabs support
-  `SelectionItemPattern`; Edge vertical tabs (1 of 6 exposed). Probed
-  facts: see docs/LIMITATIONS.md #17.
+- Alt+`: widen the tab allowlist beyond the five apps probed so far
+  (`TabSwitching.h`). MDI children are still untouched and want a
+  different mechanism entirely -- plain `EnumChildWindows` under an
+  `MDIClient`, no UIA. Known gaps: Edge exposes only some of its tabs
+  (docs/LIMITATIONS.md #18); Notepad's tab titles come through as
+  accessibility labels ("top. Modified."), which wants stripping without
+  hard-coding English suffixes.
+- Alt+`: clicking a row in the tab panel does nothing -- the panel's row
+  callbacks are keyed on HWND and a tab has none. Keyboard only for now
+  (row action buttons and the Del/-/+ footer are correctly hidden for
+  tab rows). Wants an index-keyed activation callback.
 - Groups: handle a member window closing while backgrounded or tiled.
 - Groups: test and fix multi-monitor / mixed-DPI support (never tried on
   real hardware).

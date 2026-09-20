@@ -123,12 +123,11 @@ gets a full pass in Phase 3; today it records what's already known.
     (#9), its window belongs to the desktop it was created on and isn't
     moved with the foreground window. Not yet confirmed or fixed.
 
-15. **Alt+backtick doesn't see elevated apps' windows.** Telling which app a
-    window belongs to means opening its process, which Windows refuses for
-    an elevated (Run as administrator) app from a normal one. Such a
-    window has an unknown identity and never appears in an Alt+` list --
-    and Alt+` pressed while one is focused does nothing. Same root cause
-    as #1.
+15. **Alt+backtick can't see an elevated app's tabs.** Deciding whether an
+    app is one whose tabs can be read means opening its process to find
+    its executable, which Windows refuses for an elevated (Run as
+    administrator) app from a normal one. Alt+` pressed in such a window
+    does nothing. Same root cause as #1.
 
 16. **Alt+backtick is bound to a key, not a character.** It is the
     `VK_OEM_3` key, which is the backtick key on US and UK layouts but a
@@ -137,10 +136,38 @@ gets a full pass in Phase 3; today it records what's already known.
     log records what character the key types on the active layout at
     startup.
 
-17. **Alt+backtick switches windows, not tabs.** Tabs inside one window
-    (browser, editor, File Explorer) aren't separate windows and are only
-    reachable through UI Automation, which is app-specific: probed on this
-    project's own machine, VS Code exposes its editor tabs cleanly, Edge
-    with vertical tabs exposes one of six, and Outlook's only tabs are
-    ribbon tabs that must never be offered as switch targets. See
-    PLAN.md's tab-switching notes.
+17. **Alt+backtick only works in apps whose tabs can be read.** Tabs are
+    not operating-system objects: they exist only inside an app's own UI,
+    and the only route to them is UI Automation, which every app answers
+    differently. Polish carries a per-app allowlist (see
+    `src/tabs/TabSwitching.h`) and does nothing in an app that isn't on
+    it. Probed live on this project's machine:
+
+    | App | Tabs readable? |
+    | --- | --- |
+    | VS Code | yes, cleanly |
+    | File Explorer | yes |
+    | Windows Terminal | yes |
+    | Notepad | yes, but titles read as the accessibility label ("top. Modified.") |
+    | Edge | partially -- see #18 |
+    | Outlook, OneNote | no -- only *ribbon* tabs (Home/Insert/View) are exposed, never document tabs, so they are deliberately excluded |
+
+    The allowlist fails closed for exactly that last reason: a generic
+    "switch between every tab-like thing" sweep would offer ribbon tabs
+    and VS Code's own sidebar icons as switch targets.
+
+18. **Edge reports only some of its tabs.** With seven tabs open, Edge
+    exposed three to UI Automation; the rest are not present in the tree
+    at all, most likely because they are unloaded or unrealized. Alt+`
+    therefore shows an incomplete list in Edge. It also reports the tabs
+    it does expose twice, through two nested containers, which Polish
+    de-duplicates by runtime id.
+
+19. **Tab order is learned by observation, not watched continuously.**
+    Most-recently-used ordering is built from what Polish sees each time
+    the switcher runs -- which tab was frontmost -- plus its own
+    switches. It holds no live accessibility listener on the foreground
+    app, which would cost far more than it would buy. So switching tabs
+    by hand several times between two Alt+` presses is only observed as
+    the last of those switches, and a window's order is unknown until
+    the switcher has been used in it once.

@@ -41,14 +41,6 @@ int DistanceToAlpha(float d, int halo, int peak) {
 
 namespace {
 
-// Walks the real top-level Z-order (front to back) and reports where the
-// halo sits relative to the window it is supposed to be hugging, naming
-// anything wedged between them.
-//
-// Diagnostic only, and deliberately called just on the paths that assert
-// Z-order (never per-frame during a drag): GetWindow walks every top-level
-// window in the session. Tagged HALOZ so it is easy to grep out of
-// %TEMP%\polish.log and easy to strip once this is settled.
 // Pins the halo directly beneath `target` in the Z-order, which is the
 // only placement that actually holds.
 //
@@ -70,47 +62,6 @@ bool PlaceHaloBehindTarget(HWND halo, HWND target, UINT extraFlags) {
         return SetWindowPos(halo, target, 0, 0, 0, 0, flags) != FALSE;
     }
     return SetWindowPos(halo, HWND_TOP, 0, 0, 0, 0, flags) != FALSE;
-}
-
-void LogHaloZOrder(HWND halo, HWND target, const wchar_t* phase) {
-    int haloIndex = -1;
-    int targetIndex = -1;
-    int index = 0;
-    std::wstring between;
-    for (HWND w = GetTopWindow(nullptr); w != nullptr && index < 400; w = GetWindow(w, GW_HWNDNEXT), ++index) {
-        if (w == halo) {
-            haloIndex = index;
-        }
-        if (w == target) {
-            targetIndex = index;
-        }
-        // Anything visible sitting between the two is the thing that can
-        // cover the glow, which is the whole question here.
-        if (haloIndex < 0 && targetIndex >= 0 && w != target && IsWindowVisible(w)) {
-            wchar_t className[64] = L"";
-            GetClassNameW(w, className, static_cast<int>(std::size(className)));
-            wchar_t title[64] = L"";
-            GetWindowTextW(w, title, static_cast<int>(std::size(title)));
-            RECT r{};
-            GetWindowRect(w, &r);
-            if (r.right > r.left && r.bottom > r.top) {
-                if (!between.empty()) {
-                    between += L" | ";
-                }
-                const LONG_PTR ex = GetWindowLongPtrW(w, GWL_EXSTYLE);
-                between += std::format(L"{}[{}]{}", title, className,
-                                       (ex & WS_EX_TOPMOST) ? L"<TOPMOST>" : L"");
-            }
-        }
-    }
-    const LONG_PTR haloEx = GetWindowLongPtrW(halo, GWL_EXSTYLE);
-    const LONG_PTR targetEx = GetWindowLongPtrW(target, GWL_EXSTYLE);
-    LogDebug(std::format(
-        L"[Polish] HALOZ {}: haloZ={} targetZ={} haloTopmost={} targetTopmost={} haloOwner={} "
-        L"haloEx=0x{:08x}{}",
-        phase, haloIndex, targetIndex, (haloEx & WS_EX_TOPMOST) != 0, (targetEx & WS_EX_TOPMOST) != 0,
-        reinterpret_cast<void*>(GetWindow(halo, GW_OWNER)), static_cast<uint32_t>(haloEx),
-        between.empty() ? std::wstring(L"") : std::format(L" -- between them: {}", between)));
 }
 
 }  // namespace
@@ -319,7 +270,6 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
         if (!visible_ || targetChanged) {
             PlaceHaloBehindTarget(window_, target, SWP_SHOWWINDOW);
             visible_ = true;
-            LogHaloZOrder(window_, target, L"move-path");
         } else {
             SetWindowPos(window_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
@@ -353,7 +303,6 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
     // repeatedly re-shows like this one.
     PlaceHaloBehindTarget(window_, target, SWP_SHOWWINDOW);
     visible_ = true;
-    LogHaloZOrder(window_, target, L"render-path");
 
     polish::LogDebug(std::format(
         L"[Polish] Halo: render target={} rect=({},{})-({},{}) dpi={} dark={} durationMs={}",
