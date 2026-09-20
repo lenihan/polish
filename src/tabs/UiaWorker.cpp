@@ -1,4 +1,4 @@
-#include "tabs/UiaTabWorker.h"
+#include "tabs/UiaWorker.h"
 
 // objbase.h first, and deliberately: UIAutomationCore.h declares its
 // interfaces with the `interface` keyword, which is a macro that only
@@ -61,7 +61,7 @@ std::vector<int> RuntimeIdOf(IUIAutomationElement* element) {
 
 }  // namespace
 
-struct UiaTabWorker::WorkerState {
+struct UiaWorker::WorkerState {
     ComPtr<IUIAutomation> uia;
     // The UIA elements behind the last enumeration's tabs, in the same
     // order as Snapshot::tabs -- this is what makes "activate tab 3" a
@@ -71,11 +71,11 @@ struct UiaTabWorker::WorkerState {
     uint64_t generation = 0;
 };
 
-UiaTabWorker::UiaTabWorker(HWND notifyWindow) : notifyWindow_(notifyWindow), state_(new WorkerState()) {
+UiaWorker::UiaWorker(HWND notifyWindow) : notifyWindow_(notifyWindow), state_(new WorkerState()) {
     thread_ = std::thread([this] { ThreadMain(); });
 }
 
-UiaTabWorker::~UiaTabWorker() {
+UiaWorker::~UiaWorker() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stopping_ = true;
@@ -90,7 +90,7 @@ UiaTabWorker::~UiaTabWorker() {
     delete state_;
 }
 
-uint64_t UiaTabWorker::RequestTabs(HWND window, const TabRule& rule) {
+uint64_t UiaWorker::RequestTabs(HWND window, const TabRule& rule) {
     const uint64_t generation = nextGeneration_.fetch_add(1);
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -109,7 +109,23 @@ uint64_t UiaTabWorker::RequestTabs(HWND window, const TabRule& rule) {
     return generation;
 }
 
-void UiaTabWorker::RequestActivate(uint64_t generation, size_t index) {
+uint64_t UiaWorker::RequestSelectionRect() {
+    const uint64_t generation = nextGeneration_.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Only the newest matters: an older one would answer about a
+        // selection the user has already moved on from.
+        std::erase_if(queue_, [](const Request& r) { return r.kind == Request::Kind::SelectionRect; });
+        Request request;
+        request.kind = Request::Kind::SelectionRect;
+        request.generation = generation;
+        queue_.push_back(std::move(request));
+    }
+    wake_.notify_one();
+    return generation;
+}
+
+void UiaWorker::RequestActivate(uint64_t generation, size_t index) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         Request request;
@@ -121,12 +137,17 @@ void UiaTabWorker::RequestActivate(uint64_t generation, size_t index) {
     wake_.notify_one();
 }
 
-UiaTabWorker::Snapshot UiaTabWorker::LatestSnapshot() const {
+UiaWorker::Snapshot UiaWorker::LatestSnapshot() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return snapshot_;
 }
 
-void UiaTabWorker::ThreadMain() {
+UiaWorker::SelectionSnapshot UiaWorker::LatestSelection() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return selectionSnapshot_;
+}
+
+void UiaWorker::ThreadMain() {
     // MTA: this thread makes only cross-process UIA calls and pumps no
     // message loop of its own, which is exactly what MTA is for. An STA
     // here would require a message pump to marshal calls through and
@@ -156,10 +177,16 @@ void UiaTabWorker::ThreadMain() {
             request = std::move(queue_.front());
             queue_.erase(queue_.begin());
         }
-        if (request.kind == Request::Kind::Enumerate) {
-            Enumerate(request);
-        } else {
-            Activate(request);
+        switch (request.kind) {
+            case Request::Kind::Enumerate:
+                Enumerate(request);
+                break;
+            case Request::Kind::Activate:
+                Activate(request);
+                break;
+            case Request::Kind::SelectionRect:
+                ResolveSelection(request);
+                break;
         }
     }
 
@@ -170,7 +197,7 @@ void UiaTabWorker::ThreadMain() {
     CoUninitialize();
 }
 
-void UiaTabWorker::Enumerate(const Request& request) {
+void UiaWorker::Enumerate(const Request& request) {
     const ULONGLONG startTick = GetTickCount64();
     std::vector<TabTarget> tabs;
     std::vector<ComPtr<IUIAutomationElement>> elements;
@@ -271,7 +298,98 @@ void UiaTabWorker::Enumerate(const Request& request) {
     PostMessageW(notifyWindow_, kTabsReadyMessage, static_cast<WPARAM>(request.generation), 0);
 }
 
-void UiaTabWorker::Activate(const Request& request) {
+void UiaWorker::ResolveSelection(const Request& request) {
+    RECT bounds{};
+    bool found = false;
+
+    IUIAutomation* uia = state_->uia.Get();
+    ComPtr<IUIAutomationElement> focused;
+    if (uia != nullptr && SUCCEEDED(uia->GetFocusedElement(&focused)) && focused) {
+        // The focused element itself often is not the text. Selecting
+        // inside a web page leaves focus on a link or a pane, with the
+        // TextPattern living on the document above it -- confirmed live in
+        // Edge. So walk up a few ancestors before giving up. Plenty of
+        // focused controls are genuinely not text (a button, a list), and
+        // finding nothing is an ordinary miss, not an error.
+        ComPtr<IUIAutomationTextPattern> text;
+        ComPtr<IUIAutomationTreeWalker> walker;
+        uia->get_ControlViewWalker(&walker);
+        ComPtr<IUIAutomationElement> candidate = focused;
+        for (int depth = 0; depth < 5 && candidate; ++depth) {
+            if (SUCCEEDED(candidate->GetCurrentPatternAs(UIA_TextPatternId, IID_PPV_ARGS(&text))) && text) {
+                break;
+            }
+            text.Reset();
+            if (!walker) {
+                break;
+            }
+            ComPtr<IUIAutomationElement> parent;
+            if (FAILED(walker->GetParentElement(candidate.Get(), &parent)) || !parent) {
+                break;
+            }
+            candidate = std::move(parent);
+        }
+        if (text) {
+            ComPtr<IUIAutomationTextRangeArray> ranges;
+            if (SUCCEEDED(text->GetSelection(&ranges)) && ranges) {
+                int rangeCount = 0;
+                ranges->get_Length(&rangeCount);
+                for (int i = 0; i < rangeCount; ++i) {
+                    ComPtr<IUIAutomationTextRange> range;
+                    if (FAILED(ranges->GetElement(i, &range)) || !range) {
+                        continue;
+                    }
+                    SAFEARRAY* rects = nullptr;
+                    if (FAILED(range->GetBoundingRectangles(&rects)) || rects == nullptr) {
+                        continue;
+                    }
+                    // Flat array of doubles, four per rectangle: left, top,
+                    // width, height. One rectangle per line of a selection
+                    // that wraps, so they are unioned rather than taken
+                    // individually.
+                    double* values = nullptr;
+                    LONG lower = 0;
+                    LONG upper = -1;
+                    if (SUCCEEDED(SafeArrayAccessData(rects, reinterpret_cast<void**>(&values))) &&
+                        SUCCEEDED(SafeArrayGetLBound(rects, 1, &lower)) &&
+                        SUCCEEDED(SafeArrayGetUBound(rects, 1, &upper))) {
+                        const LONG count = upper - lower + 1;
+                        for (LONG r = 0; r + 3 < count; r += 4) {
+                            const LONG left = static_cast<LONG>(values[r]);
+                            const LONG top = static_cast<LONG>(values[r + 1]);
+                            const LONG right = left + static_cast<LONG>(values[r + 2]);
+                            const LONG bottom = top + static_cast<LONG>(values[r + 3]);
+                            if (right <= left || bottom <= top) {
+                                continue;  // a collapsed caret-only range, not a selection
+                            }
+                            if (!found) {
+                                bounds = RECT{left, top, right, bottom};
+                                found = true;
+                            } else {
+                                bounds.left = std::min(bounds.left, left);
+                                bounds.top = std::min(bounds.top, top);
+                                bounds.right = std::max(bounds.right, right);
+                                bounds.bottom = std::max(bounds.bottom, bottom);
+                            }
+                        }
+                        SafeArrayUnaccessData(rects);
+                    }
+                    SafeArrayDestroy(rects);
+                }
+            }
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        selectionSnapshot_.bounds = bounds;
+        selectionSnapshot_.found = found;
+        selectionSnapshot_.generation = request.generation;
+    }
+    PostMessageW(notifyWindow_, kSelectionReadyMessage, static_cast<WPARAM>(request.generation), 0);
+}
+
+void UiaWorker::Activate(const Request& request) {
     if (request.generation != state_->generation) {
         // The cached elements have moved on since the list the user was
         // looking at was built; activating index N against a different

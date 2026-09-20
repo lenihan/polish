@@ -50,7 +50,7 @@ add_library(polish_core STATIC
     src/hook/GroupTabThumbnail.cpp
     src/settings/Settings.cpp
     src/tabs/TabSwitching.cpp
-    src/tabs/UiaTabWorker.cpp
+    src/tabs/UiaWorker.cpp
     src/util/AnchorPoint.cpp
     src/util/AppIdentity.cpp
     src/util/SwitcherCycle.cpp

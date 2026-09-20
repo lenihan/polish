@@ -21,8 +21,17 @@ namespace polish {
 // it. LPARAM is unused.
 inline constexpr UINT kTabsReadyMessage = WM_APP + 0x51;
 
+// Posted when a selection-rect request finishes (see RequestSelectionRect).
+// WPARAM is that request's generation; LPARAM is unused. Sent whether or
+// not a selection was found, so a caller waiting on one is never left
+// hanging by an app that exposes no text at all.
+inline constexpr UINT kSelectionReadyMessage = WM_APP + 0x52;
+
 // Owns the process's single UI Automation client, and the thread every
-// UIA call runs on.
+// UIA call runs on. Two jobs ride on it: reading a window's document tabs
+// for Alt+` (see TabSwitching.h), and finding the bounding box of the
+// current text selection so the copy/paste bullseye can aim at what was
+// actually selected.
 //
 // Why a thread of its own, rather than calling UIA where it is needed:
 //
@@ -41,13 +50,13 @@ inline constexpr UINT kTabsReadyMessage = WM_APP + 0x51;
 // it last enumerated. Those handles never cross a thread boundary -- the
 // rest of the app refers to a tab only by its index in the last snapshot,
 // which is what keeps this class's public surface free of COM entirely.
-class UiaTabWorker {
+class UiaWorker {
 public:
-    explicit UiaTabWorker(HWND notifyWindow);
-    ~UiaTabWorker();
+    explicit UiaWorker(HWND notifyWindow);
+    ~UiaWorker();
 
-    UiaTabWorker(const UiaTabWorker&) = delete;
-    UiaTabWorker& operator=(const UiaTabWorker&) = delete;
+    UiaWorker(const UiaWorker&) = delete;
+    UiaWorker& operator=(const UiaWorker&) = delete;
 
     // Queue an enumeration of `window`'s document tabs under `rule`.
     // Returns immediately with the generation stamped on this request;
@@ -55,6 +64,16 @@ public:
     // and is readable via Snapshot(). A request supersedes any still
     // queued, so a burst of foreground changes costs one enumeration.
     uint64_t RequestTabs(HWND window, const TabRule& rule);
+
+    // Queue "where is the current text selection?", resolved against
+    // whatever has keyboard focus at the moment the worker gets to it.
+    // Returns the generation stamped on this request; the answer arrives
+    // as kSelectionReadyMessage and is readable via LatestSelection().
+    //
+    // Measured at 4-8ms against VS Code, far quicker than reading tabs,
+    // but it is still a cross-process call with no bounded worst case --
+    // which is why it belongs here rather than inline on the UI thread.
+    uint64_t RequestSelectionRect();
 
     // Queue "make the tab at `index` in generation `generation` the
     // frontmost one". Ignored by the worker if its cached elements have
@@ -76,9 +95,20 @@ public:
     // it is safe to call from the UI thread on every cycle.
     Snapshot LatestSnapshot() const;
 
+    struct SelectionSnapshot {
+        // Union of every bounding rectangle the selection reported, in
+        // screen coordinates. A selection spanning several lines gives one
+        // rect per line; the union is what "the middle of what I selected"
+        // means for a caller aiming at it.
+        RECT bounds{};
+        bool found = false;  // false when nothing is selected, or the focused control exposes no text
+        uint64_t generation = 0;
+    };
+    SelectionSnapshot LatestSelection() const;
+
 private:
     struct Request {
-        enum class Kind { Enumerate, Activate } kind = Kind::Enumerate;
+        enum class Kind { Enumerate, Activate, SelectionRect } kind = Kind::Enumerate;
         HWND window = nullptr;
         TabRule rule;
         uint64_t generation = 0;
@@ -89,6 +119,7 @@ private:
     // Both run on the worker thread only, with COM live.
     void Enumerate(const Request& request);
     void Activate(const Request& request);
+    void ResolveSelection(const Request& request);
 
     HWND notifyWindow_;
     std::thread thread_;
@@ -97,7 +128,8 @@ private:
     std::vector<Request> queue_;
     bool stopping_ = false;
     std::atomic<uint64_t> nextGeneration_{1};
-    Snapshot snapshot_;  // guarded by mutex_
+    Snapshot snapshot_;                    // guarded by mutex_
+    SelectionSnapshot selectionSnapshot_;  // guarded by mutex_
 
     // Worker-thread-only state. Declared here rather than as locals so the
     // enumerated elements survive between an Enumerate and the Activate

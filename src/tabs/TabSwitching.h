@@ -56,7 +56,7 @@ std::optional<TabRule> FindTabRule(const std::wstring& executablePath);
 
 // One switchable tab, as shown in the switcher panel. Deliberately holds
 // no UI Automation handle: those live only on the worker thread that
-// created them (see UiaTabWorker), and the rest of the app refers to a
+// created them (see UiaWorker), and the rest of the app refers to a
 // tab by its index in the enumerated list.
 struct TabTarget {
     std::wstring title;

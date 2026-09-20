@@ -26,7 +26,7 @@
 #include "hook/GroupTabThumbnail.h"
 #include "settings/Settings.h"
 #include "tabs/TabSwitching.h"
-#include "tabs/UiaTabWorker.h"
+#include "tabs/UiaWorker.h"
 #include "tray/TrayIcon.h"
 #include "util/AnchorPoint.h"
 #include "util/AppIdentity.h"
@@ -94,6 +94,14 @@ constexpr UINT kHaloRenderTimerDelayMs = 8;
 // reports it has finished. ~60 Hz; the animation's own progress is
 // wall-clock-based (see BullseyeOverlay), so a late tick just skips a frame.
 constexpr UINT_PTR kBullseyeFrameTimerId = 5;
+
+// How long to wait for UiaWorker to report the selection rect before
+// giving up and aiming the bullseye with the cheap caret/cursor/window
+// chain instead. The call measured 4-12ms across every app probed, so this
+// is pure insurance against one that never answers -- short enough that a
+// hung app delays the animation imperceptibly rather than losing it.
+constexpr UINT_PTR kBullseyeAnchorTimerId = 7;
+constexpr UINT kBullseyeAnchorTimeoutMs = 90;
 
 // Holds the halo back until Windows has finished animating a window back
 // up from the taskbar.
@@ -219,7 +227,11 @@ std::vector<HWND> g_altTabDimTargets;
 // section and no Z-order promotion -- just a list of tab titles and a
 // highlight. It therefore gets its own state rather than being squeezed
 // into g_altTabCandidates, which holds HWNDs; a tab has no HWND at all.
-std::unique_ptr<polish::UiaTabWorker> g_tabWorker;
+std::unique_ptr<polish::UiaWorker> g_uiaWorker;
+// The bullseye waiting on a selection rect, if one is in flight -- see
+// PlayBullseye. Unset whenever no animation is pending an anchor.
+std::optional<polish::BullseyePhase> g_pendingBullseyePhase;
+uint64_t g_pendingBullseyeGeneration = 0;
 // The window whose tabs this session is over, and the rule its tabs are
 // read with. Frozen when the session opens: re-deriving either mid-
 // session would let the session drift onto another window.
@@ -249,7 +261,7 @@ size_t g_tabHighlightIndex = 0;
 std::map<HWND, std::vector<std::vector<int>>> g_tabMru;
 // The worker generation g_tabs came from, passed back on commit so a
 // snapshot that has since been superseded can never activate the wrong
-// tab. See UiaTabWorker::RequestActivate.
+// tab. See UiaWorker::RequestActivate.
 uint64_t g_tabGeneration = 0;
 // True from the moment Alt+` is accepted until the session ends. That
 // deliberately includes the gap between accepting the keystroke and the
@@ -702,6 +714,48 @@ void UpdateActiveWindowHalo(HWND hwnd) {
 // just happened. The single funnel for both triggers (clipboard update,
 // paste chord), modeled on UpdateActiveWindowHalo -- always safe to call
 // speculatively; every suppression rule lives here.
+// Plays the animation once an anchor has been settled on.
+void StartBullseyeAt(polish::BullseyePhase phase, POINT point, const wchar_t* sourceName) {
+    if (!g_bullseye) {
+        return;
+    }
+    g_bullseye->Start(phase, point);
+    if (!g_bullseye->IsActive()) {
+        return;
+    }
+    // Re-arming an already-running timer id just restarts its interval.
+    SetTimer(g_messageWindow, kBullseyeFrameTimerId, kBullseyeFrameIntervalMs, nullptr);
+    polish::LogDebug(std::format(L"[Polish] Bullseye: {} anchor={} at=({},{})",
+                                  phase == polish::BullseyePhase::Copy ? L"copy" : L"paste", sourceName,
+                                  point.x, point.y));
+}
+
+// Everything the cheap, synchronous chain can work out, used both as the
+// fallback when there is no selection to aim at and if the worker does not
+// answer in time.
+void StartBullseyeFromFallbackAnchor(polish::BullseyePhase phase) {
+    const polish::Anchor anchor = polish::ResolveInteractionAnchor();
+    if (anchor.source == polish::AnchorSource::None) {
+        return;
+    }
+    const wchar_t* sourceName = anchor.source == polish::AnchorSource::Caret    ? L"caret"
+                                 : anchor.source == polish::AnchorSource::Cursor ? L"cursor"
+                                                                                  : L"window";
+    StartBullseyeAt(phase, anchor.point, sourceName);
+}
+
+// Starts a bullseye animation at the best guess of where the copy/paste
+// just happened. The single funnel for both triggers (clipboard update,
+// paste chord), modeled on UpdateActiveWindowHalo -- always safe to call
+// speculatively; every suppression rule lives here.
+//
+// The best answer by far is the middle of what is actually selected, but
+// that only comes from UI Automation, which must not run on this thread
+// (see UiaWorker). So the request goes to the worker and the animation
+// starts when it answers -- measured at 4-12ms, well under a frame, and
+// invisible in practice. kBullseyeAnchorTimeoutMs covers an app that never
+// answers, falling back to the caret/cursor/window chain rather than
+// dropping the animation.
 void PlayBullseye(polish::BullseyePhase phase) {
     if (!g_bullseye || !g_settings.bullseyeEnabled) {
         return;
@@ -710,23 +764,35 @@ void PlayBullseye(polish::BullseyePhase phase) {
     if (g_altTabSessionOpen || IsPresentationOrFullScreenGame()) {
         return;
     }
-    const polish::Anchor anchor = polish::ResolveInteractionAnchor();
-    if (anchor.source == polish::AnchorSource::None) {
+    if (g_uiaWorker == nullptr) {
+        StartBullseyeFromFallbackAnchor(phase);
         return;
     }
-    g_bullseye->Start(phase, anchor.point);
-    if (!g_bullseye->IsActive()) {
-        return;
-    }
-    // Re-arming an already-running timer id just restarts its interval.
-    SetTimer(g_messageWindow, kBullseyeFrameTimerId, kBullseyeFrameIntervalMs, nullptr);
+    g_pendingBullseyePhase = phase;
+    g_pendingBullseyeGeneration = g_uiaWorker->RequestSelectionRect();
+    SetTimer(g_messageWindow, kBullseyeAnchorTimerId, kBullseyeAnchorTimeoutMs, nullptr);
+}
 
-    const wchar_t* sourceName = anchor.source == polish::AnchorSource::Caret    ? L"caret"
-                                 : anchor.source == polish::AnchorSource::Cursor ? L"cursor"
-                                                                                  : L"window";
-    polish::LogDebug(std::format(L"[Polish] Bullseye: {} anchor={} at=({},{})",
-                                  phase == polish::BullseyePhase::Copy ? L"copy" : L"paste", sourceName,
-                                  anchor.point.x, anchor.point.y));
+// The worker has answered (or been given up on): aim at the selection if
+// it found one, otherwise fall back.
+void ResolveBullseyeAnchor(bool timedOut) {
+    KillTimer(g_messageWindow, kBullseyeAnchorTimerId);
+    if (!g_pendingBullseyePhase.has_value()) {
+        return;
+    }
+    const polish::BullseyePhase phase = *g_pendingBullseyePhase;
+    g_pendingBullseyePhase.reset();
+
+    if (!timedOut && g_uiaWorker != nullptr) {
+        const polish::UiaWorker::SelectionSnapshot selection = g_uiaWorker->LatestSelection();
+        if (selection.found && selection.generation == g_pendingBullseyeGeneration) {
+            const POINT centre{(selection.bounds.left + selection.bounds.right) / 2,
+                               (selection.bounds.top + selection.bounds.bottom) / 2};
+            StartBullseyeAt(phase, centre, L"selection");
+            return;
+        }
+    }
+    StartBullseyeFromFallbackAnchor(phase);
 }
 
 // True if `descendant` has `ancestor` somewhere up its parent-process chain.
@@ -1472,7 +1538,7 @@ HWND CurrentAltTabHighlightedWindow() {
 // particular the Tabs answer here is only the cheap half: whether the
 // foreground app is one whose tabs can be read at all (an allowlist
 // lookup plus one OpenProcess). Actually reading the tabs costs ~50ms of
-// cross-process UI Automation and happens on UiaTabWorker's thread, long
+// cross-process UI Automation and happens on UiaWorker's thread, long
 // after this returns -- so Ready here promises a session will be
 // attempted, not that it will find enough tabs to paint.
 polish::AltTabHook::Eligibility AltTabEligibility(polish::AltTabHook::SessionKind kind) {
@@ -1493,7 +1559,7 @@ polish::AltTabHook::Eligibility AltTabEligibility(polish::AltTabHook::SessionKin
     // session only promotes Z-order, it never changes focus, so the
     // foreground window is still the one the user is actually working in.
     const HWND window = GetForegroundWindow();
-    if (window == nullptr || g_tabWorker == nullptr) {
+    if (window == nullptr || g_uiaWorker == nullptr) {
         return Eligibility::NothingToSwitchTo;
     }
     const std::optional<std::wstring> executable = polish::GetWindowProcessImagePath(window);
@@ -1511,7 +1577,7 @@ polish::AltTabHook::Eligibility AltTabEligibility(polish::AltTabHook::SessionKin
     // opening a session would only paint nothing and close again. An
     // unresolved or different-window snapshot is not evidence either way,
     // so those go ahead and let the worker answer properly.
-    const polish::UiaTabWorker::Snapshot snapshot = g_tabWorker->LatestSnapshot();
+    const polish::UiaWorker::Snapshot snapshot = g_uiaWorker->LatestSnapshot();
     if (snapshot.resolved && snapshot.window == window && snapshot.tabs.size() < polish::kMinimumTabs) {
         return Eligibility::NothingToSwitchTo;
     }
@@ -1833,8 +1899,8 @@ void CommitTabSession() {
     const size_t workerIndex = g_tabOrder[g_tabHighlightIndex];
     const polish::TabTarget& tab = g_tabs[workerIndex];
     PromoteTabInMru(g_tabSessionWindow, tab.runtimeId);
-    if (g_tabWorker) {
-        g_tabWorker->RequestActivate(g_tabGeneration, workerIndex);
+    if (g_uiaWorker) {
+        g_uiaWorker->RequestActivate(g_tabGeneration, workerIndex);
     }
     polish::LogDebug(std::format(L"[Polish] Tabs: commit -> \"{}\" (worker index {})", tab.title, workerIndex));
     EndTabSession();
@@ -1842,13 +1908,13 @@ void CommitTabSession() {
 
 // A tab list has come back from the worker (kTabsReadyMessage).
 void OnTabsReady(uint64_t generation) {
-    if (!g_tabSessionOpen || g_tabWorker == nullptr) {
+    if (!g_tabSessionOpen || g_uiaWorker == nullptr) {
         return;  // session already over -- a prewarm, or an Escape
     }
     if (generation != g_tabRequestedGeneration) {
         return;  // superseded by a newer request
     }
-    const polish::UiaTabWorker::Snapshot snapshot = g_tabWorker->LatestSnapshot();
+    const polish::UiaWorker::Snapshot snapshot = g_uiaWorker->LatestSnapshot();
     if (snapshot.window != g_tabSessionWindow) {
         return;
     }
@@ -1889,7 +1955,7 @@ void OnTabsReady(uint64_t generation) {
 // Alt+` pressed -- open a tab session, or advance one already open.
 void OnTabCycle(bool backward) {
     if (!g_tabSessionOpen) {
-        if (g_pendingTabWindow == nullptr || g_tabWorker == nullptr) {
+        if (g_pendingTabWindow == nullptr || g_uiaWorker == nullptr) {
             return;
         }
         g_tabSessionWindow = g_pendingTabWindow;
@@ -1905,7 +1971,7 @@ void OnTabCycle(bool backward) {
         }
         // Nothing is shown yet: reading the tabs takes ~50ms on the
         // worker thread, and OnTabsReady paints when they arrive.
-        g_tabRequestedGeneration = g_tabWorker->RequestTabs(g_tabSessionWindow, g_tabSessionRule);
+        g_tabRequestedGeneration = g_uiaWorker->RequestTabs(g_tabSessionWindow, g_tabSessionRule);
         polish::LogDebug(std::format(L"[Polish] Tabs: session starting for hwnd={} ({}), awaiting generation {}",
                                      reinterpret_cast<void*>(g_tabSessionWindow), g_tabSessionRule.displayName,
                                      g_tabRequestedGeneration));
@@ -3367,6 +3433,8 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 KillTimer(hwnd, kHaloRestoreTimerId);
                 g_haloMinimizeSuppressed = false;
                 UpdateActiveWindowHalo(GetForegroundWindow());
+            } else if (wParam == kBullseyeAnchorTimerId) {
+                ResolveBullseyeAnchor(/*timedOut=*/true);
             } else if (wParam == kBullseyeFrameTimerId) {
                 if (!g_bullseye || !g_bullseye->AdvanceFrame()) {
                     KillTimer(hwnd, kBullseyeFrameTimerId);
@@ -3392,6 +3460,12 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 
         case polish::kTabsReadyMessage:
             OnTabsReady(static_cast<uint64_t>(wParam));
+            return 0;
+
+        case polish::kSelectionReadyMessage:
+            if (static_cast<uint64_t>(wParam) == g_pendingBullseyeGeneration) {
+                ResolveBullseyeAnchor(/*timedOut=*/false);
+            }
             return 0;
 
         case WM_COMMAND:
@@ -3622,7 +3696,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // Started before the hook: AltTabEligibility consults it synchronously
     // on the hook thread, and a null worker there just means Alt+` reports
     // nothing to switch to.
-    g_tabWorker = std::make_unique<polish::UiaTabWorker>(g_messageWindow);
+    g_uiaWorker = std::make_unique<polish::UiaWorker>(g_messageWindow);
 
     g_altTabHook = std::make_unique<polish::AltTabHook>(g_messageWindow, AltTabEligibility,
                                                          OnAltTabCycle, OnAltTabCommit, OnAltTabCancel);
