@@ -16,19 +16,26 @@ namespace polish {
 struct TabRule {
     // Executable file name only, no directory, matched case-insensitively.
     std::wstring executableName;
-    // ClassName of the UIA Tab container that holds *document* tabs.
+    // ClassNames of the UIA Tab containers that hold *document* tabs. Tab
+    // items are then collected from the whole subtree under each match,
+    // not just its direct children: in every XAML app probed the tabs sit
+    // under an intermediate ListView, and in Edge deeper still.
     //
     // This is the discriminator that keeps non-document tabs out, and it
     // is why the rule is per-app data rather than one generic sweep. VS
-    // Code exposes three Tab controls, all with TabItem children and all
-    // indistinguishable by control type alone: the editor strip
+    // Code exposes three Tab controls, all with TabItem descendants and
+    // all indistinguishable by control type alone: the editor strip
     // ("tabs-container"), the activity bar and the bottom panel (both
     // "actions-container"). Only the first holds anything a user would
-    // call a tab; the other two are Explorer/Search/Source Control icons
-    // and Problems/Output/Terminal. Matching on the container's class
-    // rather than its Name also survives localization -- the other two
-    // are both named "Active View Switcher" in English only.
-    std::wstring containerClassName;
+    // call a tab. Matching on the container's class rather than its Name
+    // also survives localization -- the other two are both named "Active
+    // View Switcher" in English only.
+    //
+    // More than one class per app because Edge nests two tab containers
+    // inside each other, each reporting the same tabs; matching both and
+    // de-duplicating by runtime id is more robust than guessing which one
+    // survives a browser update.
+    std::vector<std::wstring> containerClassNames;
     // Shown as the switcher panel's heading while this app's tabs are up.
     std::wstring displayName;
 };
@@ -37,8 +44,9 @@ struct TabRule {
 //
 // Deliberately fails closed: an app that is not listed gets no tab
 // switching at all. The alternative -- offering every TabItem in the
-// tree -- would hand back ribbon tabs in Outlook and sidebar icons in VS
-// Code as if they were documents, which is worse than doing nothing.
+// tree -- would hand back ribbon tabs in Outlook and OneNote and sidebar
+// icons in VS Code as if they were documents, which is worse than doing
+// nothing. All three were confirmed live to expose exactly that.
 const std::vector<TabRule>& TabRules();
 
 // The rule for the app at `executablePath` (a full path; only its file
@@ -53,6 +61,12 @@ std::optional<TabRule> FindTabRule(const std::wstring& executablePath);
 struct TabTarget {
     std::wstring title;
     bool selected = false;  // the tab that is currently frontmost
+    // The tab's UIA runtime id -- plain data, safe to carry across
+    // threads, and stable for as long as the tab exists. Used to identify
+    // the same tab between one enumeration and the next, which is what
+    // most-recently-used ordering is built on (see main.cpp's tab MRU),
+    // and to de-duplicate tabs reported by two nested containers.
+    std::vector<int> runtimeId;
 };
 
 // Fewest tabs worth opening a session for. One tab is not a session --

@@ -36,6 +36,29 @@ private:
     BSTR value_ = nullptr;
 };
 
+// A UIA element's runtime id as plain ints. Empty on failure, which
+// callers treat as "cannot be identified across enumerations" rather than
+// as an error -- it only costs that tab its place in the MRU order.
+std::vector<int> RuntimeIdOf(IUIAutomationElement* element) {
+    SAFEARRAY* array = nullptr;
+    if (FAILED(element->GetRuntimeId(&array)) || array == nullptr) {
+        return {};
+    }
+    std::vector<int> id;
+    LONG lower = 0;
+    LONG upper = -1;
+    if (SUCCEEDED(SafeArrayGetLBound(array, 1, &lower)) && SUCCEEDED(SafeArrayGetUBound(array, 1, &upper))) {
+        for (LONG i = lower; i <= upper; ++i) {
+            int value = 0;
+            if (SUCCEEDED(SafeArrayGetElement(array, &i, &value))) {
+                id.push_back(value);
+            }
+        }
+    }
+    SafeArrayDestroy(array);
+    return id;
+}
+
 }  // namespace
 
 struct UiaTabWorker::WorkerState {
@@ -184,14 +207,17 @@ void UiaTabWorker::Enumerate(const Request& request) {
                 if (FAILED(container->get_CurrentClassName(className.Receive()))) {
                     continue;
                 }
-                // The allowlist's whole job -- see TabRule::containerClassName.
-                if (className.ToString() != request.rule.containerClassName) {
+                // The allowlist's whole job -- see TabRule::containerClassNames.
+                const std::wstring containerClass = className.ToString();
+                if (std::find(request.rule.containerClassNames.begin(), request.rule.containerClassNames.end(),
+                              containerClass) == request.rule.containerClassNames.end()) {
                     continue;
                 }
-                // Direct children only. A descendants search here would
-                // reach back down into whatever a tab's own content hosts.
+                // The whole subtree, not just direct children: every XAML
+                // app probed (Explorer, Terminal, Notepad) nests its tabs
+                // under an intermediate ListView, and Edge deeper still.
                 ComPtr<IUIAutomationElementArray> items;
-                if (FAILED(container->FindAll(TreeScope_Children, isTabItem.Get(), &items)) || !items) {
+                if (FAILED(container->FindAll(TreeScope_Descendants, isTabItem.Get(), &items)) || !items) {
                     continue;
                 }
                 int itemCount = 0;
@@ -201,9 +227,20 @@ void UiaTabWorker::Enumerate(const Request& request) {
                     if (FAILED(items->GetElement(j, &item)) || !item) {
                         continue;
                     }
+                    TabTarget target;
+                    target.runtimeId = RuntimeIdOf(item.Get());
+                    // Edge reports the same tabs through two nested
+                    // containers, so the same element can arrive twice.
+                    // A tab with no runtime id cannot be compared, and is
+                    // let through rather than dropped.
+                    if (!target.runtimeId.empty() &&
+                        std::any_of(tabs.begin(), tabs.end(), [&target](const TabTarget& seen) {
+                            return seen.runtimeId == target.runtimeId;
+                        })) {
+                        continue;
+                    }
                     ScopedBstr name;
                     item->get_CurrentName(name.Receive());
-                    TabTarget target;
                     target.title = name.ToString();
                     ComPtr<IUIAutomationSelectionItemPattern> selection;
                     if (SUCCEEDED(item->GetCurrentPatternAs(UIA_SelectionItemPatternId, IID_PPV_ARGS(&selection))) &&

@@ -26,14 +26,23 @@ const std::vector<TabRule>& TabRules() {
     // Probed live on this project's own machine; see docs/LIMITATIONS.md
     // #17 for what each app was found to expose.
     //
+    // Explorer, Terminal and Notepad are all XAML apps and share one
+    // container class -- the tabs are ListViewItems nested under it, not
+    // direct children, which is why tab items are collected from the
+    // whole subtree.
+    //
     // Not here, and why:
-    //   - File Explorer exposes no TabItem at all despite having visible
-    //     tabs, so there is nothing to enumerate.
-    //   - Edge with vertical tabs exposed only one of six open tabs.
-    //   - Outlook's only tabs are ribbon tabs, which must never be
-    //     offered as switch targets.
+    //   - Outlook and OneNote expose only ribbon tabs (Home/Insert/View),
+    //     which must never be offered as switch targets.
     static const std::vector<TabRule> rules{
-        TabRule{L"Code.exe", L"tabs-container", L"Visual Studio Code"},
+        TabRule{L"Code.exe", {L"tabs-container"}, L"Visual Studio Code"},
+        TabRule{L"explorer.exe", {L"Microsoft.UI.Xaml.Controls.TabView"}, L"File Explorer"},
+        TabRule{L"WindowsTerminal.exe", {L"Microsoft.UI.Xaml.Controls.TabView"}, L"Terminal"},
+        TabRule{L"Notepad.exe", {L"Microsoft.UI.Xaml.Controls.TabView"}, L"Notepad"},
+        // Both classes deliberately: Edge nests one inside the other and
+        // reports the same tabs through each. See TabRule's comment, and
+        // docs/LIMITATIONS.md #18 for the tabs it does not report at all.
+        TabRule{L"msedge.exe", {L"EdgeTabContainerImpl", L"EdgeVerticalTabContainerView"}, L"Microsoft Edge"},
     };
     return rules;
 }

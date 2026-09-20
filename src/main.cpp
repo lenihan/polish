@@ -177,8 +177,28 @@ std::unique_ptr<polish::UiaTabWorker> g_tabWorker;
 // session would let the session drift onto another window.
 HWND g_tabSessionWindow = nullptr;
 polish::TabRule g_tabSessionRule;
+// As the worker returned them, in the app's own visual order.
 std::vector<polish::TabTarget> g_tabs;
+// Display order: indices into g_tabs, most-recently-used first. Kept
+// apart from g_tabs rather than reordering it, because the worker
+// activates a tab by its index in the list *it* built -- reordering that
+// list here would silently switch to the wrong tab on commit.
+std::vector<size_t> g_tabOrder;
+// Index into g_tabOrder, not g_tabs.
 size_t g_tabHighlightIndex = 0;
+// Per-window most-recently-used tab order, as UIA runtime ids (see
+// TabTarget::runtimeId). This is what makes pressing Alt+` twice toggle
+// between the last two tabs, the way Alt+Tab does for windows.
+//
+// Built entirely from observation at enumeration time -- every session
+// sees which tab is currently frontmost and promotes it -- plus this
+// app's own commits. There is no UIA event subscription behind it: that
+// would mean holding an accessibility listener on the foreground app for
+// the whole session, which costs far more than it would buy. The gap
+// that leaves is small and self-correcting: switching tabs by hand
+// several times between two Alt+` presses is only observed as the last
+// of those switches.
+std::map<HWND, std::vector<std::vector<int>>> g_tabMru;
 // The worker generation g_tabs came from, passed back on commit so a
 // snapshot that has since been superseded can never activate the wrong
 // tab. See UiaTabWorker::RequestActivate.
@@ -1595,14 +1615,53 @@ void EndAltTabSession() {
 // dropped rather than painted over the newer session.
 uint64_t g_tabRequestedGeneration = 0;
 
+// Moves `runtimeId` to the front of its window's MRU list. A tab with no
+// runtime id (UIA refused to give one) is skipped rather than stored: it
+// could not be matched against a later enumeration anyway.
+void PromoteTabInMru(HWND window, const std::vector<int>& runtimeId) {
+    if (runtimeId.empty()) {
+        return;
+    }
+    std::vector<std::vector<int>>& mru = g_tabMru[window];
+    std::erase(mru, runtimeId);
+    mru.insert(mru.begin(), runtimeId);
+}
+
+// Rebuilds g_tabOrder: the tabs this window has been seen using, most
+// recent first, then everything else in the app's own visual order. Also
+// drops MRU entries for tabs that have since closed, which is the only
+// thing that keeps the list from growing for the life of the process.
+void RebuildTabOrder() {
+    g_tabOrder.clear();
+    g_tabOrder.reserve(g_tabs.size());
+    std::vector<std::vector<int>>& mru = g_tabMru[g_tabSessionWindow];
+    std::erase_if(mru, [](const std::vector<int>& id) {
+        return std::none_of(g_tabs.begin(), g_tabs.end(),
+                            [&id](const polish::TabTarget& tab) { return tab.runtimeId == id; });
+    });
+    for (const std::vector<int>& id : mru) {
+        for (size_t i = 0; i < g_tabs.size(); ++i) {
+            if (g_tabs[i].runtimeId == id) {
+                g_tabOrder.push_back(i);
+                break;
+            }
+        }
+    }
+    for (size_t i = 0; i < g_tabs.size(); ++i) {
+        if (std::find(g_tabOrder.begin(), g_tabOrder.end(), i) == g_tabOrder.end()) {
+            g_tabOrder.push_back(i);
+        }
+    }
+}
+
 void ShowTabPanel() {
     std::vector<polish::AltTabListRow> rows;
-    rows.reserve(g_tabs.size());
-    for (const polish::TabTarget& tab : g_tabs) {
+    rows.reserve(g_tabOrder.size());
+    for (size_t index : g_tabOrder) {
         // No HWND and no icon: a tab is not a window, and the per-row
         // action buttons are switched off below precisely because
         // minimize/maximize/close are meaningless for one.
-        rows.push_back(polish::AltTabListRow{nullptr, tab.title, nullptr, /*minimized=*/false});
+        rows.push_back(polish::AltTabListRow{nullptr, g_tabs[index].title, nullptr, /*minimized=*/false});
     }
     const HMONITOR monitor = MonitorFromWindow(g_tabSessionWindow, MONITOR_DEFAULTTONEAREST);
     for (auto& panel : g_altTabPanels) {
@@ -1637,6 +1696,7 @@ void EndTabSession() {
     g_tabsPainted = false;
     g_tabCommitPending = false;
     g_tabs.clear();
+    g_tabOrder.clear();
     g_tabHighlightIndex = 0;
     g_tabSessionWindow = nullptr;
     UpdateActiveWindowHalo(GetForegroundWindow());
@@ -1655,12 +1715,17 @@ void CommitTabSession() {
         g_tabCommitPending = true;
         return;
     }
-    const size_t index = g_tabHighlightIndex;
-    const std::wstring title = index < g_tabs.size() ? g_tabs[index].title : std::wstring();
-    if (g_tabWorker) {
-        g_tabWorker->RequestActivate(g_tabGeneration, index);
+    if (g_tabHighlightIndex >= g_tabOrder.size()) {
+        EndTabSession();
+        return;
     }
-    polish::LogDebug(std::format(L"[Polish] Tabs: commit -> index {} \"{}\"", index, title));
+    const size_t workerIndex = g_tabOrder[g_tabHighlightIndex];
+    const polish::TabTarget& tab = g_tabs[workerIndex];
+    PromoteTabInMru(g_tabSessionWindow, tab.runtimeId);
+    if (g_tabWorker) {
+        g_tabWorker->RequestActivate(g_tabGeneration, workerIndex);
+    }
+    polish::LogDebug(std::format(L"[Polish] Tabs: commit -> \"{}\" (worker index {})", tab.title, workerIndex));
     EndTabSession();
 }
 
@@ -1685,19 +1750,22 @@ void OnTabsReady(uint64_t generation) {
     g_tabs = snapshot.tabs;
     g_tabGeneration = snapshot.generation;
 
-    // Start from whichever tab is currently frontmost and step one on, so
-    // a single Alt+` tap swaps to the neighbouring tab the same way a
-    // single Alt+Tab tap swaps to the previous window. Visual order, not
-    // most-recently-used: UI Automation exposes no per-tab activation
-    // history, and this app has none of its own for tabs yet.
-    size_t selected = 0;
-    for (size_t i = 0; i < g_tabs.size(); ++i) {
-        if (g_tabs[i].selected) {
-            selected = i;
+    // Whatever is frontmost right now is by definition the most recently
+    // used tab, however the user got there -- clicking it, Ctrl+Tab, or a
+    // previous Alt+`. Promoting it here is what keeps the MRU order
+    // honest without watching for tab switches continuously.
+    for (const polish::TabTarget& tab : g_tabs) {
+        if (tab.selected) {
+            PromoteTabInMru(g_tabSessionWindow, tab.runtimeId);
             break;
         }
     }
-    g_tabHighlightIndex = polish::AdvanceHighlight(selected, g_tabs.size(), /*backward=*/false);
+    RebuildTabOrder();
+    // Index 0 is the current tab (freshest in the MRU order); the first
+    // press lands on the one used before it, so a quick Alt+` tap toggles
+    // between the last two -- exactly how a single Alt+Tab tap swaps to
+    // the previous window.
+    g_tabHighlightIndex = polish::AdvanceHighlight(0, g_tabOrder.size(), /*backward=*/false);
     g_tabsPainted = true;
 
     if (g_tabCommitPending) {
@@ -1739,7 +1807,7 @@ void OnTabCycle(bool backward) {
         // somewhere sensible.
         return;
     }
-    g_tabHighlightIndex = polish::AdvanceHighlight(g_tabHighlightIndex, g_tabs.size(), backward);
+    g_tabHighlightIndex = polish::AdvanceHighlight(g_tabHighlightIndex, g_tabOrder.size(), backward);
     const HMONITOR monitor = MonitorFromWindow(g_tabSessionWindow, MONITOR_DEFAULTTONEAREST);
     for (auto& panel : g_altTabPanels) {
         if (panel.monitor == monitor) {

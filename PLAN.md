@@ -138,6 +138,8 @@ current todo list.
 ## Left to do
 
 
+- Fix halo: when you activate window from taskbar, it doesn't get halo
+- Fix halo: halo goes under explorer windows even when active app is in front (not always)
 - Groups: Active window title should look very different than inactive
 - Need a more unique icon...current icon looks like Google Gemini
 - Alt+`: switch a single app's *tabs* / MDI children, not just its
