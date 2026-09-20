@@ -108,6 +108,10 @@ bool CaretRectViaMsaa(RECT& out) {
     }
     // A zero-area caret is still a position, but one at the origin is the
     // "no caret here" answer some implementations give.
+    // A zero-width caret is still a position; one at the origin is the
+    // "no caret here" answer some implementations give. Explorer's address
+    // bar returns S_FALSE and all zeroes -- a XAML control behind an
+    // InputSiteWindowClass host has no MSAA caret to report.
     if (width < 0 || height <= 0 || (left == 0 && top == 0)) {
         return false;
     }
@@ -359,6 +363,8 @@ void UiaWorker::ResolveSelection(const Request& request) {
     bool found = false;
     RECT caret{};
     const bool caretFound = CaretRectViaMsaa(caret);
+    RECT uiaCaret{};
+    bool uiaCaretFound = false;
 
     IUIAutomation* uia = state_->uia.Get();
     ComPtr<IUIAutomationElement> focused;
@@ -415,11 +421,42 @@ void UiaWorker::ResolveSelection(const Request& request) {
                     // where "narrower than some pixel threshold" would be
                     // a guess that a one-character selection could fail.
                     ScopedBstr rangeText;
-                    if (FAILED(range->GetText(1, rangeText.Receive())) || rangeText.ToString().empty()) {
-                        continue;
+                    range->GetText(1, rangeText.Receive());
+                    const bool collapsed = rangeText.ToString().empty();
+
+                    // A collapsed range has no rectangles -- UI Automation
+                    // documents GetBoundingRectangles as returning an empty
+                    // array for one, and Explorer's address bar does
+                    // exactly that (Edge's omnibox instead returns a rect,
+                    // and a wrong one). So to find out where the caret is,
+                    // give the range a character to measure: clone it and
+                    // stretch it by one.
+                    //
+                    // Which way it stretches matters. Forward normally, and
+                    // the caret is then the left edge of the character
+                    // ahead of it. But with the caret at the very end of
+                    // the text -- pasting at the end of a path or URL,
+                    // which is the ordinary case -- there is no character
+                    // ahead and the move reports nothing moved; stretching
+                    // back over the preceding character instead puts the
+                    // caret at that character's right edge.
+                    ComPtr<IUIAutomationTextRange> measurable;
+                    bool caretIsRightEdge = false;
+                    if (collapsed && SUCCEEDED(range->Clone(&measurable)) && measurable) {
+                        int moved = 0;
+                        measurable->MoveEndpointByUnit(TextPatternRangeEndpoint_End, TextUnit_Character, 1, &moved);
+                        if (moved == 0) {
+                            measurable->MoveEndpointByUnit(TextPatternRangeEndpoint_Start, TextUnit_Character, -1,
+                                                           &moved);
+                            caretIsRightEdge = true;
+                        }
+                        if (moved == 0) {
+                            measurable.Reset();  // empty field: nothing to measure either way
+                        }
                     }
+                    IUIAutomationTextRange* rectSource = measurable ? measurable.Get() : range.Get();
                     SAFEARRAY* rects = nullptr;
-                    if (FAILED(range->GetBoundingRectangles(&rects)) || rects == nullptr) {
+                    if (FAILED(rectSource->GetBoundingRectangles(&rects)) || rects == nullptr) {
                         continue;
                     }
                     // Flat array of doubles, four per rectangle: left, top,
@@ -438,22 +475,37 @@ void UiaWorker::ResolveSelection(const Request& request) {
                             const LONG top = static_cast<LONG>(values[r + 1]);
                             const LONG right = left + static_cast<LONG>(values[r + 2]);
                             const LONG bottom = top + static_cast<LONG>(values[r + 3]);
-                            if (right <= left || bottom <= top) {
-                                continue;  // a collapsed caret-only range, not a selection
+                            // A caret legitimately has no width, so only
+                            // a rect with no area at all is useless.
+                            if (right < left || bottom <= top) {
+                                continue;
                             }
-                            if (!found) {
-                                bounds = RECT{left, top, right, bottom};
-                                found = true;
+                            RECT& into = collapsed ? uiaCaret : bounds;
+                            bool& intoFound = collapsed ? uiaCaretFound : found;
+                            if (!intoFound) {
+                                into = RECT{left, top, right, bottom};
+                                intoFound = true;
                             } else {
-                                bounds.left = std::min(bounds.left, left);
-                                bounds.top = std::min(bounds.top, top);
-                                bounds.right = std::max(bounds.right, right);
-                                bounds.bottom = std::max(bounds.bottom, bottom);
+                                into.left = std::min(into.left, left);
+                                into.top = std::min(into.top, top);
+                                into.right = std::max(into.right, right);
+                                into.bottom = std::max(into.bottom, bottom);
                             }
                         }
                         SafeArrayUnaccessData(rects);
                     }
                     SafeArrayDestroy(rects);
+
+                    // The measured character is one wide; the caret sits on
+                    // whichever of its edges the stretch came from, not in
+                    // its middle.
+                    if (collapsed && uiaCaretFound) {
+                        if (caretIsRightEdge) {
+                            uiaCaret.left = uiaCaret.right;
+                        } else {
+                            uiaCaret.right = uiaCaret.left;
+                        }
+                    }
                 }
             }
         }
@@ -465,6 +517,8 @@ void UiaWorker::ResolveSelection(const Request& request) {
         selectionSnapshot_.found = found;
         selectionSnapshot_.caret = caret;
         selectionSnapshot_.caretFound = caretFound;
+        selectionSnapshot_.uiaCaret = uiaCaret;
+        selectionSnapshot_.uiaCaretFound = uiaCaretFound;
         selectionSnapshot_.generation = request.generation;
     }
     PostMessageW(notifyWindow_, kSelectionReadyMessage, static_cast<WPARAM>(request.generation), 0);

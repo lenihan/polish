@@ -184,17 +184,30 @@ gets a full pass in Phase 3; today it records what's already known.
     shown. A window restored on a machine with minimize/restore animation
     switched off skips the wait entirely.
 
-21. **A text caret's reported position can't be trusted, so the bullseye
-    only follows real selections.** UI Automation exposes the current text
-    selection, which is what the copy/paste ring aims at. When nothing is
-    selected the same call returns a *collapsed* range at the caret --
-    and that rect is unreliable: Chromium's omnibox (Edge's address bar)
-    reports a plausible-looking 2px caret rect pinned 8px inside the
-    control's left edge, identical no matter where the caret actually is,
-    confirmed live across repeated pastes. A RichEdit control in the same
-    test reported the truth and tracked correctly. Nothing distinguishes a
-    genuine "caret at position 0" from that, so a collapsed range is
-    ignored entirely and the ring falls back to the Win32 caret, then the
-    mouse, then the window centre. In practice a paste still lands
-    accurately anywhere a Win32 caret exists; Chromium and Electron apps
-    expose none and fall back to the mouse pointer.
+21. **Finding the text caret takes three different APIs, and no one of
+    them works everywhere.** The copy/paste bullseye aims at the middle of
+    the selected text, which UI Automation reports reliably. With nothing
+    selected -- any paste -- it needs the caret instead, and that is where
+    it gets awkward. All three of these were needed, in this order, and
+    each was established live:
+
+    - **UIA's selection**, for a real selection. Solid everywhere probed.
+    - **MSAA `OBJID_CARET`**, for the caret. Correct in Chromium (Edge's
+      address bar tracks properly through it), and the reason a caret can
+      be found at all in apps that draw their own and expose no Win32 one.
+      Returns `S_FALSE` and all zeroes for a XAML control such as
+      Explorer's address bar, which sits behind an `InputSiteWindowClass`
+      host with no MSAA caret.
+    - **UIA's caret**, a collapsed selection range, last. It needs a
+      workaround of its own: a degenerate range has no bounding rectangles
+      (documented, and what Explorer returns), so the range is cloned and
+      stretched by one character to have something measurable -- forward
+      normally, backward when the caret is at the very end of the text,
+      taking the near or far edge of that character accordingly.
+
+    This one is last because it is the least trustworthy: Chromium's
+    omnibox answers it with a plausible-looking 2px caret rect pinned 8px
+    inside the control's left edge, identical wherever the caret actually
+    is. MSAA answers correctly there, so in the one app known to lie this
+    value is never reached. Below all three, the older caret → mouse →
+    window-centre chain still applies.

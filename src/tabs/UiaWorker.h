@@ -115,6 +115,17 @@ public:
         RECT caret{};
         bool caretFound = false;
 
+        // The caret as UI Automation reports it (a collapsed selection
+        // range). The least trusted of the three, and only consulted when
+        // caretFound is false: Chromium fills this in with a fixed wrong
+        // value, while MSAA answers correctly there, so in the one app
+        // known to lie it is never reached. It exists for the opposite
+        // case -- XAML controls such as Explorer's address bar, which sit
+        // behind an InputSiteWindowClass host that returns S_FALSE for
+        // OBJID_CARET but do implement TextPattern.
+        RECT uiaCaret{};
+        bool uiaCaretFound = false;
+
         uint64_t generation = 0;
     };
     SelectionSnapshot LatestSelection() const;

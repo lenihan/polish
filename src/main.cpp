@@ -801,6 +801,13 @@ void ResolveBullseyeAnchor(bool timedOut) {
                 StartBullseyeAt(phase, centre, L"msaa-caret");
                 return;
             }
+            // Last resort before the cheap chain -- see uiaCaretFound.
+            if (selection.uiaCaretFound) {
+                const POINT centre{(selection.uiaCaret.left + selection.uiaCaret.right) / 2,
+                                   (selection.uiaCaret.top + selection.uiaCaret.bottom) / 2};
+                StartBullseyeAt(phase, centre, L"uia-caret");
+                return;
+            }
         }
     }
     StartBullseyeFromFallbackAnchor(phase);

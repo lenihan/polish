@@ -90,9 +90,10 @@ and silent during an Alt+Tab session or a full-screen game.
 
 - **It aims at what you actually selected.** On a copy, the ring centres
   on the middle of the selected text, however many lines it spans.
-  Failing that -- a paste, where nothing is selected, or an app that
-  doesn't report its text -- it falls back to the text caret, then the
-  mouse pointer, then the middle of the window.
+  On a paste, where nothing is selected, it aims at the text caret
+  instead -- including in apps that draw their own caret rather than
+  using Windows', like browsers and Explorer's address bar. Failing both,
+  it falls back to the mouse pointer, then the middle of the window.
 - **It stays visible on any background.** The ring is drawn in two tones,
   a light core and a dark edge (or the reverse, following your theme), so
   one of the two always contrasts with whatever is behind it -- the same
