@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <format>
 #include <map>
+#include <set>
 #include <memory>
 #include <optional>
 #include <string>
@@ -93,6 +94,51 @@ constexpr UINT kHaloRenderTimerDelayMs = 8;
 // reports it has finished. ~60 Hz; the animation's own progress is
 // wall-clock-based (see BullseyeOverlay), so a late tick just skips a frame.
 constexpr UINT_PTR kBullseyeFrameTimerId = 5;
+
+// Holds the halo back until Windows has finished animating a window back
+// up from the taskbar.
+//
+// Nothing here is waiting for the window to *move*: through that whole
+// animation GetWindowRect already reports the window's final rect, because
+// the growing window is a DWM visual effect and the window's own logical
+// position is final from the moment it is restored. So the halo is not
+// late, it is early -- drawn correctly around where the window is about to
+// be, framing empty desktop until the animation catches up. There is no
+// exposed per-frame rect to follow instead, so the only honest options are
+// "wait" or "draw it early", and waiting looks right.
+//
+// A duration rather than an event because Windows raises nothing when the
+// animation ends. First guess, to be adjusted by eye live -- the system
+// animation is in the same ballpark.
+constexpr UINT_PTR kHaloRestoreTimerId = 6;
+constexpr UINT kHaloRestoreDelayMs = 300;
+
+// Windows seen going into the taskbar, so a later restore can be
+// recognized as one. EVENT_SYSTEM_MINIMIZEEND and the restored window's
+// foreground change race each other -- confirmed live, with the
+// foreground change arriving first every time it was measured -- so
+// whichever lands first has to start the wait, and the other must find
+// it already started. Without this the foreground handler drew the halo
+// before MINIMIZEEND could suppress it, and the delay did nothing at all.
+std::set<HWND> g_minimizedWindows;
+
+// Whether the minimize/restore animation is actually switched on -- it can
+// be off system-wide (SystemPropertiesPerformance, or "Show animations in
+// Windows" in Settings), and on a machine with it off there is nothing to
+// wait for and the halo should appear at once.
+// Begins (or re-arms) the hold-off that keeps the halo off screen until a
+// window has finished animating back up from the taskbar. Idempotent, and
+// safe to call from either of the two racing events.
+void BeginHaloRestoreWait(HWND restored);
+
+bool MinimizeAnimationEnabled() {
+    ANIMATIONINFO info{};
+    info.cbSize = sizeof(info);
+    if (!SystemParametersInfoW(SPI_GETANIMATION, sizeof(info), &info, 0)) {
+        return true;  // assume the default rather than flash the halo early
+    }
+    return info.iMinAnimate != 0;
+}
 constexpr UINT kBullseyeFrameIntervalMs = 16;
 
 // Some apps write the clipboard more than once per user-visible copy;
@@ -746,7 +792,34 @@ void OnClipboardUpdated() {
     PlayBullseye(polish::BullseyePhase::Copy);
 }
 
+void BeginHaloRestoreWait(HWND restored) {
+    g_minimizedWindows.erase(restored);
+    if (!MinimizeAnimationEnabled()) {
+        return;  // nothing to wait for on a machine with animation off
+    }
+    if (g_haloMinimizeSuppressed) {
+        return;  // the other of the two racing events already started it
+    }
+    // Hiding, not just flagging: the racing foreground change may already
+    // have put the halo on screen, and a flag alone leaves it there --
+    // which is exactly how the delay came to do nothing.
+    if (g_activeWindowHalo) {
+        g_activeWindowHalo->Hide();
+        g_haloTarget = nullptr;
+    }
+    g_haloMinimizeSuppressed = true;
+    KillTimer(g_messageWindow, kHaloRenderTimerId);
+    SetTimer(g_messageWindow, kHaloRestoreTimerId, kHaloRestoreDelayMs, nullptr);
+}
+
 void OnForegroundChanged(HWND newForeground) {
+    // A window coming to the front that went into the taskbar earlier is a
+    // restore, and is usually how this app hears about one first -- before
+    // EVENT_SYSTEM_MINIMIZEEND. Start the hold-off here so the halo is
+    // never drawn over the still-animating window.
+    if (g_minimizedWindows.count(newForeground) != 0) {
+        BeginHaloRestoreWait(newForeground);
+    }
     // Before the early return below -- the halo needs to react to every
     // real foreground change, including ones that don't touch
     // g_trackedWindow at all (e.g. a group chrome window, which
@@ -944,6 +1017,10 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
         case EVENT_OBJECT_DESTROY:
             if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF) {
                 g_activationHistory.Remove(hwnd);
+                // A window closed while minimized would otherwise sit in
+                // here forever, and HWNDs are recycled -- a later window
+                // reusing the handle would be mistaken for a restore.
+                g_minimizedWindows.erase(hwnd);
                 if (hwnd == g_trackedWindow) {
                     g_trackedWindow = nullptr;
                     g_inMoveSizeLoop = false;
@@ -962,6 +1039,7 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
             break;
 
         case EVENT_SYSTEM_MINIMIZESTART:
+            g_minimizedWindows.insert(hwnd);
             if (hwnd == g_haloTarget && g_activeWindowHalo) {
                 // LOCATIONCHANGE fires continuously through Win11's
                 // minimize animation while IsIconic is still false, so
@@ -971,12 +1049,23 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 g_activeWindowHalo->Hide();
                 g_haloMinimizeSuppressed = true;
                 KillTimer(g_messageWindow, kHaloRenderTimerId);
+                // Minimized again before a previous restore finished
+                // animating -- drop the pending reveal with it.
+                KillTimer(g_messageWindow, kHaloRestoreTimerId);
             }
             break;
 
         case EVENT_SYSTEM_MINIMIZEEND:
-            g_haloMinimizeSuppressed = false;
-            UpdateActiveWindowHalo(GetForegroundWindow());
+            // Stay suppressed until the restore animation has played out;
+            // see kHaloRestoreTimerId for why this is a wait rather than a
+            // follow. The suppression flag is already respected by both
+            // UpdateActiveWindowHalo and the LOCATIONCHANGE handler, so the
+            // burst of events the animation produces stays ignored until
+            // the timer lifts it.
+            BeginHaloRestoreWait(hwnd);
+            if (!g_haloMinimizeSuppressed) {
+                UpdateActiveWindowHalo(GetForegroundWindow());
+            }
             break;
 
         case EVENT_OBJECT_NAMECHANGE:
@@ -3268,6 +3357,14 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 if (g_haloWatched != nullptr) {
                     UpdateActiveWindowHalo(g_haloWatched);
                 }
+            } else if (wParam == kHaloRestoreTimerId) {
+                // The restore animation has had time to finish -- see
+                // kHaloRestoreTimerId. Resolve the foreground window now
+                // rather than remembering the one that was restoring: focus
+                // may well have moved on during the wait.
+                KillTimer(hwnd, kHaloRestoreTimerId);
+                g_haloMinimizeSuppressed = false;
+                UpdateActiveWindowHalo(GetForegroundWindow());
             } else if (wParam == kBullseyeFrameTimerId) {
                 if (!g_bullseye || !g_bullseye->AdvanceFrame()) {
                     KillTimer(hwnd, kBullseyeFrameTimerId);
