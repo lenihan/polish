@@ -68,6 +68,28 @@ constexpr double kDurationMs = 340.0;
 constexpr int kPeakAlphaDark = 200;
 constexpr int kPeakAlphaLight = 130;
 
+// The ring is drawn in two tones: a core in the theme's own colour, and a
+// contrasting outline just outside it.
+//
+// One colour cannot work. The theme only says what Windows is set to, not
+// what is actually on screen underneath -- a white ring (dark mode) over a
+// white document is invisible, which is exactly the case this fixes, and
+// the reverse happens in light mode over dark content. Sampling the pixels
+// behind the ring would adapt, but it means capturing the screen on every
+// copy and still picks one colour for a ring that can span content of
+// several shades.
+//
+// A light/dark pair instead is always legible against anything, because
+// whatever the background is, one of the two contrasts with it. This is
+// how mouse cursors and focus rings stay visible everywhere, and it needs
+// no knowledge of the background at all.
+//
+// Extends the ring outward rather than thinning the core, so the shape
+// keeps the weight it was tuned to. Alpha is lower than the core's: the
+// outline is an edge that makes the core readable, not a second ring.
+constexpr int kOutlineHalfStrokeDip = 4;
+constexpr float kOutlineAlphaScale = 0.62f;
+
 void EnsureClassRegistered(HINSTANCE instance) {
     static bool registered = false;
     if (registered) {
@@ -92,6 +114,23 @@ void EnsureClassRegistered(HINSTANCE instance) {
 uint32_t PremultipliedPixel(int alpha, bool white) {
     const uint32_t a = static_cast<uint32_t>(std::clamp(alpha, 0, 255));
     return white ? a * 0x01010101u : (a << 24);
+}
+
+// The core composited over its contrasting outline, as one premultiplied
+// pixel. Standard source-over: the core is opaque white or black, so the
+// colour channels collapse to whichever of the two is the light one.
+uint32_t TwoTonePixel(int coreAlpha, int outlineAlpha, bool coreIsWhite) {
+    const float core = static_cast<float>(std::clamp(coreAlpha, 0, 255)) / 255.0f;
+    const float outline = static_cast<float>(std::clamp(outlineAlpha, 0, 255)) / 255.0f;
+    const float combined = core + outline * (1.0f - core);
+    // Only the white layer contributes colour; the black one contributes
+    // opacity alone. Either way the result stays <= combined, so the pixel
+    // remains valid premultiplied data.
+    const float light = coreIsWhite ? core : outline * (1.0f - core);
+    const auto toByte = [](float v) {
+        return static_cast<uint32_t>(std::clamp(static_cast<int>(v * 255.0f + 0.5f), 0, 255));
+    };
+    return (toByte(combined) << 24) | (toByte(light) << 16) | (toByte(light) << 8) | toByte(light);
 }
 
 }  // namespace
@@ -141,9 +180,11 @@ void BullseyeOverlay::Start(BullseyePhase phase, POINT screenPoint) {
 
     maxRadius_ = static_cast<float>(MulDiv(kMaxRadiusDip, dpi, 96));
     halfStroke_ = static_cast<float>(MulDiv(kHalfStrokeDip, dpi, 96));
+    outlineHalfStroke_ = static_cast<float>(MulDiv(kOutlineHalfStrokeDip, dpi, 96));
     // Two pixels of slack so the outermost antialiased pixels are never
-    // clipped by the window edge.
-    size_ = 2 * static_cast<int>(std::ceil(maxRadius_ + halfStroke_)) + 2;
+    // clipped by the window edge. Sized off the outline, which is the
+    // outermost thing drawn -- sizing off the core alone would clip it.
+    size_ = 2 * static_cast<int>(std::ceil(maxRadius_ + halfStroke_ + outlineHalfStroke_)) + 2;
     origin_ = POINT{screenPoint.x - size_ / 2, screenPoint.y - size_ / 2};
 
     EnsureDibCapacity(size_, size_);
@@ -249,8 +290,12 @@ void BullseyeOverlay::RenderFrame(float progress, bool isDark) {
     }
 
     const float radius = bullseye_math::RadiusAt(progress, maxRadius_, phase_ == BullseyePhase::Paste);
-    const float outer = radius + halfStroke_;
-    const float inner = radius - halfStroke_;
+    // The outline sits outside the core, so it -- not the core -- sets the
+    // bounds everything below is clipped and span-skipped against.
+    const float outlineHalfStroke = halfStroke_ + outlineHalfStroke_;
+    const int outlinePeak = static_cast<int>(static_cast<float>(peak) * kOutlineAlphaScale);
+    const float outer = radius + outlineHalfStroke;
+    const float inner = radius - outlineHalfStroke;
     const float center = static_cast<float>(size_) / 2.0f;
 
     const int yMin = std::max(0, static_cast<int>(std::floor(center - outer)));
@@ -286,9 +331,10 @@ void BullseyeOverlay::RenderFrame(float progress, bool isDark) {
             for (int x = x0; x < x1; ++x) {
                 const float dx = static_cast<float>(x) + 0.5f - center;
                 const float d = bullseye_math::RingDistance(dx, dy, radius);
-                const int alpha = bullseye_math::DistanceToAlpha(d, halfStroke_, peak);
-                if (alpha > 0) {
-                    row[x] = PremultipliedPixel(alpha, isDark);
+                const int coreAlpha = bullseye_math::DistanceToAlpha(d, halfStroke_, peak);
+                const int outlineAlpha = bullseye_math::DistanceToAlpha(d, outlineHalfStroke, outlinePeak);
+                if (coreAlpha > 0 || outlineAlpha > 0) {
+                    row[x] = TwoTonePixel(coreAlpha, outlineAlpha, /*coreIsWhite=*/isDark);
                 }
             }
         };

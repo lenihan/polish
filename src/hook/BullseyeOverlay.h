@@ -137,6 +137,9 @@ private:
     int size_ = 0;         // square buffer/window edge
     float maxRadius_ = 0;  // ring centre-line radius at its largest
     float halfStroke_ = 0;
+    // Extra half-width of the contrasting outline drawn just outside the
+    // core, so the ring reads against any background -- see the .cpp.
+    float outlineHalfStroke_ = 0;
     POINT origin_{};       // window's top-left, so the ring centres on the requested point
 
     LARGE_INTEGER startCounter_{};
