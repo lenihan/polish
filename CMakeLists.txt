@@ -35,6 +35,7 @@ add_library(polish_core STATIC
     src/windowtracking/WindowFilters.cpp
     src/windowtracking/WindowZOrder.cpp
     src/windowtracking/WindowReparenting.cpp
+    src/windowtracking/TaskbarButtons.cpp
     src/tray/TrayIcon.cpp
     src/hook/ActiveWindowHalo.cpp
     src/hook/BullseyeOverlay.cpp
@@ -53,6 +54,7 @@ add_library(polish_core STATIC
     src/tabs/UiaWorker.cpp
     src/util/AnchorPoint.cpp
     src/util/AppIdentity.cpp
+    src/util/AppResolver.cpp
     src/util/SwitcherCycle.cpp
     src/util/DarkMode.cpp
     src/util/DialogKeyboard.cpp
