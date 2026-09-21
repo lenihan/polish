@@ -178,7 +178,9 @@ current todo list.
 
 ## Left to do
 
-
+- Taskbar: Reorder windows somehow so that when you hover over taskbar icon, windows are in the order you want
+- Taskbar: clicking a taskbar icon that has 2+ windows open should cycle through them
+- Taskbar: Alternative hover: halo on the window instead of thumbnail
 - Fix halo: when you activate window from taskbar, it doesn't get halo
 - Fix halo: halo goes under explorer windows even when active app is in front (not always)
 - Groups: Active window title should look very different than inactive
