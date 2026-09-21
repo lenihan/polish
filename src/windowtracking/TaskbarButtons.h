@@ -21,8 +21,16 @@ struct TaskbarButton {
     // Screen rect in physical pixels, straight from UIA's
     // BoundingRectangle. Physical, not DIPs: MSLLHOOKSTRUCT::pt is
     // physical too, so a hook-thread hit-test compares like with like and
-    // needs no scaling. This is only true while the process stays
-    // Per-Monitor-V2 aware (asserted at startup in main.cpp).
+    // needs no scaling.
+    //
+    // This holds only while the process stays Per-Monitor-V2 aware (which
+    // app.manifest declares and main.cpp asserts at startup). Confirmed
+    // the hard way against a test harness that had no manifest: UIA
+    // virtualizes BoundingRectangle for a DPI-unaware process, and every
+    // rect came back at exactly half size on this 200% display --
+    // self-consistent, and wrong by a factor of two against the real
+    // cursor position. A hit-test would then silently match the wrong
+    // button, or none.
     RECT rect{};
     // Which taskbar this came from -- the primary Shell_TrayWnd or one of
     // the per-monitor Shell_SecondaryTrayWnd bars. Carried because

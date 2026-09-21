@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <format>
 
+#include "util/AppResolver.h"
 #include "util/Logging.h"
 
 using Microsoft::WRL::ComPtr;
@@ -119,6 +120,97 @@ bool CaretRectViaMsaa(RECT& out) {
     return true;
 }
 
+// The UIA class every Windows 11 taskbar app button reports. Matching on
+// the class rather than the control type is deliberate and follows the
+// same reasoning as TabRule::containerClassNames: ControlType is Button
+// for the tray icons and the Start button too, so it does not
+// discriminate, whereas the class does -- and unlike Name it survives
+// localization ("Visual Studio Code - 2 running windows" does not).
+constexpr wchar_t kTaskListButtonClass[] = L"Taskbar.TaskListButtonAutomationPeer";
+
+// Reads one taskbar's app buttons into `buttons`. Returns false only when
+// the taskbar could not be read at all, which is what tells the caller to
+// disable the feature rather than act on an empty list.
+//
+// Called once per taskbar: the primary Shell_TrayWnd plus one
+// Shell_SecondaryTrayWnd per additional monitor, each searched from its
+// own root. Searching globally instead would be wrong, not merely
+// wasteful -- the same app pinned to two monitors produces two buttons
+// with byte-identical AutomationIds, so a single flat search cannot tell
+// them apart. That is why TaskbarButton carries the monitor.
+bool ReadOneTaskbar(IUIAutomation* uia, HWND taskbar, std::vector<TaskbarButton>& buttons) {
+    ComPtr<IUIAutomationElement> root;
+    if (FAILED(uia->ElementFromHandle(taskbar, &root)) || !root) {
+        return false;
+    }
+
+    VARIANT className;
+    VariantInit(&className);
+    className.vt = VT_BSTR;
+    className.bstrVal = SysAllocString(kTaskListButtonClass);
+    ComPtr<IUIAutomationCondition> isTaskButton;
+    const HRESULT conditionHr =
+        uia->CreatePropertyCondition(UIA_ClassNamePropertyId, className, &isTaskButton);
+    VariantClear(&className);
+    if (FAILED(conditionHr) || !isTaskButton) {
+        return false;
+    }
+
+    // Cache the three properties up front and read them from the cache
+    // below. Without this each property read is its own cross-process
+    // call into explorer; with it the whole sweep measured ~15ms warm for
+    // a 7-button taskbar, and the per-property cost drops to nothing.
+    ComPtr<IUIAutomationCacheRequest> cache;
+    if (FAILED(uia->CreateCacheRequest(&cache)) || !cache) {
+        return false;
+    }
+    cache->AddProperty(UIA_AutomationIdPropertyId);
+    cache->AddProperty(UIA_BoundingRectanglePropertyId);
+    cache->AddProperty(UIA_NamePropertyId);
+    cache->put_TreeScope(TreeScope_Element);
+
+    ComPtr<IUIAutomationElementArray> found;
+    if (FAILED(root->FindAllBuildCache(TreeScope_Descendants, isTaskButton.Get(), cache.Get(), &found)) ||
+        !found) {
+        return false;
+    }
+
+    const HMONITOR monitor = MonitorFromWindow(taskbar, MONITOR_DEFAULTTONEAREST);
+    int count = 0;
+    found->get_Length(&count);
+    for (int i = 0; i < count; ++i) {
+        ComPtr<IUIAutomationElement> element;
+        if (FAILED(found->GetElement(i, &element)) || !element) {
+            continue;
+        }
+        ScopedBstr automationId;
+        if (FAILED(element->get_CachedAutomationId(automationId.Receive()))) {
+            continue;
+        }
+        const std::wstring appId = StripAppIdPrefix(automationId.ToString());
+        if (appId.empty()) {
+            continue;
+        }
+        RECT rect{};
+        if (FAILED(element->get_CachedBoundingRectangle(&rect))) {
+            continue;
+        }
+        // A zero-size rect means the button is not actually on screen
+        // (mid-animation, or scrolled out of an overflowing taskbar).
+        // Keeping it would give the hit-test a degenerate rect to match
+        // against, which can never be hit but costs a comparison.
+        if (rect.right <= rect.left || rect.bottom <= rect.top) {
+            continue;
+        }
+        TaskbarButton button;
+        button.appId = appId;
+        button.rect = rect;
+        button.taskbar = monitor;
+        buttons.push_back(std::move(button));
+    }
+    return true;
+}
+
 }  // namespace
 
 struct UiaWorker::WorkerState {
@@ -185,6 +277,23 @@ uint64_t UiaWorker::RequestSelectionRect() {
     return generation;
 }
 
+uint64_t UiaWorker::RequestTaskbarButtons() {
+    const uint64_t generation = nextGeneration_.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Same supersede rule as the other two: several taskbar changes
+        // arriving at once (an app closing shifts every button left, which
+        // fires a bounds change per button) should cost one tree walk.
+        std::erase_if(queue_, [](const Request& r) { return r.kind == Request::Kind::TaskbarButtons; });
+        Request request;
+        request.kind = Request::Kind::TaskbarButtons;
+        request.generation = generation;
+        queue_.push_back(std::move(request));
+    }
+    wake_.notify_one();
+    return generation;
+}
+
 void UiaWorker::RequestActivate(uint64_t generation, size_t index) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -205,6 +314,11 @@ UiaWorker::Snapshot UiaWorker::LatestSnapshot() const {
 UiaWorker::SelectionSnapshot UiaWorker::LatestSelection() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return selectionSnapshot_;
+}
+
+UiaWorker::TaskbarSnapshot UiaWorker::LatestTaskbarButtons() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return taskbarSnapshot_;
 }
 
 void UiaWorker::ThreadMain() {
@@ -246,6 +360,9 @@ void UiaWorker::ThreadMain() {
                 break;
             case Request::Kind::SelectionRect:
                 ResolveSelection(request);
+                break;
+            case Request::Kind::TaskbarButtons:
+                EnumerateTaskbarButtons(request);
                 break;
         }
     }
@@ -545,6 +662,50 @@ void UiaWorker::Activate(const Request& request) {
     const HRESULT hr = selection->Select();
     LogDebug(std::format(L"[Polish] Tabs: activate index {} -> hr=0x{:08x}", request.index,
                          static_cast<uint32_t>(hr)));
+}
+
+
+void UiaWorker::EnumerateTaskbarButtons(const Request& request) {
+    const ULONGLONG startTick = GetTickCount64();
+    std::vector<TaskbarButton> buttons;
+    bool usable = false;
+
+    IUIAutomation* uia = state_->uia.Get();
+    if (uia != nullptr) {
+        // The primary taskbar, then every secondary one. FindWindowExW
+        // with a NULL parent walks top-level windows, so passing the
+        // previous match as `after` iterates them -- there is one
+        // Shell_SecondaryTrayWnd per additional monitor.
+        if (HWND primary = FindWindowExW(nullptr, nullptr, L"Shell_TrayWnd", nullptr)) {
+            usable = ReadOneTaskbar(uia, primary, buttons);
+        }
+        HWND secondary = nullptr;
+        while ((secondary = FindWindowExW(nullptr, secondary, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr) {
+            // A secondary taskbar that fails to read does not condemn the
+            // whole feature -- the primary one is what usable tracks.
+            ReadOneTaskbar(uia, secondary, buttons);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        taskbarSnapshot_.buttons = buttons;
+        taskbarSnapshot_.generation = request.generation;
+        taskbarSnapshot_.resolved = true;
+        taskbarSnapshot_.taskbarUsable = usable;
+    }
+
+    if (!usable) {
+        // Logged as a warning because it disables the feature outright:
+        // an OS build that renames the button class or reshapes the tree
+        // lands here, and this line is the only evidence of why the
+        // taskbar features went quiet. See docs/LIMITATIONS.md.
+        LogDebug(L"[Polish] Taskbar: WARNING could not read the taskbar's buttons, taskbar features disabled");
+    } else {
+        LogDebug(std::format(L"[Polish] Taskbar: {} button(s) in {}ms", buttons.size(),
+                             GetTickCount64() - startTick));
+    }
+    PostMessageW(notifyWindow_, kTaskbarButtonsReadyMessage, static_cast<WPARAM>(request.generation), 0);
 }
 
 }  // namespace polish

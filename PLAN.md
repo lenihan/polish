@@ -49,6 +49,19 @@ current todo list.
   Alt+Tab. With no active windows, Tab/Shift+Tab cycle the Minimized
   section itself (starting on its first row, since there is no current
   window at index 0 to skip).
+- Taskbar: established how far a non-injecting process can get. Buttons
+  are readable via UI Automation (class
+  `Taskbar.TaskListButtonAutomationPeer`, with the AppUserModelID in
+  `AutomationId` behind a literal `"Appid: "` prefix), and a button maps
+  to its windows exactly via `IApplicationResolver::GetAppIDForWindow` --
+  *not* via the documented `SHGetPropertyStoreForWindow`, which returned
+  nothing for most ordinary Win32 windows. Two things that look like they
+  should work do not: the legacy `MSTaskListWClass` chain still exists but
+  is a dead stub (`TB_BUTTONCOUNT` returns 0), and both hit-test APIs
+  (`ElementFromPoint`, `AccessibleObjectFromPoint`) refuse to descend into
+  the XAML island, so hit-testing must be done by hand against cached
+  rects. `tools/taskbar-probe.ps1` checks the whole mapping against the
+  live taskbar.
 - Window groups (tab/tile mode): merged to main — combine multiple real
   windows into one taskbar entry, switchable via tabs or shown as tiles.
 - Groups: real window reparenting so members can't be dragged out
@@ -178,9 +191,28 @@ current todo list.
 
 ## Left to do
 
-- Taskbar: Reorder windows somehow so that when you hover over taskbar icon, windows are in the order you want
-- Taskbar: clicking a taskbar icon that has 2+ windows open should cycle through them
-- Taskbar: Alternative hover: halo on the window instead of thumbnail
+- Taskbar: clicking a taskbar icon that has 2+ windows open should cycle
+  through them, in MRU order. The groundwork is in (`TaskbarButtons`,
+  `AppResolver`); still to build are the UIA button enumeration, the
+  app-lifetime `WH_MOUSE_LL` hook that swallows the click, and the
+  cycling itself. Unaffected by the flyout finding below -- swallowing
+  mouse *buttons* works fine; only swallowing *moves* freezes the cursor.
+- Taskbar: hovering a taskbar icon should show Polish's own window list
+  (the Alt+Tab panel scoped to one app, with per-row minimize/maximize/
+  close) instead of the native thumbnail flyout, and reorder those
+  windows into MRU order. **Unblocked** -- a layered topmost "shield"
+  window over the button strip, owning the pointer there, stops the
+  native flyout being created at all (`docs/LIMITATIONS.md` #22, where
+  the four approaches that *don't* work are also recorded). No injection
+  into `explorer.exe` needed. What comes with it: the shield owns every
+  click in the strip, so the right-click jumplist and drag-to-taskbar
+  have to be forwarded or reproduced, and the taskbar's own hover
+  highlight is lost unless Polish draws one.
+- Taskbar: alternative hover treatment -- halo the real window instead of
+  showing a thumbnail. Also unblocked by the shield, but keep in mind the
+  second, independent problem with halo-only hover: `ActiveWindowHalo` pins itself *directly beneath its
+  target* (`HWND_TOP` silently no-ops for a background process), so a
+  window that is minimized or fully covered shows nothing at all.
 - Fix halo: when you activate window from taskbar, it doesn't get halo
 - Fix halo: halo goes under explorer windows even when active app is in front (not always)
 - Groups: Active window title should look very different than inactive

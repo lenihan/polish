@@ -211,3 +211,83 @@ gets a full pass in Phase 3; today it records what's already known.
     is. MSAA answers correctly there, so in the one app known to lie this
     value is never reached. Below all three, the older caret → mouse →
     window-centre chain still applies.
+
+22. **The Windows 11 taskbar's hover thumbnail flyout cannot be
+    suppressed by any *registry or z-order* means, and cannot be read at
+    all, from outside `explorer.exe` -- but it CAN be prevented by owning
+    the pointer over the buttons.** Five approaches were built and
+    measured against build 26200 (25H2). Four failed; the fifth works and
+    is what Polish uses. Recorded in full because four of these look like
+    they should work, and one of them is the obvious first idea.
+
+    - **Swallowing `WM_MOUSEMOVE` in a `WH_MOUSE_LL` hook while the cursor
+      is over the taskbar** -- returning non-zero also **freezes the
+      cursor**, since the same input processing the hook gates is what
+      moves the pointer. Measured with a trap rect in the middle of the
+      screen: the cursor walked to the trap's edge and stopped dead,
+      unable to enter. This would pin the pointer against the taskbar, so
+      the whole technique is unusable, not merely imperfect.
+    - **`ExtendedUIHoverTime` set high** (the widely-repeated registry
+      trick) -- no effect at all, with *and* without an `explorer.exe`
+      restart. The flyout appeared on schedule both times.
+    - **Covering it with a `WS_EX_TOPMOST` panel** -- the flyout draws on
+      top, even when the panel re-asserts `HWND_TOPMOST` *after* the
+      flyout is already on screen.
+    - **Raising a window's z-band with `SetWindowBand`** -- every band
+      from 1 to 18 refused with `ERROR_ACCESS_DENIED`. That API is gated
+      behind UIAccess, and UIAccess only grants `ZBID_UIACCESS` (band 2)
+      while shell UI reaches `ZBID_SYSTEM_TOOLS` (band 16). **So UIAccess
+      is not a way around this either** -- worth stating explicitly, since
+      it looks like one.
+
+    The flyout is also **completely invisible to UI Automation**: with it
+    plainly on screen showing two thumbnails, a full `FindAll` under
+    `Shell_TrayWnd` returned the same 23 descendants as when it was
+    absent, and zero thumbnail elements. Any detection of it has to be
+    visual or positional. No HWND appears or disappears with it either;
+    `ThumbnailDeviceHelperWnd` (explorer, band 16, permanently visible) is
+    1x1 and is not the renderer.
+
+    **What does work: a "shield" window over the button strip.** A
+    layered, topmost, `WS_EX_NOACTIVATE` window placed exactly over the
+    taskbar's app buttons, returning `HTCLIENT` from `WM_NCHITTEST`, owns
+    the pointer in that strip. The taskbar therefore never receives a
+    pointer-enter, its `HoverFlyoutController` never starts its dwell, and
+    **no flyout is ever created**. Confirmed by a back-to-back A/B at the
+    same hover point: without the shield the flyout appeared with both
+    thumbnails; with it, nothing.
+
+    Why this succeeds where the four above fail: it gates nothing in the
+    input stream, so unlike swallowing `WM_MOUSEMOVE` the cursor moves
+    completely normally; and it never has to out-draw the flyout, so the
+    z-band wall is irrelevant -- there is no flyout to out-draw. A plain
+    topmost window *can* sit above `Shell_TrayWnd` (measured at z-depth 8
+    against the taskbar's 14), which is the same thing the bullseye
+    already relies on (#13).
+
+    Constraints that come with it:
+
+    - **Alpha must be 1, not 0.** A fully transparent layered window is
+      excluded from hit-testing, so alpha 0 would receive nothing and
+      block nothing.
+    - **`WS_EX_TRANSPARENT` must not be set** -- that is the click-through
+      style, and a click-through window is skipped by hit-testing
+      entirely, which is the exact opposite of the point.
+    - **The shield owns every click in that strip**, so anything the
+      native taskbar would have done there (the right-click jumplist,
+      drag-and-drop onto a button) is Polish's problem to reproduce or
+      forward.
+    - **The taskbar's own hover highlight is lost**, since the taskbar no
+      longer sees the pointer. Polish has to draw its own or accept its
+      absence.
+    - The shield has to track the strip as it moves: buttons shift when an
+      app opens or closes, the taskbar auto-hides, monitors change, and
+      explorer restarts.
+
+    Hooking `HoverFlyoutController::ShowTaskListButtonHoverFlyout` inside
+    `explorer.exe` (what Windhawk does, via per-build PDB symbols) is the
+    only *other* way, and is no longer needed for this.
+
+    Separately, and unaffected by any of the above: swallowing mouse
+    **buttons** in a low-level hook is fine -- only swallowing *moves*
+    freezes the cursor.
