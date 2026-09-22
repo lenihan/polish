@@ -74,10 +74,17 @@ current todo list.
   windows in MRU order, over an order frozen at the first click so
   repeated clicks walk the whole list instead of ping-ponging between
   the two most recent. 0 or 1 windows is left entirely to Windows.
+- Taskbar: shift-clicking a button with 2+ windows cycles the same list
+  backwards, the way Shift reverses Alt+Tab. That claims the native
+  shift+click (open a new instance), which middle-click still does.
+- Taskbar: hovering a button marks the app's currently-focused window as
+  selected in the list, so it says where you already are before it says
+  where you could go. Nothing is marked when the foreground window
+  belongs to another app.
 - Taskbar: every other gesture in the strip still reaches the real
-  taskbar -- right-click jumplist, shift/middle-click, drag onto a
-  button -- by swallowing the press, opening the shield and replaying it
-  a message-loop turn later. Three things that look like they should do
+  taskbar -- right-click jumplist, middle-click, drag onto a button --
+  by swallowing the press, opening the shield and replaying it a
+  message-loop turn later. Three things that look like they should do
   this and do not are in `docs/LIMITATIONS.md` #23. Holding Ctrl hands
   the strip back completely, native flyout included.
 - Window groups (tab/tile mode): merged to main — combine multiple real
@@ -219,10 +226,6 @@ current todo list.
   the flyout cannot appear in the gap. If that dwell is ever shortened by
   an OS update, or the debounce is raised, the intermittent-thumbnails bug
   comes straight back. See docs/LIMITATIONS.md #22.
-- Taskbar: click-to-cycle is only proven against apps with two windows
-  (nothing with three was open on the dev machine). The walk is
-  index-based over a frozen order so it should generalize, but it has not
-  been watched doing so.
 - Taskbar: the Ctrl escape hatch needs the pointer to move once after
   Ctrl goes down. The shield's pass-through is driven by mouse events and
   a 100ms poll that only runs while the pointer is on the strip, so Ctrl

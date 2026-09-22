@@ -52,6 +52,11 @@ namespace polish {
 //     with it down the taskbar behaves exactly as it would without Polish
 //     installed -- flyout included, which is why Ctrl turns pass-through
 //     on rather than merely suppressing Polish's own handling.
+//
+// Shift is not an escape hatch and is claimed: Shift+click reverses the
+// cycle, the same way Shift reverses Alt+Tab. That does take over the
+// native shift-click, which opens a new instance of the app -- middle-
+// click still does that, so the gesture is moved rather than lost.
 class TaskbarHook {
 public:
     // One app button, reduced to what the hook thread actually needs. No
@@ -79,9 +84,11 @@ public:
     //   -- the caller needs to know the pointer is on the strip either
     //   way, and decides for itself what to show. No dwell is applied
     //   here: the hook reports what it sees.
-    // onCycleClick(generation, index): a left-click was swallowed on a
-    //   button whose Target::cyclesOnClick is set. Fired on the press;
-    //   the matching release is swallowed too but reported to nobody.
+    // onCycleClick(generation, index, backward): a left-click was
+    //   swallowed on a button whose Target::cyclesOnClick is set. Fired on
+    //   the press; the matching release is swallowed too but reported to
+    //   nobody. `backward` is Shift being held -- the same modifier that
+    //   reverses Alt+Tab.
     // setPassThrough(on): called synchronously, from inside the hook
     //   callback, to hand the shield over to the taskbar for this event
     //   or take it back. See the class comment for why this one cannot be
@@ -92,7 +99,7 @@ public:
     // targets can be replaced in between, which would otherwise silently
     // act on whichever app has since taken that index.
     TaskbarHook(HWND messageWindow, std::function<void(uint64_t generation, int index)> onHoverChanged,
-                std::function<void(uint64_t generation, int index)> onCycleClick,
+                std::function<void(uint64_t generation, int index, bool backward)> onCycleClick,
                 std::function<void(bool on)> setPassThrough);
     ~TaskbarHook();
 
@@ -143,6 +150,11 @@ public:
     // or -1 for kHoverMessage when the pointer left the strip.
     static constexpr UINT kHoverMessage = WM_APP + 11;
     static constexpr UINT kCycleClickMessage = WM_APP + 12;
+    // As kCycleClickMessage, but the click had Shift held and should walk
+    // the app's windows the other way. A second id rather than a flag
+    // packed into lParam, which already carries the index: the ids here
+    // are one per thing that happened, and this is a different thing.
+    static constexpr UINT kCycleBackClickMessage = WM_APP + 14;
 
     // A press the shield swallowed on the taskbar's behalf, to be sent
     // again now that the shield is open. wParam is the original mouse
@@ -170,7 +182,7 @@ private:
 
     HWND messageWindow_;
     std::function<void(uint64_t generation, int index)> onHoverChanged_;
-    std::function<void(uint64_t generation, int index)> onCycleClick_;
+    std::function<void(uint64_t generation, int index, bool backward)> onCycleClick_;
     std::function<void(bool on)> setPassThrough_;
     HHOOK hook_ = nullptr;
 

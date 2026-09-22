@@ -30,10 +30,14 @@ live taskbar on this machine (build 26200):
   button, headed with the app's own name, MRU-ordered, with per-row
   minimize/maximize/close. The native thumbnail flyout never appears.
 - **Left-click** a button with 2+ windows and it cycles that app's windows in
-  MRU order, over an order frozen at the first click.
+  MRU order, over an order frozen at the first click. **Shift+click** walks
+  the same list backwards. Verified across three windows: forward 1-2-3-1,
+  reverse 3-2-1-3.
+- The hovered list marks the app's currently-focused window as selected.
 - **Everything else** in the strip still reaches the real taskbar: right-click
-  jumplist, shift/middle-click, drag onto a button. Ctrl hands the strip back
-  completely, native flyout included.
+  jumplist, middle-click, drag onto a button. Ctrl hands the strip back
+  completely, native flyout included. Shift+click is claimed for reverse
+  cycling, so native "open a new instance" is middle-click only.
 - Tray toggle switches the whole thing off, and off means no shield window
   exists at all.
 
@@ -74,9 +78,6 @@ of these look like they should work:
    so the taskbar never draws it. Either Polish draws its own in the shield
    (it is layered at alpha 1 today, so this means giving it a real alpha and
    painting the button's rect) or this becomes a deliberate "no".
-2. **Click-to-cycle past two windows is unproven.** Nothing with three windows
-   was open while testing. The walk is index-based over a frozen order so it
-   should generalize; it has not been watched doing so.
 3. **Halo-on-row-hover is wired but unverified.** Every VS Code window was
    covered by a maximized Edge during testing, and `ActiveWindowHalo` pins
    itself directly beneath its target, so a covered window shows nothing --

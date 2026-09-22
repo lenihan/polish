@@ -272,9 +272,11 @@ gets a full pass in Phase 3; today it records what's already known.
       block nothing.
     - **The shield owns every event in that strip while it is closed**, so
       anything the native taskbar would have done there (the right-click
-      jumplist, shift/middle-click, drag-and-drop onto a button) has to be
+      jumplist, middle-click, drag-and-drop onto a button) has to be
       handed back deliberately. How, and what does *not* work, is the
-      next entry.
+      next entry. Shift+click is the exception: Polish claims it for
+      reverse-cycling, so the native shift+click (open a new instance)
+      moves to middle-click, which already did the same thing.
     - **The taskbar's own hover highlight is lost**, since the taskbar no
       longer sees the pointer. Polish has to draw its own or accept its
       absence.

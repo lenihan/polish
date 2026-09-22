@@ -3153,9 +3153,20 @@ void OpenTaskbarPanel(int index) {
     // document keys that do nothing.
     g_taskbarPanel->SetFooterLegendEnabled(false);
     g_taskbarPanel->SetAnchorRect(button.rect);
-    // No highlighted row: nothing is "selected" on a hover, and marking
-    // one would suggest a click would activate it rather than cycle.
-    g_taskbarPanel->Show(rows, std::nullopt, MonitorFromRect(&button.rect, MONITOR_DEFAULTTONEAREST));
+    // The app's own window that is currently in front, if any, shows as
+    // selected -- so the list says where you already are before it says
+    // where you could go. Nothing is marked when the foreground window
+    // belongs to some other app, which is the honest answer: none of
+    // these rows is the window you are looking at.
+    const HWND foreground = GetForegroundWindow();
+    std::optional<size_t> selected;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        if (rows[i].hwnd == foreground) {
+            selected = i;
+            break;
+        }
+    }
+    g_taskbarPanel->Show(rows, selected, MonitorFromRect(&button.rect, MONITOR_DEFAULTTONEAREST));
     g_taskbarPanelButton = index;
     g_taskbarPanelRows.clear();
     for (const polish::AltTabListRow& row : rows) {
@@ -3195,7 +3206,7 @@ void OnTaskbarHover(uint64_t generation, int index) {
 }
 
 // A left-click was swallowed on a button with 2+ windows.
-void OnTaskbarCycleClick(uint64_t generation, int index) {
+void OnTaskbarCycleClick(uint64_t generation, int index, bool backward) {
     if (generation != g_taskbarGeneration || !g_settings.taskbarEnabled) {
         return;
     }
@@ -3222,24 +3233,35 @@ void OnTaskbarCycleClick(uint64_t generation, int index) {
     const bool resuming = appId == g_taskbarCycleAppId && !g_taskbarCycleOrder.empty() &&
                           g_taskbarCycleActivated != nullptr && GetForegroundWindow() == g_taskbarCycleActivated;
     if (resuming) {
-        g_taskbarCycleIndex =
-            polish::AdvanceHighlight(g_taskbarCycleIndex, g_taskbarCycleOrder.size(), /*backward=*/false);
+        g_taskbarCycleIndex = polish::AdvanceHighlight(g_taskbarCycleIndex, g_taskbarCycleOrder.size(), backward);
     } else {
         g_taskbarCycleAppId = appId;
         g_taskbarCycleOrder = windows;
-        // Start on the second entry when the app is already focused: the
-        // first is its most recent window, which is the one the user is
-        // looking at, and stepping onto it would make the click do
-        // nothing at all. Otherwise start on the first, which is the same
-        // window a plain activation would have given them.
-        g_taskbarCycleIndex = GetForegroundWindow() == windows.front() ? 1 : 0;
+        // Step off whichever of this app's windows is currently in front,
+        // in the asked-for direction. Found by searching rather than
+        // assuming it is the most recent one: the two agree almost always,
+        // but MRU order is rebuilt from a live enumeration and a window
+        // focused by some other means between the read and the click would
+        // make that assumption step onto the window the user is already
+        // looking at, so the click would do nothing.
+        //
+        // With none of them in front, the app is not focused at all and
+        // there is nothing to step off -- both directions start at its
+        // most recent window, which is what a plain activation would have
+        // given. Reversing away from nowhere has no meaning.
+        const auto current = std::find(windows.begin(), windows.end(), GetForegroundWindow());
+        g_taskbarCycleIndex =
+            current == windows.end()
+                ? 0
+                : polish::AdvanceHighlight(static_cast<size_t>(current - windows.begin()), windows.size(), backward);
     }
 
-    // A window can close between the freeze and the click.
+    // A window can close between the freeze and the click. Skipped in the
+    // same direction the walk is going, so a dead entry never bounces it
+    // back the way it came.
     size_t attempts = 0;
     while (attempts < g_taskbarCycleOrder.size() && !IsWindow(g_taskbarCycleOrder[g_taskbarCycleIndex])) {
-        g_taskbarCycleIndex =
-            polish::AdvanceHighlight(g_taskbarCycleIndex, g_taskbarCycleOrder.size(), /*backward=*/false);
+        g_taskbarCycleIndex = polish::AdvanceHighlight(g_taskbarCycleIndex, g_taskbarCycleOrder.size(), backward);
         ++attempts;
     }
     const HWND target = g_taskbarCycleOrder[g_taskbarCycleIndex];
@@ -3273,8 +3295,9 @@ void OnTaskbarCycleClick(uint64_t generation, int index) {
         }
     }
     polish::LogDebug(std::format(
-        L"[Polish] Taskbar: cycle button {} -> {} of {} hwnd={} SetForegroundWindow result={}", index,
-        g_taskbarCycleIndex + 1, g_taskbarCycleOrder.size(), reinterpret_cast<void*>(target), result != FALSE));
+        L"[Polish] Taskbar: cycle{} button {} -> {} of {} hwnd={} SetForegroundWindow result={}",
+        backward ? L" back" : L"", index, g_taskbarCycleIndex + 1, g_taskbarCycleOrder.size(),
+        reinterpret_cast<void*>(target), result != FALSE));
 }
 
 // Brings the whole feature up or down -- the tray toggle, and startup.
@@ -4285,6 +4308,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 
         case polish::TaskbarHook::kHoverMessage:
         case polish::TaskbarHook::kCycleClickMessage:
+        case polish::TaskbarHook::kCycleBackClickMessage:
         case polish::TaskbarHook::kReplayPressMessage:
             if (g_taskbarHook) {
                 g_taskbarHook->HandleHookMessage(message, wParam, lParam);

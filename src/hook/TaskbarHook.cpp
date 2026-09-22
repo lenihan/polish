@@ -127,7 +127,7 @@ void ReplayButtonDown(WPARAM message, DWORD mouseData, bool release) {
 }  // namespace
 
 TaskbarHook::TaskbarHook(HWND messageWindow, std::function<void(uint64_t, int)> onHoverChanged,
-                          std::function<void(uint64_t, int)> onCycleClick,
+                          std::function<void(uint64_t, int, bool)> onCycleClick,
                           std::function<void(bool)> setPassThrough)
     : messageWindow_(messageWindow),
       onHoverChanged_(std::move(onHoverChanged)),
@@ -252,18 +252,18 @@ bool TaskbarHook::HandleMouseEvent(WPARAM message, POINT screenPt, DWORD mouseDa
     const bool ctrlHeld = IsCtrlHeld();
     const int index = HitTest(screenPt);
 
-    // The one press Polish claims: a plain left-click on an app with
-    // somewhere to cycle. Shift is excluded along with Ctrl -- shift-click
-    // means "open another instance", which is the taskbar's to answer, not
-    // a request to switch between the instances already open.
-    const bool claimingThisPress = !ctrlHeld && !IsShiftHeld() && message == WM_LBUTTONDOWN && index >= 0 &&
+    // The press Polish claims: a left-click on an app with somewhere to
+    // cycle, with or without Shift. Only Ctrl is excluded, because only
+    // Ctrl is the escape hatch -- see the class comment on why Shift is
+    // claimed rather than left to the taskbar.
+    const bool claimingThisPress = !ctrlHeld && message == WM_LBUTTONDOWN && index >= 0 &&
                                    targets_[static_cast<size_t>(index)].cyclesOnClick;
     if (claimingThisPress) {
         // Stays shut: this press is not going anywhere.
         ApplyPassThrough(false);
         swallowedLeftDown_ = true;
-        PostMessageW(messageWindow_, kCycleClickMessage, static_cast<WPARAM>(generation_),
-                     static_cast<LPARAM>(index));
+        PostMessageW(messageWindow_, IsShiftHeld() ? kCycleBackClickMessage : kCycleClickMessage,
+                     static_cast<WPARAM>(generation_), static_cast<LPARAM>(index));
         return true;
     }
 
@@ -321,9 +321,9 @@ void TaskbarHook::HandleHookMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         if (onHoverChanged_) {
             onHoverChanged_(generation, index);
         }
-    } else if (message == kCycleClickMessage) {
+    } else if (message == kCycleClickMessage || message == kCycleBackClickMessage) {
         if (onCycleClick_) {
-            onCycleClick_(generation, index);
+            onCycleClick_(generation, index, message == kCycleBackClickMessage);
         }
     }
 }
