@@ -24,7 +24,25 @@ bool IsCandidateWindowShape(HWND hwnd) {
         return false;
     }
     const LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-    if ((style & WS_CAPTION) == 0) {
+    // WS_CAPTION *or* WS_THICKFRAME, not WS_CAPTION alone.
+    //
+    // Requiring a caption excludes real windows, confirmed live: a
+    // Copilot window (Chrome_WidgetWin_1, titled "Copilot", 2760x1580,
+    // unowned, uncloaked, visible) carries style 0x160F0000 --
+    // WS_SYSMENU, WS_THICKFRAME and both min/max boxes, but no
+    // WS_CAPTION, because it draws its own title bar. Its two sibling
+    // Copilot windows *do* have WS_CAPTION, so this is not "that app is
+    // special", it is "the same app in a different window mode". The
+    // taskbar counted all three; Polish saw two, which showed up as a
+    // hover panel headed "3 running windows" listing two, and as that
+    // window being silently unreachable by Alt+Tab.
+    //
+    // WS_THICKFRAME is the useful stand-in: a resizable top-level window
+    // is a real one whether or not the OS draws its frame. It is not a
+    // loosening on its own either -- everything here still has to be
+    // visible, unowned, not a tool window, titled and uncloaked, which is
+    // what actually keeps the junk out (see the comments below).
+    if ((style & (WS_CAPTION | WS_THICKFRAME)) == 0) {
         return false;
     }
     // Excludes a real, confirmed case: a hidden/suspended UWP host process

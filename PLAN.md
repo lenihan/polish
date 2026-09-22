@@ -81,6 +81,17 @@ current todo list.
   selected in the list, so it says where you already are before it says
   where you could go. Nothing is marked when the foreground window
   belongs to another app.
+- Taskbar: an open hover panel is a live view -- opening or closing a
+  window of the app whose list is on screen adds or removes a row,
+  rather than leaving a header that disagrees with its own rows.
+- Window filters: `IsCandidateWindowShape` accepts `WS_CAPTION` *or*
+  `WS_THICKFRAME`, not `WS_CAPTION` alone. Requiring a caption silently
+  excluded real windows from everything Polish does -- found via a
+  Copilot window that the taskbar counted and Polish did not, which made
+  its hover panel read "3 running windows" over two rows and made that
+  window unreachable by Alt+Tab. Custom-frame apps draw their own title
+  bar and omit the style; a resizable top-level window is a real one
+  either way. See the comment in `WindowFilters.cpp`.
 - Taskbar: every other gesture in the strip still reaches the real
   taskbar -- right-click jumplist, middle-click, drag onto a button --
   by swallowing the press, opening the shield and replaying it a

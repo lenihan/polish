@@ -2868,6 +2868,10 @@ int g_taskbarPanelButton = -1;
 // end. Kept so a click can highlight the row it just activated without
 // rebuilding (and re-sorting, and visibly reshuffling) the list.
 std::vector<HWND> g_taskbarPanelRows;
+// The button's window list exactly as the open panel was built from it,
+// before that partitioning. Compared against a fresh read to notice that
+// the app gained or lost a window while its list was on screen.
+std::vector<HWND> g_taskbarPanelWindows;
 // The button the dwell timer is counting down for.
 int g_taskbarDwellButton = -1;
 
@@ -2982,6 +2986,8 @@ std::vector<HWND> TaskbarWindowsInMruOrder() {
     return ordered;
 }
 
+void OpenTaskbarPanel(int index);
+
 // Re-resolves which windows each button stands for and hands the result
 // to the shield and the hook. Called whenever a taskbar read completes.
 void RebuildTaskbarTargets() {
@@ -3023,6 +3029,16 @@ void RebuildTaskbarTargets() {
 
     g_taskbarShield->Update(g_taskbarButtons);
     g_taskbarHook->SetTargets(g_taskbarGeneration, std::move(targets));
+
+    // An open panel is a live view, not a snapshot: opening a new window
+    // of the app whose list is on screen (middle-clicking its button does
+    // exactly that) has to add a row. Rebuilt only when the window list
+    // for that button really changed, because Show() re-lays the panel
+    // out and rows must not reshuffle under the pointer for nothing.
+    if (g_taskbarPanelButton >= 0 && static_cast<size_t>(g_taskbarPanelButton) < g_taskbarButtonWindows.size() &&
+        g_taskbarButtonWindows[static_cast<size_t>(g_taskbarPanelButton)] != g_taskbarPanelWindows) {
+        OpenTaskbarPanel(g_taskbarPanelButton);
+    }
     polish::LogDebug(std::format(L"[Polish] Taskbar: {} button(s) mapped against {} window(s) in {}ms (generation {})",
                                  g_taskbarButtons.size(), resolved.size(), GetTickCount64() - startTick,
                                  g_taskbarGeneration));
@@ -3101,6 +3117,7 @@ void CloseTaskbarPanel() {
     }
     g_taskbarPanelButton = -1;
     g_taskbarPanelRows.clear();
+    g_taskbarPanelWindows.clear();
     if (g_taskbarPanel) {
         g_taskbarPanel->Hide();
     }
@@ -3168,6 +3185,7 @@ void OpenTaskbarPanel(int index) {
     }
     g_taskbarPanel->Show(rows, selected, MonitorFromRect(&button.rect, MONITOR_DEFAULTTONEAREST));
     g_taskbarPanelButton = index;
+    g_taskbarPanelWindows = windows;
     g_taskbarPanelRows.clear();
     for (const polish::AltTabListRow& row : rows) {
         g_taskbarPanelRows.push_back(row.hwnd);
