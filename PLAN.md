@@ -213,6 +213,12 @@ current todo list.
   owns the pointer over the strip and the taskbar never sees it. Polish
   should draw its own, or this should be a decision rather than a
   leftover.
+- Taskbar: the shield tracks the strip via taskbar LOCATIONCHANGE events
+  with a 120ms debounce, measured at 210ms from a window appearing to the
+  shield being correct -- under the native flyout's 250-450ms dwell, so
+  the flyout cannot appear in the gap. If that dwell is ever shortened by
+  an OS update, or the debounce is raised, the intermittent-thumbnails bug
+  comes straight back. See docs/LIMITATIONS.md #22.
 - Taskbar: click-to-cycle is only proven against apps with two windows
   (nothing with three was open on the dev machine). The walk is
   index-based over a frozen order so it should generalize, but it has not

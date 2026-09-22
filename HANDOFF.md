@@ -62,6 +62,14 @@ of these look like they should work:
 
 ## What's next, in order
 
+0. **Watch for the native thumbnails reappearing.** They did once, and the
+   cause was the shield covering a stale rect after the strip re-centered
+   (see `docs/LIMITATIONS.md` #22). That is now event-driven and measured
+   at 210ms, under the native 250-450ms dwell. If it is seen again,
+   measure the gap before changing anything: hover with a continuous
+   glide rather than a teleported cursor, and check the log for how long
+   after a `foreground changed` line the next taskbar read lands.
+
 1. **The taskbar's own hover highlight is gone.** The shield owns the pointer,
    so the taskbar never draws it. Either Polish draws its own in the shield
    (it is layered at alpha 1 today, so this means giving it a real alpha and

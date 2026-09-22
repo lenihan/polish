@@ -169,6 +169,21 @@ constexpr UINT kTaskbarHoverPollMs = 100;
 constexpr UINT_PTR kTaskbarDwellTimerId = 10;
 constexpr UINT kTaskbarDwellMs = 220;
 
+// Coalesces "the taskbar just changed" into one re-read.
+//
+// The safety-net poll above is far too slow to be the only thing holding
+// the shield over the strip. Measured: opening an app re-centers the
+// whole button row, and until the next poll the shield is still covering
+// where the buttons *were* -- up to three seconds during which hovering
+// the uncovered part shows the native flyout. That is an intermittent bug
+// that cannot be reproduced on demand, because reproducing it means
+// opening or closing an app at the right moment.
+//
+// Short enough that the gap is imperceptible, long enough that the burst
+// of events one app launch produces still costs a single UIA read.
+constexpr UINT_PTR kTaskbarDirtyTimerId = 11;
+constexpr UINT kTaskbarDirtyDebounceMs = 120;
+
 // Windows seen going into the taskbar, so a later restore can be
 // recognized as one. EVENT_SYSTEM_MINIMIZEEND and the restored window's
 // foreground change race each other -- confirmed live, with the
@@ -438,8 +453,10 @@ void OnMemberTitleChanged(HWND hwnd);
 // inside) a Tile-mode group's member window.
 void OnObjectFocusChanged(HWND hwnd);
 // Defined with the rest of the taskbar code, far below, but needed by the
-// window-destroy handler above it.
+// window-event handlers above it.
 void ForgetTaskbarWindow(HWND hwnd);
+void MarkTaskbarDirty();
+bool IsTaskbarOwnedWindow(HWND hwnd);
 
 // Forward-declared so ReflowGroupTo (defined further down) can call them
 // after GroupManager::ApplyLayout drops a member that turned out to be
@@ -980,6 +997,12 @@ void OnForegroundChanged(HWND newForeground) {
     polish::LogDebug(std::format(L"[Polish] foreground changed: hwnd={} title=\"{}\" candidate={}",
                                   reinterpret_cast<void*>(newForeground), title, candidate));
 
+    // A window that has just become foreground is very often one that
+    // has just opened, which means a new taskbar button and a strip that
+    // has re-centered around it. Cheap to be wrong (the re-read finds
+    // nothing changed and TaskbarButtonsEqual drops it).
+    MarkTaskbarDirty();
+
     // Tracks every real window that becomes foreground, not just
     // candidate windows -- Alt+Tab candidate filtering (candidate +
     // non-minimized) happens where this list is consumed, not here.
@@ -1053,6 +1076,20 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
             break;
 
         case EVENT_OBJECT_LOCATIONCHANGE:
+            // The taskbar re-laying itself out -- buttons shifting as an
+            // app opens or closes, the strip re-centering, an auto-hidden
+            // bar sliding in or out. This is the event the shield's
+            // geometry actually depends on, and the only one that fires
+            // for a change with no window lifecycle behind it (a button's
+            // label expanding, a pinned app being dragged).
+            //
+            // Checked before the OBJID_WINDOW guard below on purpose:
+            // these arrive for the buttons themselves, which are not
+            // top-level windows.
+            if (IsTaskbarOwnedWindow(hwnd)) {
+                MarkTaskbarDirty();
+                return;
+            }
             if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF) {
                 // Cheap for the overwhelming majority of these events (a
                 // map lookup that immediately misses) -- see
@@ -1160,6 +1197,9 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 // would give the next window to inherit this handle the
                 // dead one's icon.
                 ForgetTaskbarWindow(hwnd);
+                // A window closing can take its taskbar button with it,
+                // and everything to its right shifts.
+                MarkTaskbarDirty();
                 if (hwnd == g_trackedWindow) {
                     g_trackedWindow = nullptr;
                     g_inMoveSizeLoop = false;
@@ -2823,6 +2863,11 @@ std::vector<std::vector<HWND>> g_taskbarButtonWindows;
 std::unique_ptr<polish::AltTabListWindow> g_taskbarPanel;
 // Which button the panel is currently open for, or -1.
 int g_taskbarPanelButton = -1;
+// The panel's rows, in the order it is drawing them -- which is not the
+// order the windows came in, since minimized rows are partitioned to the
+// end. Kept so a click can highlight the row it just activated without
+// rebuilding (and re-sorting, and visibly reshuffling) the list.
+std::vector<HWND> g_taskbarPanelRows;
 // The button the dwell timer is counting down for.
 int g_taskbarDwellButton = -1;
 
@@ -2865,6 +2910,34 @@ size_t g_taskbarCycleIndex = 0;
 // app taking focus) means the next taskbar click should start again from
 // that app's real MRU order rather than resume a stale walk.
 HWND g_taskbarCycleActivated = nullptr;
+
+// Whether hwnd is a taskbar, or anything inside one.
+//
+// Used to pick the taskbar's own layout changes out of the global
+// LOCATIONCHANGE stream, which every moving window on the desktop feeds.
+// One GetAncestor plus a class-name read, and only for events that got
+// past the cheaper guards above it.
+bool IsTaskbarOwnedWindow(HWND hwnd) {
+    const HWND root = GetAncestor(hwnd, GA_ROOT);
+    if (root == nullptr) {
+        return false;
+    }
+    wchar_t className[64] = L"";
+    GetClassNameW(root, className, static_cast<int>(sizeof(className) / sizeof(className[0])));
+    return lstrcmpW(className, L"Shell_TrayWnd") == 0 || lstrcmpW(className, L"Shell_SecondaryTrayWnd") == 0;
+}
+
+// Notes that the taskbar may have changed shape, and re-reads it shortly.
+//
+// Deliberately debounced rather than immediate: one app launching moves
+// every button on a centered taskbar, so this is called in bursts and a
+// read per event would be pure waste.
+void MarkTaskbarDirty() {
+    if (!g_settings.taskbarEnabled) {
+        return;
+    }
+    SetTimer(g_messageWindow, kTaskbarDirtyTimerId, kTaskbarDirtyDebounceMs, nullptr);
+}
 
 void EndTaskbarCycleSession() {
     g_taskbarCycleAppId.clear();
@@ -3027,6 +3100,7 @@ void CloseTaskbarPanel() {
         return;
     }
     g_taskbarPanelButton = -1;
+    g_taskbarPanelRows.clear();
     if (g_taskbarPanel) {
         g_taskbarPanel->Hide();
     }
@@ -3083,6 +3157,10 @@ void OpenTaskbarPanel(int index) {
     // one would suggest a click would activate it rather than cycle.
     g_taskbarPanel->Show(rows, std::nullopt, MonitorFromRect(&button.rect, MONITOR_DEFAULTTONEAREST));
     g_taskbarPanelButton = index;
+    g_taskbarPanelRows.clear();
+    for (const polish::AltTabListRow& row : rows) {
+        g_taskbarPanelRows.push_back(row.hwnd);
+    }
 }
 
 // The pointer moved onto a different app button, or off the strip
@@ -3124,9 +3202,6 @@ void OnTaskbarCycleClick(uint64_t generation, int index) {
     if (index < 0 || static_cast<size_t>(index) >= g_taskbarButtonWindows.size()) {
         return;
     }
-    // The click is the answer to what the panel was offering; leaving it
-    // up over the window that just came forward would be in the way.
-    CloseTaskbarPanel();
     const std::wstring appId = g_taskbarButtons[static_cast<size_t>(index)].appId;
     const std::vector<HWND>& windows = g_taskbarButtonWindows[static_cast<size_t>(index)];
     if (windows.size() < 2) {
@@ -3182,6 +3257,21 @@ void OnTaskbarCycleClick(uint64_t generation, int index) {
     InjectHarmlessCtrlKeystroke();
     const BOOL result = SetForegroundWindow(target);
     g_taskbarCycleActivated = target;
+
+    // The panel stays up. Clicking is how you walk the list, so closing it
+    // on the first click would mean never seeing where the walk had got
+    // to -- it closes when the pointer leaves the button and the panel,
+    // like any hover UI, and nowhere else.
+    //
+    // Highlighting the row that was just activated is what the panel is
+    // for at that point: it opened with no highlight because a hover
+    // selects nothing, but a click does.
+    if (g_taskbarPanel && g_taskbarPanelButton == index) {
+        const auto row = std::find(g_taskbarPanelRows.begin(), g_taskbarPanelRows.end(), target);
+        if (row != g_taskbarPanelRows.end()) {
+            g_taskbarPanel->SetHighlight(static_cast<size_t>(row - g_taskbarPanelRows.begin()));
+        }
+    }
     polish::LogDebug(std::format(
         L"[Polish] Taskbar: cycle button {} -> {} of {} hwnd={} SetForegroundWindow result={}", index,
         g_taskbarCycleIndex + 1, g_taskbarCycleOrder.size(), reinterpret_cast<void*>(target), result != FALSE));
@@ -3207,6 +3297,7 @@ void ApplyTaskbarSetting() {
         CloseTaskbarPanel();
         KillTimer(g_messageWindow, kTaskbarRefreshTimerId);
         KillTimer(g_messageWindow, kTaskbarHoverTimerId);
+        KillTimer(g_messageWindow, kTaskbarDirtyTimerId);
         polish::LogDebug(L"[Polish] Taskbar: disabled -- shield uncovered, native taskbar untouched");
         return;
     }
@@ -4115,6 +4206,9 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 KillTimer(hwnd, kHaloRestoreTimerId);
                 g_haloMinimizeSuppressed = false;
                 UpdateActiveWindowHalo(GetForegroundWindow());
+            } else if (wParam == kTaskbarDirtyTimerId) {
+                KillTimer(hwnd, kTaskbarDirtyTimerId);
+                RequestTaskbarRefresh();
             } else if (wParam == kTaskbarDwellTimerId) {
                 KillTimer(hwnd, kTaskbarDwellTimerId);
                 if (g_taskbarDwellButton >= 0) {

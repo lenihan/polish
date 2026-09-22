@@ -278,9 +278,27 @@ gets a full pass in Phase 3; today it records what's already known.
     - **The taskbar's own hover highlight is lost**, since the taskbar no
       longer sees the pointer. Polish has to draw its own or accept its
       absence.
-    - The shield has to track the strip as it moves: buttons shift when an
-      app opens or closes, the taskbar auto-hides, monitors change, and
-      explorer restarts.
+    - The shield has to track the strip as it moves, and **how fast it
+      tracks is a correctness property, not a polish one**. Buttons shift
+      whenever an app opens or closes -- on a centered taskbar the whole
+      row re-centers, so every button moves -- and until the shield is
+      re-read it is covering where the buttons *were*. Hovering the part
+      it no longer covers gets the native flyout.
+
+      This was found in use, not in testing, and is invisible to any test
+      that does not open an app mid-hover. A 3-second safety-net poll was
+      the only thing re-reading the strip, so the gap ran to 3 seconds.
+      It is now driven by `EVENT_OBJECT_LOCATIONCHANGE` filtered to
+      taskbar-owned windows (the only event that fires for a re-layout
+      with no window lifecycle behind it), plus foreground and destroy,
+      debounced by 120ms -- measured at 210ms from a new window appearing
+      to the shield being correct.
+
+      **210ms is under the native flyout's own dwell, which is what makes
+      this a fix rather than a narrowing.** That dwell measured between
+      250ms and 450ms on this build: hovering for 250ms produces nothing,
+      450ms produces the full flyout. A gap shorter than the dwell cannot
+      produce a flyout, because the dwell never completes inside it.
 
     Hooking `HoverFlyoutController::ShowTaskListButtonHoverFlyout` inside
     `explorer.exe` (what Windhawk does, via per-build PDB symbols) is the
