@@ -270,13 +270,11 @@ gets a full pass in Phase 3; today it records what's already known.
     - **Alpha must be 1, not 0.** A fully transparent layered window is
       excluded from hit-testing, so alpha 0 would receive nothing and
       block nothing.
-    - **`WS_EX_TRANSPARENT` must not be set** -- that is the click-through
-      style, and a click-through window is skipped by hit-testing
-      entirely, which is the exact opposite of the point.
-    - **The shield owns every click in that strip**, so anything the
-      native taskbar would have done there (the right-click jumplist,
-      drag-and-drop onto a button) is Polish's problem to reproduce or
-      forward.
+    - **The shield owns every event in that strip while it is closed**, so
+      anything the native taskbar would have done there (the right-click
+      jumplist, shift/middle-click, drag-and-drop onto a button) has to be
+      handed back deliberately. How, and what does *not* work, is the
+      next entry.
     - **The taskbar's own hover highlight is lost**, since the taskbar no
       longer sees the pointer. Polish has to draw its own or accept its
       absence.
@@ -291,3 +289,50 @@ gets a full pass in Phase 3; today it records what's already known.
     Separately, and unaffected by any of the above: swallowing mouse
     **buttons** in a low-level hook is fine -- only swallowing *moves*
     freezes the cursor.
+
+23. **Handing a single event back to the taskbar, from under the shield,
+    takes all three of: `WS_EX_TRANSPARENT`, swallowing the press, and
+    replaying it from the message loop.** Each was arrived at by a
+    measurement that contradicted the obvious answer, so all three are
+    recorded.
+
+    - **`HTTRANSPARENT` from `WM_NCHITTEST` does not work across a
+      process boundary.** It is documented to pass the point to
+      underlying windows *in the same thread*, and the taskbar is another
+      process, so against `Shell_TrayWnd` it absorbs exactly as
+      `HTCLIENT` does. This is a convincing wrong answer rather than an
+      obviously wrong one: the shield really did return `HTTRANSPARENT`
+      (confirmed by sending it `WM_NCHITTEST` directly and reading back
+      `-1`), and the flyout really did stay away -- because the pointer
+      was still being absorbed, which looks identical to success from the
+      outside. It was only caught by testing the Ctrl escape hatch, where
+      "no flyout" is the *failure*.
+    - **`WS_EX_TRANSPARENT` does work across a process boundary**, which
+      is why the shield toggles that style per gesture instead. With it
+      set, `WindowFromPoint` over the strip returns `MSTaskSwWClass` and
+      the native flyout comes back; with it clear, the shield absorbs.
+      Note this reverses nothing about the shield's design -- the style
+      must still be *off* by default, since a shield that is always
+      click-through blocks nothing.
+    - **Setting the style from inside the low-level mouse hook does not
+      help the very press that set it.** The style change itself lands
+      promptly -- watched across a real press, the shield went
+      pass-through 4ms in and the point under the cursor hit-tested to
+      the taskbar -- but the press being handled is routed as though the
+      shield were still closed. The same press 300ms later opens the
+      jumplist. So the press has to be swallowed and a fresh one sent in
+      its place.
+    - **The replay has to come from the message loop, not the hook.** A
+      replay issued from inside the callback fails exactly as the
+      original press did; posted, and therefore sent after the hook has
+      returned, it works. That is the whole difference.
+
+    Two details the replay needs. It carries a signature in
+    `MOUSEINPUT::dwExtraInfo` which the hook checks on the way in -- a
+    replay mistaken for a real press would replay itself forever, inside
+    a low-level hook. And only the *press* is replayed: by the time the
+    release arrives the shield is already open, so the real one reaches
+    the taskbar untouched, which is what keeps a press-and-drag onto a
+    button one continuous gesture. The exception is a click faster than a
+    message-loop turn, where the release is swallowed too and the replay
+    carries it.

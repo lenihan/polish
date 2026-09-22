@@ -32,6 +32,19 @@ struct TaskbarButton {
     // cursor position. A hit-test would then silently match the wrong
     // button, or none.
     RECT rect{};
+    // The button's UIA Name, exactly as Windows writes it -- "Visual
+    // Studio Code - 2 running windows", and localized. Carried so the
+    // hover panel can head its list with whatever the OS itself calls
+    // the app, rather than the AppUserModelID, which is a key and not a
+    // name ("Microsoft.VisualStudioCode", "MSEdge").
+    //
+    // Deliberately used whole, running-window count and all, instead of
+    // being trimmed back to just the app name: the separator is a plain
+    // hyphen that app names are free to contain, and the suffix differs
+    // per language, so any trim would be a guess that reads as correct
+    // on the machine it was written on. The full string is also simply
+    // more useful as a heading.
+    std::wstring name;
     // Which taskbar this came from -- the primary Shell_TrayWnd or one of
     // the per-monitor Shell_SecondaryTrayWnd bars. Carried because
     // AutomationId values repeat across taskbars: the same app pinned on
@@ -57,6 +70,12 @@ std::optional<TaskbarButton> HitTestTaskbarButton(const std::vector<TaskbarButto
 // tell "the taskbar actually changed, rebuild what depends on it" apart
 // from "a periodic refresh returned the same thing", so a safety-net
 // re-enumeration does not churn anything downstream.
+//
+// Names are compared along with ids and rects, which makes a window
+// opening or closing within one app count as a change even when the
+// strip has not moved a pixel -- the count lives in the name. That is
+// the wanted answer: anything downstream holding a list of that app's
+// windows is stale the moment one appears or disappears.
 bool TaskbarButtonsEqual(const std::vector<TaskbarButton>& a, const std::vector<TaskbarButton>& b);
 
 }  // namespace polish

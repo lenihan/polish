@@ -141,14 +141,38 @@ public:
     // SetHighlight path never needs it.
     void SetActiveSectionHeader(std::wstring text) { activeHeader_ = std::move(text); }
 
-    // Whether rows carry their per-row minimize/maximize/close buttons
-    // and the keyboard-shortcut footer legend that documents them.
+    // Whether rows carry their per-row minimize/maximize/close buttons.
     //
     // Switched off for an Alt+` tab session, whose rows stand for tabs
     // rather than windows: a tab has no HWND, so every one of those
     // actions is meaningless for it, and the row would otherwise reserve
     // width for buttons it never draws. Takes effect on the next Show().
     void SetRowActionsEnabled(bool enabled);
+
+    // Whether the footer legend documenting the Del/-/+ keyboard
+    // equivalents is drawn.
+    //
+    // Separate from SetRowActionsEnabled, which it used to follow,
+    // because the taskbar hover panel wants exactly one of the two: its
+    // rows do act on real windows and so keep their buttons, but it is
+    // opened by the mouse with no key held and no session to send keys
+    // to, so a legend for keys that do nothing there would be a lie.
+    // Takes effect on the next Show().
+    void SetFooterLegendEnabled(bool enabled);
+
+    // Pins the panel just outside `anchor` (a screen rect in physical
+    // pixels) instead of centering it on the monitor.
+    //
+    // The taskbar hover panel has to point at the button it belongs to --
+    // a panel centered on the monitor would leave the user to work out
+    // which app it was describing. Centered on the anchor horizontally,
+    // clamped to stay on screen, and placed on whichever side of it has
+    // room, so it works for a taskbar at the bottom, the top or either
+    // edge without knowing which it is looking at.
+    //
+    // nullopt restores the monitor-centered placement Alt+Tab uses.
+    // Takes effect on the next Show(), like the other layout setters.
+    void SetAnchorRect(std::optional<RECT> anchor) { anchorRect_ = anchor; }
 
     void Hide();
     bool IsVisible() const;
@@ -179,6 +203,16 @@ public:
     // row (see class comment). Same non-committing, non-relocating
     // contract as SetOnRowMinimizeToggle otherwise.
     void SetOnRowMaximizeToggle(std::function<void(HWND)> callback) { onRowMaximizeToggle_ = std::move(callback); }
+
+    // Fired when the mouse moves onto a different row, with that row's
+    // HWND -- or nullptr when it leaves the rows entirely. Hover already
+    // reveals a row's action buttons; this exists so a caller can react
+    // to it too, which is what lets the taskbar hover panel halo the real
+    // window on screen as each row is pointed at.
+    //
+    // Fires on the change only, not per mouse-move, and never for a row
+    // whose HWND is null (an Alt+` tab row).
+    void SetOnRowHovered(std::function<void(HWND)> callback) { onRowHovered_ = std::move(callback); }
 
     // Fired by a click on a row's close ("X") icon button, same
     // highlighted-or-hovered-only contract as SetOnRowMinimizeToggle. The
@@ -264,11 +298,14 @@ private:
     // arrive at all, re-armed on every WM_MOUSEMOVE since it's otherwise
     // a one-shot subscription per MSDN.
     std::optional<size_t> hoveredIndex_;
-    bool rowActionsEnabled_ = true;  // see SetRowActionsEnabled
+    bool rowActionsEnabled_ = true;      // see SetRowActionsEnabled
+    bool footerLegendEnabled_ = true;    // see SetFooterLegendEnabled
+    std::optional<RECT> anchorRect_;     // see SetAnchorRect
     std::function<void(HWND)> onRowActivated_;
     std::function<void(HWND)> onRowMinimizeToggle_;
     std::function<void(HWND)> onRowMaximizeToggle_;
     std::function<void(HWND)> onRowClose_;
+    std::function<void(HWND)> onRowHovered_;
 };
 
 }  // namespace polish

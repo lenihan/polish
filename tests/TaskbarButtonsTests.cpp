@@ -86,6 +86,19 @@ TEST_CASE("TaskbarButtonsEqual: the same app on two taskbars is not the same but
     CHECK_FALSE(TaskbarButtonsEqual(a, b));
 }
 
+TEST_CASE("TaskbarButtonsEqual: a window opening within one app is a change") {
+    // The strip does not move when an app's second window opens -- only
+    // the button's name does, since the running-window count lives in it.
+    // Comparing names is what makes that count as a change, which it must:
+    // the button now stands for a different set of windows.
+    TaskbarButton one = Button(L"Code", 1265);
+    one.name = L"Visual Studio Code";
+    TaskbarButton two = Button(L"Code", 1265);
+    two.name = L"Visual Studio Code - 2 running windows";
+    CHECK_FALSE(TaskbarButtonsEqual({one}, {two}));
+    CHECK(TaskbarButtonsEqual({one}, {one}));
+}
+
 TEST_CASE("StripAppIdPrefix: removes the taskbar's Appid prefix") {
     CHECK(StripAppIdPrefix(L"Appid: Microsoft.VisualStudioCode") == L"Microsoft.VisualStudioCode");
     CHECK(StripAppIdPrefix(L"Appid: Claude_pzs8sxrjxfjjc!Claude") == L"Claude_pzs8sxrjxfjjc!Claude");

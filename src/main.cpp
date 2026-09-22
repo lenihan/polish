@@ -24,18 +24,22 @@
 #include "hook/GroupHotkeyDialog.h"
 #include "hook/GroupPickerWindow.h"
 #include "hook/GroupTabThumbnail.h"
+#include "hook/TaskbarHook.h"
+#include "hook/TaskbarShield.h"
 #include "settings/Settings.h"
 #include "tabs/TabSwitching.h"
 #include "tabs/UiaWorker.h"
 #include "tray/TrayIcon.h"
 #include "util/AnchorPoint.h"
 #include "util/AppIdentity.h"
+#include "util/AppResolver.h"
 #include "util/Logging.h"
 #include "util/SwitcherCycle.h"
 #include "util/WindowIcon.h"
 #include "windowtracking/ActivationHistory.h"
 #include "windowtracking/GroupManager.h"
 #include "windowtracking/RectUtils.h"
+#include "windowtracking/TaskbarButtons.h"
 #include "windowtracking/WindowFilters.h"
 #include "windowtracking/WindowZOrder.h"
 
@@ -122,6 +126,48 @@ constexpr UINT kBullseyeAnchorTimeoutMs = 90;
 // rects to follow and no event when the animation finishes. Tuned by eye.
 constexpr UINT_PTR kHaloRestoreTimerId = 6;
 constexpr UINT kHaloRestoreDelayMs = 300;
+
+// The taskbar's safety-net re-read, and the mouse hook's watchdog, on one
+// repeating timer.
+//
+// A safety net is needed because the events that should drive this are
+// not complete: a button appearing or moving is observable (see
+// RequestTaskbarRefresh's callers), but the taskbar also reflows for
+// reasons Polish never hears about -- auto-hide sliding in and out, the
+// strip re-centering as a button's label expands, a pinned app being
+// dragged. A stale rect does not fail loudly; it silently shields the
+// wrong pixels, which is exactly the kind of bug that survives testing.
+// Slow enough to be free (one UIA read every few seconds, measured at
+// ~15ms), and TaskbarButtonsEqual means an unchanged read costs nothing
+// downstream.
+constexpr UINT_PTR kTaskbarRefreshTimerId = 8;
+constexpr UINT kTaskbarRefreshIntervalMs = 3000;
+
+// Runs only while the pointer is actually on the app-button strip, and
+// does one thing: keep the shield's pass-through in step with a state the
+// mouse hook cannot see on its own.
+//
+// The hook only ever wakes for mouse events, so two things it needs to
+// react to are invisible to it -- Ctrl being pressed while the pointer
+// sits still over a button (the escape hatch, which has to hand the strip
+// back so the native flyout returns), and the moment after a click that
+// was given to the taskbar, where the shield must take the strip back
+// before the native flyout's dwell elapses. Both are only reachable by
+// asking. Well under the flyout's own dwell, and confined to the strip,
+// so it costs nothing the rest of the time.
+constexpr UINT_PTR kTaskbarHoverTimerId = 9;
+constexpr UINT kTaskbarHoverPollMs = 100;
+
+// How long the pointer has to rest on an app button before its window
+// list opens. Only paid on the first button of a visit: once the panel is
+// up, moving along the strip switches it immediately, which is how the
+// native flyout behaves and the only way sweeping across the taskbar
+// feels like reading a list rather than triggering a series of popups.
+//
+// Shorter than the native flyout's dwell on purpose -- the whole point of
+// replacing it is that Polish's own list arrives sooner.
+constexpr UINT_PTR kTaskbarDwellTimerId = 10;
+constexpr UINT kTaskbarDwellMs = 220;
 
 // Windows seen going into the taskbar, so a later restore can be
 // recognized as one. EVENT_SYSTEM_MINIMIZEEND and the restored window's
@@ -391,6 +437,9 @@ void OnMemberTitleChanged(HWND hwnd);
 // focus, system-wide -- a no-op unless it turns out to be (or be nested
 // inside) a Tile-mode group's member window.
 void OnObjectFocusChanged(HWND hwnd);
+// Defined with the rest of the taskbar code, far below, but needed by the
+// window-destroy handler above it.
+void ForgetTaskbarWindow(HWND hwnd);
 
 // Forward-declared so ReflowGroupTo (defined further down) can call them
 // after GroupManager::ApplyLayout drops a member that turned out to be
@@ -1107,6 +1156,10 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 // here forever, and HWNDs are recycled -- a later window
                 // reusing the handle would be mistaken for a restore.
                 g_minimizedWindows.erase(hwnd);
+                // Same recycling hazard, different cache: a stale entry
+                // would give the next window to inherit this handle the
+                // dead one's icon.
+                ForgetTaskbarWindow(hwnd);
                 if (hwnd == g_trackedWindow) {
                     g_trackedWindow = nullptr;
                     g_inMoveSizeLoop = false;
@@ -2730,6 +2783,438 @@ void RefreshAltTabPanels() {
     polish::LogDebug(std::format(L"[Polish] AltTab: panels rebuilt for {} monitor(s)", g_altTabPanels.size()));
 }
 
+// --- Taskbar (PLAN.md's Taskbar items; docs/LIMITATIONS.md #22) ---
+//
+// Three pieces, each doing only what it is the right place for:
+//
+//   - TaskbarShield covers the app-button strip so the native hover
+//     thumbnail flyout is never created. It waives every button press,
+//     so real clicks keep reaching the taskbar.
+//   - TaskbarHook sees the press the shield waived and decides whether
+//     to swallow it, and reports which button the pointer is over.
+//   - This file joins the two to reality: which windows each button
+//     stands for, and what a swallowed click should do.
+//
+// The strip's rects come from UI Automation via the worker thread, so
+// everything here runs on a cached snapshot that is re-read whenever the
+// taskbar might have changed (see RequestTaskbarRefresh).
+
+std::unique_ptr<polish::AppResolver> g_appResolver;
+std::unique_ptr<polish::TaskbarShield> g_taskbarShield;
+std::unique_ptr<polish::TaskbarHook> g_taskbarHook;
+
+// The buttons as of the last completed read, and the windows each one
+// stands for -- parallel to g_taskbarButtons, and in MRU order. Parallel
+// rather than a field on TaskbarButton: that struct describes what UIA
+// said about the taskbar, and TaskbarButtonsEqual compares two reads of
+// it. Folding a window list into it would make "the taskbar changed"
+// also mean "some window was activated".
+std::vector<polish::TaskbarButton> g_taskbarButtons;
+std::vector<std::vector<HWND>> g_taskbarButtonWindows;
+
+// Polish's own window list, shown in place of the native thumbnail
+// flyout. A panel of its own rather than one of g_altTabPanels: those are
+// keyed to monitors and owned by an Alt+Tab session, and borrowing one
+// would mean a taskbar hover and an open Alt+Tab session fighting over
+// the same window. Same class, though -- the rows, the per-row
+// minimize/maximize/close buttons, the scrolling and the DPI handling are
+// all already there, and forking it to change where it sits would be a
+// second copy of all of that.
+std::unique_ptr<polish::AltTabListWindow> g_taskbarPanel;
+// Which button the panel is currently open for, or -1.
+int g_taskbarPanelButton = -1;
+// The button the dwell timer is counting down for.
+int g_taskbarDwellButton = -1;
+
+// Icons for the panel's rows, one lookup per window ever shown.
+//
+// Not an optimization: polish::GetWindowIconHandle deliberately leaks the
+// icon it allocates on its shell-fallback path, which its own header says
+// is fine for the handful of dialog-lifetime icons it was written for and
+// explicitly not for anything long-running. A hover panel is exactly the
+// "called at scale" case that warning is about -- every hover of every
+// button, for as long as the app runs. Caching bounds it to one icon per
+// window, which is the same cost a dialog already pays.
+std::map<HWND, HICON> g_taskbarIconCache;
+
+// The worker generation g_taskbarButtons came from. Handed to the hook
+// with its targets and carried back on every posted hover/click, so an
+// event hit-tested against a strip that has since been re-read is
+// dropped rather than acted on against whichever app now holds that
+// index.
+uint64_t g_taskbarGeneration = 0;
+// Whether a read is already queued, so a burst of refresh triggers
+// (explorer restarting mid-display-change, say) costs one enumeration.
+bool g_taskbarRefreshInFlight = false;
+
+// A click-to-cycle session: the app's window list frozen at the first
+// click, plus how far through it the user has clicked.
+//
+// Frozen rather than re-derived per click, because MRU order is not a
+// cycle. Activating a window moves it to the front, so re-reading the
+// order every click would step from A to B, then from B back to A,
+// forever -- the two-window ping-pong a single Alt+Tab tap does, never
+// reaching a third window. Freezing the order on the first click is what
+// makes repeated clicks walk the whole list.
+std::wstring g_taskbarCycleAppId;
+std::vector<HWND> g_taskbarCycleOrder;
+size_t g_taskbarCycleIndex = 0;
+// What the last click in this session actually activated. The session
+// continues only while this is still the foreground window: switching
+// away by any other means (Alt+Tab, clicking the window itself, another
+// app taking focus) means the next taskbar click should start again from
+// that app's real MRU order rather than resume a stale walk.
+HWND g_taskbarCycleActivated = nullptr;
+
+void EndTaskbarCycleSession() {
+    g_taskbarCycleAppId.clear();
+    g_taskbarCycleOrder.clear();
+    g_taskbarCycleIndex = 0;
+    g_taskbarCycleActivated = nullptr;
+}
+
+BOOL CALLBACK EnumTaskbarCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
+    // Minimized windows included, unlike Alt+Tab's active list: a taskbar
+    // button counts them, and an app whose windows are all minimized
+    // still cycles between them.
+    if (polish::IsCandidateWindowShape(hwnd)) {
+        reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
+    }
+    return TRUE;
+}
+
+// Every taskbar-relevant window, MRU first, with anything Polish has no
+// recency data for appended in EnumWindows' own Z-order.
+//
+// The same three-stage merge RebuildAltTabCandidates does, and for the
+// same reason: ActivationHistory only knows windows that became
+// foreground during *this* process run, so a window open since before
+// Polish started has no recency at all and would otherwise be dropped
+// from the order entirely rather than merely sorted late.
+std::vector<HWND> TaskbarWindowsInMruOrder() {
+    std::vector<HWND> all;
+    EnumWindows(EnumTaskbarCandidateWindowsProc, reinterpret_cast<LPARAM>(&all));
+
+    std::vector<HWND> ordered;
+    for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+        if (std::find(all.begin(), all.end(), hwnd) != all.end()) {
+            ordered.push_back(hwnd);
+        }
+    }
+    for (HWND hwnd : all) {
+        if (std::find(ordered.begin(), ordered.end(), hwnd) == ordered.end()) {
+            ordered.push_back(hwnd);
+        }
+    }
+    return ordered;
+}
+
+// Re-resolves which windows each button stands for and hands the result
+// to the shield and the hook. Called whenever a taskbar read completes.
+void RebuildTaskbarTargets() {
+    if (!g_settings.taskbarEnabled || g_taskbarShield == nullptr || g_taskbarHook == nullptr ||
+        g_appResolver == nullptr || !g_appResolver->IsAvailable()) {
+        return;
+    }
+    const ULONGLONG startTick = GetTickCount64();
+    const std::vector<HWND> ordered = TaskbarWindowsInMruOrder();
+
+    // One AppIdForWindow call per window, not one per window per button.
+    // The resolver is an in-process COM call, but there is no reason to
+    // pay for it N times over.
+    std::vector<std::pair<HWND, std::wstring>> resolved;
+    resolved.reserve(ordered.size());
+    for (HWND hwnd : ordered) {
+        if (std::optional<std::wstring> appId = g_appResolver->AppIdForWindow(hwnd)) {
+            resolved.emplace_back(hwnd, std::move(*appId));
+        }
+    }
+
+    g_taskbarButtonWindows.assign(g_taskbarButtons.size(), {});
+    std::vector<polish::TaskbarHook::Target> targets;
+    targets.reserve(g_taskbarButtons.size());
+    for (size_t i = 0; i < g_taskbarButtons.size(); ++i) {
+        for (const auto& resolvedWindow : resolved) {
+            if (resolvedWindow.second == g_taskbarButtons[i].appId) {
+                g_taskbarButtonWindows[i].push_back(resolvedWindow.first);
+            }
+        }
+        polish::TaskbarHook::Target target;
+        target.rect = g_taskbarButtons[i].rect;
+        // Only an app with somewhere to cycle to claims its click. With 0
+        // or 1 windows the press is left alone, so Windows launches or
+        // activates exactly as it always has.
+        target.cyclesOnClick = g_taskbarButtonWindows[i].size() >= 2;
+        targets.push_back(target);
+    }
+
+    g_taskbarShield->Update(g_taskbarButtons);
+    g_taskbarHook->SetTargets(g_taskbarGeneration, std::move(targets));
+    polish::LogDebug(std::format(L"[Polish] Taskbar: {} button(s) mapped against {} window(s) in {}ms (generation {})",
+                                 g_taskbarButtons.size(), resolved.size(), GetTickCount64() - startTick,
+                                 g_taskbarGeneration));
+}
+
+// Asks the worker to re-read the taskbar. Cheap to over-call: a read that
+// comes back identical is dropped by TaskbarButtonsEqual, and a request
+// made while one is already queued is skipped outright.
+void RequestTaskbarRefresh() {
+    if (!g_settings.taskbarEnabled || g_uiaWorker == nullptr || g_taskbarRefreshInFlight) {
+        return;
+    }
+    g_taskbarRefreshInFlight = true;
+    g_uiaWorker->RequestTaskbarButtons();
+}
+
+// A taskbar read has come back (kTaskbarButtonsReadyMessage).
+void OnTaskbarButtonsReady(uint64_t generation) {
+    g_taskbarRefreshInFlight = false;
+    if (!g_settings.taskbarEnabled || g_uiaWorker == nullptr || g_taskbarShield == nullptr ||
+        g_taskbarHook == nullptr) {
+        return;
+    }
+    const polish::UiaWorker::TaskbarSnapshot snapshot = g_uiaWorker->LatestTaskbarButtons();
+    if (snapshot.generation != generation || !snapshot.resolved) {
+        return;
+    }
+    if (!snapshot.taskbarUsable) {
+        // The taskbar could not be read at all -- an OS build that
+        // reshaped the tree, or explorer mid-restart. Uncover it and
+        // leave the shell completely alone rather than shield a strip
+        // whose position is a guess. The safety-net timer keeps asking,
+        // so a restarting explorer recovers on its own.
+        g_taskbarButtons.clear();
+        g_taskbarButtonWindows.clear();
+        g_taskbarShield->Hide();
+        g_taskbarHook->SetTargets(generation, {});
+        return;
+    }
+    const bool unchanged = polish::TaskbarButtonsEqual(snapshot.buttons, g_taskbarButtons);
+    if (!unchanged) {
+        g_taskbarButtons = snapshot.buttons;
+        g_taskbarGeneration = generation;
+        // A button appearing or disappearing can mean the app being
+        // cycled has closed its last window, or has gained one that the
+        // frozen order does not know about.
+        EndTaskbarCycleSession();
+    }
+    // Rebuilt either way: the windows behind an unchanged set of buttons
+    // still move, open and close, and that changes which buttons cycle.
+    RebuildTaskbarTargets();
+}
+
+// Drops everything the taskbar feature remembers about one window, on
+// its destruction. Only the icon cache is keyed by HWND and outlives the
+// window; the button->windows mapping is rebuilt wholesale on the next
+// read, and the frozen cycle order already tolerates a dead entry by
+// skipping it.
+void ForgetTaskbarWindow(HWND hwnd) { g_taskbarIconCache.erase(hwnd); }
+
+HICON TaskbarRowIcon(HWND hwnd) {
+    auto cached = g_taskbarIconCache.find(hwnd);
+    if (cached != g_taskbarIconCache.end()) {
+        return cached->second;
+    }
+    const HICON icon = polish::GetWindowIconHandle(hwnd);
+    g_taskbarIconCache.emplace(hwnd, icon);
+    return icon;
+}
+
+void CloseTaskbarPanel() {
+    KillTimer(g_messageWindow, kTaskbarDwellTimerId);
+    g_taskbarDwellButton = -1;
+    if (g_taskbarPanelButton < 0) {
+        return;
+    }
+    g_taskbarPanelButton = -1;
+    if (g_taskbarPanel) {
+        g_taskbarPanel->Hide();
+    }
+    // The halo was following whichever row was hovered; put it back on
+    // whatever actually has focus.
+    UpdateActiveWindowHalo(GetForegroundWindow());
+}
+
+// Opens (or re-points) the window list for one app button.
+void OpenTaskbarPanel(int index) {
+    if (!g_taskbarPanel || index < 0 || static_cast<size_t>(index) >= g_taskbarButtonWindows.size()) {
+        return;
+    }
+    const std::vector<HWND>& windows = g_taskbarButtonWindows[static_cast<size_t>(index)];
+    if (windows.empty()) {
+        // A pinned app with nothing running has nothing to list, and an
+        // empty panel would be worse than none at all.
+        CloseTaskbarPanel();
+        return;
+    }
+
+    std::vector<polish::AltTabListRow> rows;
+    rows.reserve(windows.size());
+    for (HWND hwnd : windows) {
+        polish::AltTabListRow row;
+        row.hwnd = hwnd;
+        wchar_t title[256] = L"";
+        GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+        row.title = title;
+        row.icon = TaskbarRowIcon(hwnd);
+        // The panel draws minimized rows muted, below a divider -- the
+        // same distinction the taskbar button itself hides. Its rows must
+        // stay contiguous at the end, which is why this sorts rather than
+        // marking in place.
+        row.minimized = IsIconic(hwnd) != FALSE;
+        rows.push_back(std::move(row));
+    }
+    std::stable_partition(rows.begin(), rows.end(),
+                          [](const polish::AltTabListRow& row) { return !row.minimized; });
+
+    const polish::TaskbarButton& button = g_taskbarButtons[static_cast<size_t>(index)];
+    // The app's name, not "Active": the panel is scoped to one app and
+    // should say which. The button's own UIA name is what Windows itself
+    // calls it, already localized; the AppUserModelID is the fallback
+    // only because it is guaranteed non-empty, never because it reads
+    // well.
+    g_taskbarPanel->SetActiveSectionHeader(button.name.empty() ? button.appId : button.name);
+    g_taskbarPanel->SetRowActionsEnabled(true);
+    // No keyboard session is open here, so the Del/-/+ legend would
+    // document keys that do nothing.
+    g_taskbarPanel->SetFooterLegendEnabled(false);
+    g_taskbarPanel->SetAnchorRect(button.rect);
+    // No highlighted row: nothing is "selected" on a hover, and marking
+    // one would suggest a click would activate it rather than cycle.
+    g_taskbarPanel->Show(rows, std::nullopt, MonitorFromRect(&button.rect, MONITOR_DEFAULTTONEAREST));
+    g_taskbarPanelButton = index;
+}
+
+// The pointer moved onto a different app button, or off the strip
+// (index -1).
+void OnTaskbarHover(uint64_t generation, int index) {
+    if (generation != g_taskbarGeneration || !g_settings.taskbarEnabled) {
+        return;
+    }
+    if (index < 0 || static_cast<size_t>(index) >= g_taskbarButtons.size()) {
+        // Not closed here: the pointer leaving the strip is usually the
+        // pointer moving *onto* the panel, which sits directly above it.
+        // The poll timer decides, since it can see both.
+        KillTimer(g_messageWindow, kTaskbarDwellTimerId);
+        g_taskbarDwellButton = -1;
+        return;
+    }
+    SetTimer(g_messageWindow, kTaskbarHoverTimerId, kTaskbarHoverPollMs, nullptr);
+    if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) {
+        // The escape hatch: with Ctrl held the shield is already open and
+        // the native flyout is on its way, so Polish shows nothing.
+        CloseTaskbarPanel();
+        return;
+    }
+    if (g_taskbarPanelButton >= 0) {
+        // Already reading the list -- moving along the strip re-points it
+        // at once rather than making the user wait out a dwell per button.
+        OpenTaskbarPanel(index);
+        return;
+    }
+    g_taskbarDwellButton = index;
+    SetTimer(g_messageWindow, kTaskbarDwellTimerId, kTaskbarDwellMs, nullptr);
+}
+
+// A left-click was swallowed on a button with 2+ windows.
+void OnTaskbarCycleClick(uint64_t generation, int index) {
+    if (generation != g_taskbarGeneration || !g_settings.taskbarEnabled) {
+        return;
+    }
+    if (index < 0 || static_cast<size_t>(index) >= g_taskbarButtonWindows.size()) {
+        return;
+    }
+    // The click is the answer to what the panel was offering; leaving it
+    // up over the window that just came forward would be in the way.
+    CloseTaskbarPanel();
+    const std::wstring appId = g_taskbarButtons[static_cast<size_t>(index)].appId;
+    const std::vector<HWND>& windows = g_taskbarButtonWindows[static_cast<size_t>(index)];
+    if (windows.size() < 2) {
+        // The hook only swallows a click it was told cycles, so reaching
+        // here means the window set changed between the hit-test and this
+        // message. The click is already eaten and cannot be given back --
+        // activating the app's one remaining window is the closest thing
+        // to what the user asked for.
+        if (windows.size() == 1 && IsWindow(windows.front())) {
+            InjectHarmlessCtrlKeystroke();
+            SetForegroundWindow(windows.front());
+        }
+        return;
+    }
+
+    // Resume the frozen walk only if this is the same app and nothing has
+    // stolen the foreground since -- see g_taskbarCycleActivated.
+    const bool resuming = appId == g_taskbarCycleAppId && !g_taskbarCycleOrder.empty() &&
+                          g_taskbarCycleActivated != nullptr && GetForegroundWindow() == g_taskbarCycleActivated;
+    if (resuming) {
+        g_taskbarCycleIndex =
+            polish::AdvanceHighlight(g_taskbarCycleIndex, g_taskbarCycleOrder.size(), /*backward=*/false);
+    } else {
+        g_taskbarCycleAppId = appId;
+        g_taskbarCycleOrder = windows;
+        // Start on the second entry when the app is already focused: the
+        // first is its most recent window, which is the one the user is
+        // looking at, and stepping onto it would make the click do
+        // nothing at all. Otherwise start on the first, which is the same
+        // window a plain activation would have given them.
+        g_taskbarCycleIndex = GetForegroundWindow() == windows.front() ? 1 : 0;
+    }
+
+    // A window can close between the freeze and the click.
+    size_t attempts = 0;
+    while (attempts < g_taskbarCycleOrder.size() && !IsWindow(g_taskbarCycleOrder[g_taskbarCycleIndex])) {
+        g_taskbarCycleIndex =
+            polish::AdvanceHighlight(g_taskbarCycleIndex, g_taskbarCycleOrder.size(), /*backward=*/false);
+        ++attempts;
+    }
+    const HWND target = g_taskbarCycleOrder[g_taskbarCycleIndex];
+    if (!IsWindow(target)) {
+        EndTaskbarCycleSession();
+        return;
+    }
+
+    if (IsIconic(target)) {
+        // Same finding Alt+Tab's commit relies on: a minimized window
+        // needs an explicit restore before SetForegroundWindow reliably
+        // brings it to front.
+        ShowWindow(target, SW_RESTORE);
+    }
+    InjectHarmlessCtrlKeystroke();
+    const BOOL result = SetForegroundWindow(target);
+    g_taskbarCycleActivated = target;
+    polish::LogDebug(std::format(
+        L"[Polish] Taskbar: cycle button {} -> {} of {} hwnd={} SetForegroundWindow result={}", index,
+        g_taskbarCycleIndex + 1, g_taskbarCycleOrder.size(), reinterpret_cast<void*>(target), result != FALSE));
+}
+
+// Brings the whole feature up or down -- the tray toggle, and startup.
+// Off means the shield is uncovered and the hook hit-tests nothing, so
+// the taskbar is left exactly as Windows built it. The hook itself stays
+// installed either way: it is inert with no targets, and tearing a
+// low-level hook down and back up is the one part of this that cannot be
+// verified from inside the process (see TaskbarHook::EnsureInstalled).
+void ApplyTaskbarSetting() {
+    if (!g_settings.taskbarEnabled) {
+        EndTaskbarCycleSession();
+        g_taskbarButtons.clear();
+        g_taskbarButtonWindows.clear();
+        if (g_taskbarShield) {
+            g_taskbarShield->Hide();
+        }
+        if (g_taskbarHook) {
+            g_taskbarHook->SetTargets(g_taskbarGeneration, {});
+        }
+        CloseTaskbarPanel();
+        KillTimer(g_messageWindow, kTaskbarRefreshTimerId);
+        KillTimer(g_messageWindow, kTaskbarHoverTimerId);
+        polish::LogDebug(L"[Polish] Taskbar: disabled -- shield uncovered, native taskbar untouched");
+        return;
+    }
+    SetTimer(g_messageWindow, kTaskbarRefreshTimerId, kTaskbarRefreshIntervalMs, nullptr);
+    RequestTaskbarRefresh();
+    polish::LogDebug(L"[Polish] Taskbar: enabled");
+}
+
 constexpr UINT kMenuIdRestoreSync = 1;
 constexpr UINT kMenuIdAltTab = 2;
 constexpr UINT kMenuIdNewGroup = 3;
@@ -2739,6 +3224,7 @@ constexpr UINT kMenuIdAbout = 6;
 constexpr UINT kMenuIdExit = 7;
 constexpr UINT kMenuIdHalo = 8;
 constexpr UINT kMenuIdBullseye = 9;
+constexpr UINT kMenuIdTaskbar = 10;
 
 constexpr wchar_t kAboutUrl[] = L"https://www.linkedin.com/in/davidlenihan/";
 
@@ -3506,6 +3992,8 @@ void PopulateTrayMenu(HMENU menu) {
                 L"Halo around active window");
     AppendMenuW(menu, MF_STRING | (g_settings.bullseyeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdBullseye,
                 L"Bullseye (copy/paste flash)");
+    AppendMenuW(menu, MF_STRING | (g_settings.taskbarEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdTaskbar,
+                L"Taskbar hover list and click-to-cycle");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuIdNewGroup,
                 (L"New Group...\t" + FormatHotkey(g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey))
@@ -3551,6 +4039,13 @@ void HandleTrayCommand(UINT commandId) {
                 g_bullseye->Hide();
             }
             break;
+        case kMenuIdTaskbar:
+            g_settings.taskbarEnabled = !g_settings.taskbarEnabled;
+            polish::SaveSettings(g_settings);
+            polish::LogDebug(
+                std::format(L"[Polish] Taskbar {}", g_settings.taskbarEnabled ? L"enabled" : L"disabled"));
+            ApplyTaskbarSetting();
+            break;
         case kMenuIdStartAtLogin: {
             const bool newValue = !polish::IsStartAtLoginEnabled();
             polish::SetStartAtLoginEnabled(newValue);
@@ -3580,6 +4075,20 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         if (g_trayIcon) {
             g_trayIcon->HandleTaskbarRecreated();
         }
+        // Explorer restarted: every taskbar HWND and UIA element the last
+        // read produced is now invalid, and the shield is covering pixels
+        // that belong to a taskbar that no longer exists.
+        CloseTaskbarPanel();
+        g_taskbarButtons.clear();
+        g_taskbarButtonWindows.clear();
+        EndTaskbarCycleSession();
+        if (g_taskbarShield) {
+            g_taskbarShield->Hide();
+        }
+        if (g_taskbarHook) {
+            g_taskbarHook->SetTargets(g_taskbarGeneration, {});
+        }
+        RequestTaskbarRefresh();
         return 0;
     }
 
@@ -3606,6 +4115,41 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 KillTimer(hwnd, kHaloRestoreTimerId);
                 g_haloMinimizeSuppressed = false;
                 UpdateActiveWindowHalo(GetForegroundWindow());
+            } else if (wParam == kTaskbarDwellTimerId) {
+                KillTimer(hwnd, kTaskbarDwellTimerId);
+                if (g_taskbarDwellButton >= 0) {
+                    OpenTaskbarPanel(g_taskbarDwellButton);
+                    g_taskbarDwellButton = -1;
+                }
+            } else if (wParam == kTaskbarHoverTimerId) {
+                // Repeating while the pointer is anywhere in the feature's
+                // own UI -- the button strip or the panel above it.
+                if (g_taskbarShield && g_taskbarHook) {
+                    g_taskbarShield->SetPassThrough(g_taskbarHook->PassThroughWanted());
+                }
+                POINT cursor{};
+                GetCursorPos(&cursor);
+                // HitTestTaskbarButton rather than asking the hook where
+                // it last saw the pointer: the hook only knows what mouse
+                // events told it, and the pointer can be resting still.
+                const bool onStrip = polish::HitTestTaskbarButton(g_taskbarButtons, cursor).has_value();
+                const bool onPanel = g_taskbarPanel && g_taskbarPanel->IsVisible() &&
+                                     g_taskbarPanel->ContainsPoint(cursor);
+                if (!onStrip && !onPanel) {
+                    CloseTaskbarPanel();
+                    KillTimer(hwnd, kTaskbarHoverTimerId);
+                }
+            } else if (wParam == kTaskbarRefreshTimerId) {
+                // Repeating, so deliberately not killed here -- see
+                // kTaskbarRefreshTimerId for why the taskbar needs a
+                // poll on top of the events that do fire.
+                if (g_taskbarHook && !g_taskbarHook->EnsureInstalled() && !g_taskbarHook->IsInstalled()) {
+                    polish::LogDebug(std::format(
+                        L"[Polish] Taskbar: WARNING the mouse hook is not installed and could not be "
+                        L"reinstalled. GetLastError={}",
+                        GetLastError()));
+                }
+                RequestTaskbarRefresh();
             } else if (wParam == kBullseyeAnchorTimerId) {
                 ResolveBullseyeAnchor(/*timedOut=*/true);
             } else if (wParam == kBullseyeFrameTimerId) {
@@ -3641,6 +4185,18 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             }
             return 0;
 
+        case polish::kTaskbarButtonsReadyMessage:
+            OnTaskbarButtonsReady(static_cast<uint64_t>(wParam));
+            return 0;
+
+        case polish::TaskbarHook::kHoverMessage:
+        case polish::TaskbarHook::kCycleClickMessage:
+        case polish::TaskbarHook::kReplayPressMessage:
+            if (g_taskbarHook) {
+                g_taskbarHook->HandleHookMessage(message, wParam, lParam);
+            }
+            return 0;
+
         case WM_COMMAND:
             if (g_trayIcon) {
                 g_trayIcon->HandleCommand(wParam);
@@ -3664,6 +4220,9 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             // edge inflation) without any LOCATIONCHANGE for the target
             // itself.
             UpdateActiveWindowHalo(GetForegroundWindow());
+            // A monitor appearing or disappearing takes its secondary
+            // taskbar with it, and re-lays out the primary one.
+            RequestTaskbarRefresh();
             return 0;
 
         case WM_SETTINGCHANGE:
@@ -3732,6 +4291,12 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             }
             g_trayIcon.reset();
             g_altTabHook.reset();
+            // Before the shield, so no mouse event can arrive for a
+            // strip that is on its way out.
+            g_taskbarHook.reset();
+            g_taskbarPanel.reset();
+            g_taskbarShield.reset();
+            g_appResolver.reset();
             g_altTabOverlays.clear();
             g_activeWindowHalo.reset();
             g_bullseye.reset();
@@ -3815,9 +4380,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     g_settings = polish::LoadSettings();
     polish::LogDebug(std::format(
-        L"[Polish] settings loaded: restoreSyncEnabled={} altTabEnabled={} haloEnabled={} bullseyeEnabled={}",
+        L"[Polish] settings loaded: restoreSyncEnabled={} altTabEnabled={} haloEnabled={} bullseyeEnabled={} "
+        L"taskbarEnabled={}",
         g_settings.restoreSyncEnabled, g_settings.altTabEnabled, g_settings.haloEnabled,
-        g_settings.bullseyeEnabled));
+        g_settings.bullseyeEnabled, g_settings.taskbarEnabled));
 
     g_messageWindow = CreateMessageWindow(instance);
     if (g_messageWindow == nullptr) {
@@ -3936,6 +4502,67 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // change.
     g_activeWindowHalo = std::make_unique<polish::ActiveWindowHalo>(instance);
     g_bullseye = std::make_unique<polish::BullseyeOverlay>(instance);
+
+    // The taskbar trio. The resolver is what makes "which windows does
+    // this button stand for?" exact rather than a heuristic (see
+    // AppResolver), so without it there is nothing worth shielding the
+    // taskbar for -- the feature declines to start rather than guess.
+    g_appResolver = std::make_unique<polish::AppResolver>();
+    if (!g_appResolver->IsAvailable()) {
+        g_settings.taskbarEnabled = false;
+        polish::LogDebug(L"[Polish] Taskbar: WARNING IApplicationResolver unavailable -- taskbar features "
+                          L"disabled for this run, native taskbar left untouched");
+    } else {
+        g_taskbarShield = std::make_unique<polish::TaskbarShield>(instance);
+        // Pre-created like every other overlay, for the same reason: the
+        // first show is the latency-sensitive one.
+        g_taskbarPanel = std::make_unique<polish::AltTabListWindow>(instance);
+        g_taskbarPanel->SetOnRowActivated([](HWND hwnd) {
+            CloseTaskbarPanel();
+            if (!IsWindow(hwnd)) {
+                return;
+            }
+            if (IsIconic(hwnd)) {
+                ShowWindow(hwnd, SW_RESTORE);
+            }
+            InjectHarmlessCtrlKeystroke();
+            SetForegroundWindow(hwnd);
+        });
+        g_taskbarPanel->SetOnRowMinimizeToggle(OnAltTabRowMinimizeToggle);
+        g_taskbarPanel->SetOnRowMaximizeToggle(OnAltTabRowMaximizeToggle);
+        g_taskbarPanel->SetOnRowClose(OnAltTabRowClose);
+        // Pointing at a row halos the real window where it actually sits,
+        // which is the thing a thumbnail only approximates. One shared
+        // halo is enough: exactly one row is hovered at a time.
+        g_taskbarPanel->SetOnRowHovered([](HWND hwnd) {
+            if (hwnd != nullptr && IsWindow(hwnd) && !IsIconic(hwnd)) {
+                if (g_activeWindowHalo) {
+                    g_activeWindowHalo->ShowAroundTarget(hwnd);
+                }
+                return;
+            }
+            UpdateActiveWindowHalo(GetForegroundWindow());
+        });
+        // Installed whether or not the feature is on: with no targets the
+        // hook hit-tests nothing and swallows nothing, and this way the
+        // tray toggle never has to install a low-level hook at a moment
+        // when failure would be silent.
+        g_taskbarHook = std::make_unique<polish::TaskbarHook>(
+            g_messageWindow, OnTaskbarHover, OnTaskbarCycleClick, [](bool on) {
+                // Synchronous, from inside the hook callback -- see
+                // TaskbarHook's class comment for why this one cannot be
+                // posted like the other two.
+                if (g_taskbarShield) {
+                    g_taskbarShield->SetPassThrough(on);
+                }
+            });
+        if (!g_taskbarHook->IsInstalled()) {
+            polish::LogDebug(std::format(L"[Polish] Taskbar: WARNING failed to install the mouse hook -- "
+                                          L"click-to-cycle unavailable. GetLastError={}",
+                                          GetLastError()));
+        }
+    }
+    ApplyTaskbarSetting();
 
     OnForegroundChanged(GetForegroundWindow());
 

@@ -36,6 +36,7 @@ Settings LoadSettings() {
         settings.altTabEnabled = ReadDword(key, L"AltTabEnabled", 1) != 0;
         settings.haloEnabled = ReadDword(key, L"HaloEnabled", 1) != 0;
         settings.bullseyeEnabled = ReadDword(key, L"BullseyeEnabled", 1) != 0;
+        settings.taskbarEnabled = ReadDword(key, L"TaskbarEnabled", 1) != 0;
         settings.groupHotkeyModifiers = ReadDword(key, L"GroupHotkeyModifiers", MOD_WIN | MOD_ALT);
         settings.groupHotkeyVirtualKey = ReadDword(key, L"GroupHotkeyVirtualKey", 'G');
         RegCloseKey(key);
@@ -55,6 +56,7 @@ void SaveSettings(const Settings& settings) {
     WriteDword(key, L"AltTabEnabled", settings.altTabEnabled ? 1 : 0);
     WriteDword(key, L"HaloEnabled", settings.haloEnabled ? 1 : 0);
     WriteDword(key, L"BullseyeEnabled", settings.bullseyeEnabled ? 1 : 0);
+    WriteDword(key, L"TaskbarEnabled", settings.taskbarEnabled ? 1 : 0);
     WriteDword(key, L"GroupHotkeyModifiers", settings.groupHotkeyModifiers);
     WriteDword(key, L"GroupHotkeyVirtualKey", settings.groupHotkeyVirtualKey);
     RegCloseKey(key);

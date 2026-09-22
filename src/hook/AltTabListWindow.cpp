@@ -56,6 +56,12 @@ constexpr wchar_t kFooterLegendText[] = L"Del: Close    -: Minimize    +: Maximi
 // floor guarantees at least a few rows' worth of height even on a
 // pathologically short work area.
 constexpr int kViewportMarginPx = 40;
+
+// How far an anchored panel sits from the rect it points at (see
+// SetAnchorRect). Enough that the panel reads as a separate surface
+// rather than an extension of the taskbar, small enough that the pointer
+// crosses it without the panel's own mouse tracking losing the cursor.
+constexpr int kAnchorGapPx = 8;
 // Fixed-position strip painted at the top/bottom edge of the *scrollable*
 // region (not part of the scrolled content itself, and not to be
 // confused with the separately-pinned footer below it) whenever content
@@ -684,7 +690,7 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     // rows/headers above scroll underneath it, not scroll away with
     // them. A subtle divider marks that boundary, otherwise invisible
     // once scrolling is actually happening.
-    if (rowActionsEnabled_ && !rows_.empty()) {
+    if (footerLegendEnabled_ && !rows_.empty()) {
         HPEN dividerPen = CreatePen(PS_SOLID, 1, kSectionDividerColor);
         HGDIOBJ oldPen = SelectObject(hdc, dividerPen);
         MoveToEx(hdc, clientRect.left, scrollViewportHeight, nullptr);
@@ -727,8 +733,28 @@ void AltTabListWindow::Reposition(HMONITOR targetMonitor, UINT dpi) {
         std::max(Scale(kRowHeight, dpi) * 3, workAreaHeight - Scale(kViewportMarginPx, dpi));
     const int height = std::min(naturalHeight, maxViewportHeight);
 
-    const int x = workArea.left + (workArea.right - workArea.left - width) / 2;
-    const int y = workArea.top + (workArea.bottom - workArea.top - height) / 2;
+    int x = workArea.left + (workArea.right - workArea.left - width) / 2;
+    int y = workArea.top + (workArea.bottom - workArea.top - height) / 2;
+
+    if (anchorRect_.has_value()) {
+        const RECT anchor = *anchorRect_;
+        const int gap = Scale(kAnchorGapPx, dpi);
+        x = anchor.left + ((anchor.right - anchor.left) - width) / 2;
+        // Clamped rather than allowed to hang off the edge: the buttons
+        // at either end of a centered taskbar strip are close enough to
+        // the screen edge that a panel centered on one would otherwise
+        // be half off it.
+        x = std::min(std::max(x, static_cast<int>(workArea.left)), static_cast<int>(workArea.right) - width);
+        // Whichever side of the anchor has room. Checking rather than
+        // assuming "above" keeps this correct for a taskbar at the top
+        // of the screen, where the buttons have nothing above them.
+        if (anchor.top - workArea.top >= height + gap) {
+            y = anchor.top - gap - height;
+        } else {
+            y = anchor.bottom + gap;
+        }
+        y = std::min(std::max(y, static_cast<int>(workArea.top)), static_cast<int>(workArea.bottom) - height);
+    }
 
     SetWindowPos(window_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
 }
@@ -832,6 +858,10 @@ void AltTabListWindow::SetHoveredIndex(std::optional<size_t> index) {
     const std::vector<RECT> rowRects = ComputeLayout(dpi).rowRects;
     const std::optional<size_t> oldIndex = hoveredIndex_;
     hoveredIndex_ = index;
+    if (onRowHovered_) {
+        const HWND hovered = index.has_value() ? rows_[*index].hwnd : nullptr;
+        onRowHovered_(hovered);
+    }
     // Same narrow-invalidate shape as SetHighlight -- a full-panel
     // repaint on every mouse-move over the list would be wasteful and
     // this codebase has already hit that exact flashing bug shape more
@@ -906,11 +936,21 @@ void AltTabListWindow::RepaintRow(HWND hwnd) {
 }
 
 int AltTabListWindow::FooterBandHeightForState(UINT dpi) const {
-    return rowActionsEnabled_ ? FooterBandHeight(dpi) : 0;
+    return footerLegendEnabled_ ? FooterBandHeight(dpi) : 0;
 }
 
 void AltTabListWindow::SetRowActionsEnabled(bool enabled) {
     rowActionsEnabled_ = enabled;
+    // Kept in step for every caller that predates the footer having a
+    // flag of its own: switching the row buttons off has always meant
+    // switching the legend that documents them off too. A caller that
+    // wants them apart says so afterwards, which is exactly what the
+    // taskbar hover panel does.
+    footerLegendEnabled_ = enabled;
+}
+
+void AltTabListWindow::SetFooterLegendEnabled(bool enabled) {
+    footerLegendEnabled_ = enabled;
 }
 
 void AltTabListWindow::Hide() {

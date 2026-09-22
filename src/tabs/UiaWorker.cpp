@@ -202,8 +202,15 @@ bool ReadOneTaskbar(IUIAutomation* uia, HWND taskbar, std::vector<TaskbarButton>
         if (rect.right <= rect.left || rect.bottom <= rect.top) {
             continue;
         }
+        // Already in the cache request, so this costs nothing extra. An
+        // element with no name is kept rather than skipped: the name is
+        // for display, and a button with none is still a button.
+        ScopedBstr name;
+        element->get_CachedName(name.Receive());
+
         TaskbarButton button;
         button.appId = appId;
+        button.name = name.ToString();
         button.rect = rect;
         button.taskbar = monitor;
         buttons.push_back(std::move(button));

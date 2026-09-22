@@ -21,7 +21,7 @@ bool TaskbarButtonsEqual(const std::vector<TaskbarButton>& a, const std::vector<
         return false;
     }
     return std::equal(a.begin(), a.end(), b.begin(), [](const TaskbarButton& l, const TaskbarButton& r) {
-        return l.appId == r.appId && l.taskbar == r.taskbar && l.rect.left == r.rect.left &&
+        return l.appId == r.appId && l.name == r.name && l.taskbar == r.taskbar && l.rect.left == r.rect.left &&
                l.rect.top == r.rect.top && l.rect.right == r.rect.right && l.rect.bottom == r.rect.bottom;
     });
 }

@@ -49,6 +49,8 @@ add_library(polish_core STATIC
     src/hook/GroupPickerSelectedListWindow.cpp
     src/hook/GroupHotkeyDialog.cpp
     src/hook/GroupTabThumbnail.cpp
+    src/hook/TaskbarShield.cpp
+    src/hook/TaskbarHook.cpp
     src/settings/Settings.cpp
     src/tabs/TabSwitching.cpp
     src/tabs/UiaWorker.cpp

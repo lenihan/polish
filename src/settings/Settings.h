@@ -17,6 +17,13 @@ struct Settings {
     bool haloEnabled = true;
     // The copy/paste ring animation (see BullseyeOverlay).
     bool bullseyeEnabled = true;
+    // Polish's taskbar behavior: its own window list on hover instead of
+    // the native thumbnail flyout, and click-to-cycle an app's windows in
+    // MRU order (see TaskbarShield and TaskbarHook). The one toggle here
+    // that changes how another process's UI behaves rather than only
+    // adding to it, so switching it off must restore the native taskbar
+    // completely -- see main.cpp's ApplyTaskbarSetting.
+    bool taskbarEnabled = true;
 
     // The "New Group" global hotkey -- RegisterHotKey's own modifier
     // flags (MOD_ALT/MOD_CONTROL/MOD_SHIFT/MOD_WIN, OR'd together) and

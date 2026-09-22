@@ -62,6 +62,24 @@ current todo list.
   the XAML island, so hit-testing must be done by hand against cached
   rects. `tools/taskbar-probe.ps1` checks the whole mapping against the
   live taskbar.
+- Taskbar: hovering an app button shows Polish's own window list --
+  MRU-ordered, headed with the app's own name, with the per-row
+  minimize/maximize/close buttons the Alt+Tab panel already had, and
+  anchored to the button it belongs to. The native thumbnail flyout never
+  appears at all: a layered topmost "shield" over the button strip owns
+  the pointer there, so the taskbar never gets a pointer-enter and its
+  hover dwell never starts (`docs/LIMITATIONS.md` #22). Hovering a row
+  halos the real window where it actually sits.
+- Taskbar: left-clicking a button with 2+ windows cycles that app's
+  windows in MRU order, over an order frozen at the first click so
+  repeated clicks walk the whole list instead of ping-ponging between
+  the two most recent. 0 or 1 windows is left entirely to Windows.
+- Taskbar: every other gesture in the strip still reaches the real
+  taskbar -- right-click jumplist, shift/middle-click, drag onto a
+  button -- by swallowing the press, opening the shield and replaying it
+  a message-loop turn later. Three things that look like they should do
+  this and do not are in `docs/LIMITATIONS.md` #23. Holding Ctrl hands
+  the strip back completely, native flyout included.
 - Window groups (tab/tile mode): merged to main — combine multiple real
   windows into one taskbar entry, switchable via tabs or shown as tiles.
 - Groups: real window reparenting so members can't be dragged out
@@ -191,28 +209,25 @@ current todo list.
 
 ## Left to do
 
-- Taskbar: clicking a taskbar icon that has 2+ windows open should cycle
-  through them, in MRU order. The groundwork is in (`TaskbarButtons`,
-  `AppResolver`); still to build are the UIA button enumeration, the
-  app-lifetime `WH_MOUSE_LL` hook that swallows the click, and the
-  cycling itself. Unaffected by the flyout finding below -- swallowing
-  mouse *buttons* works fine; only swallowing *moves* freezes the cursor.
-- Taskbar: hovering a taskbar icon should show Polish's own window list
-  (the Alt+Tab panel scoped to one app, with per-row minimize/maximize/
-  close) instead of the native thumbnail flyout, and reorder those
-  windows into MRU order. **Unblocked** -- a layered topmost "shield"
-  window over the button strip, owning the pointer there, stops the
-  native flyout being created at all (`docs/LIMITATIONS.md` #22, where
-  the four approaches that *don't* work are also recorded). No injection
-  into `explorer.exe` needed. What comes with it: the shield owns every
-  click in the strip, so the right-click jumplist and drag-to-taskbar
-  have to be forwarded or reproduced, and the taskbar's own hover
-  highlight is lost unless Polish draws one.
-- Taskbar: alternative hover treatment -- halo the real window instead of
-  showing a thumbnail. Also unblocked by the shield, but keep in mind the
-  second, independent problem with halo-only hover: `ActiveWindowHalo` pins itself *directly beneath its
-  target* (`HWND_TOP` silently no-ops for a background process), so a
-  window that is minimized or fully covered shows nothing at all.
+- Taskbar: the taskbar's own hover highlight is gone, since the shield
+  owns the pointer over the strip and the taskbar never sees it. Polish
+  should draw its own, or this should be a decision rather than a
+  leftover.
+- Taskbar: click-to-cycle is only proven against apps with two windows
+  (nothing with three was open on the dev machine). The walk is
+  index-based over a frozen order so it should generalize, but it has not
+  been watched doing so.
+- Taskbar: the Ctrl escape hatch needs the pointer to move once after
+  Ctrl goes down. The shield's pass-through is driven by mouse events and
+  a 100ms poll that only runs while the pointer is on the strip, so Ctrl
+  pressed with the pointer already resting on a button takes up to a poll
+  to take effect. Currently accepted, not fixed.
+- Taskbar: halo-on-row-hover works, but keep in mind the independent
+  problem it inherits: `ActiveWindowHalo` pins itself *directly beneath
+  its target* (`HWND_TOP` silently no-ops for a background process), so a
+  window that is minimized or fully covered shows nothing at all. The
+  panel skips minimized rows for this reason; a covered one still shows
+  nothing.
 - Fix halo: when you activate window from taskbar, it doesn't get halo
 - Fix halo: halo goes under explorer windows even when active app is in front (not always)
 - Groups: Active window title should look very different than inactive
