@@ -59,15 +59,6 @@ constexpr int kHeaderHeight = 22;
 constexpr double kHeaderFontScale = 0.85;
 
 // Keyboard-shortcut legend -- always present, pinned to the bottom of
-// the viewport (see FooterBandHeight/Paint), in the same small muted
-// style as the section headings (see kHeaderFontScale/kHeaderTextColor,
-// both reused rather than a fourth font/color pair for one more label).
-// Deliberately NOT part of ComputeLayout's scrollable rows/headers
-// layout -- per explicit user request, it must stay visible even while
-// that content scrolls underneath it on an overflowing monitor.
-constexpr int kFooterHeight = 22;
-constexpr int kFooterTopGap = 6;
-constexpr wchar_t kFooterLegendText[] = L"Del: Close    -: Minimize    +: Maximize";
 
 // A monitor with enough open windows to overflow the panel's natural
 // height gets a capped, scrollable viewport instead (see Reposition,
@@ -150,11 +141,6 @@ int ActionsReservedWidth(UINT dpi) {
     return kActionButtonCount * Scale(kActionButtonSize, dpi) + (kActionButtonCount - 1) * Scale(kActionButtonGap, dpi);
 }
 
-// Vertical space always reserved at the bottom of the viewport for the
-// pinned keyboard-shortcut footer (see its own comment) -- one shared
-// formula so Reposition (panel height) and Paint (where the scrollable
-// region ends and the footer begins) can never drift apart.
-int FooterBandHeight(UINT dpi) { return Scale(kFooterTopGap, dpi) + Scale(kFooterHeight, dpi); }
 
 // Pure functions of a row's own rect (plus dpi) -- deliberately not
 // dependent on which row is highlighted/hovered, so both Paint and
@@ -513,14 +499,14 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     DeleteObject(backgroundBrush);
 
     // Headers/rows only ever scroll within the client area minus the
-    // pinned footer band (see FooterBandHeight) -- clipping to that
+    // client area -- clipping to that
     // reduced rect BEFORE the viewport-origin shift below (so this is in
     // plain device coordinates, not scroll-shifted ones) keeps a row that
     // would otherwise land underneath the footer from ever painting over
     // it, without needing to individually bound every single draw call
     // down there.
     const int scrollViewportHeight =
-        std::max(0, static_cast<int>(clientRect.bottom - clientRect.top) - FooterBandHeightForState(dpi));
+        std::max(0, static_cast<int>(clientRect.bottom - clientRect.top));
     RECT scrollClipRect{clientRect.left, clientRect.top, clientRect.right, clientRect.top + scrollViewportHeight};
     HRGN scrollClipRgn = CreateRectRgnIndirect(&scrollClipRect);
     SelectClipRgn(hdc, scrollClipRgn);
@@ -841,21 +827,6 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     // rows/headers above scroll underneath it, not scroll away with
     // them. A subtle divider marks that boundary, otherwise invisible
     // once scrolling is actually happening.
-    if (footerLegendEnabled_ && !rows_.empty()) {
-        HPEN dividerPen = CreatePen(PS_SOLID, 1, kSectionDividerColor);
-        HGDIOBJ oldPen = SelectObject(hdc, dividerPen);
-        MoveToEx(hdc, clientRect.left, scrollViewportHeight, nullptr);
-        LineTo(hdc, clientRect.right, scrollViewportHeight);
-        SelectObject(hdc, oldPen);
-        DeleteObject(dividerPen);
-
-        SelectObject(hdc, headerFont);
-        SetTextColor(hdc, kHeaderTextColor);
-        RECT footerRect{clientRect.left, clientRect.bottom - Scale(kFooterHeight, dpi), clientRect.right,
-                         clientRect.bottom};
-        DrawTextW(hdc, kFooterLegendText, -1, &footerRect,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
-    }
 
     SelectObject(hdc, oldFont);
     DeleteObject(textFont);
@@ -865,8 +836,8 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
 void AltTabListWindow::Reposition(HMONITOR targetMonitor, UINT dpi) {
     const int width = Scale(kPanelWidth, dpi);
     // The footer is always reserved, on top of whatever headers/rows
-    // naturally need -- see FooterBandHeight's own comment.
-    const int naturalHeight = ComputeLayout(dpi).contentHeight + FooterBandHeightForState(dpi);
+    // naturally need.
+    const int naturalHeight = ComputeLayout(dpi).contentHeight;
 
     MONITORINFO monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
@@ -1092,17 +1063,23 @@ void AltTabListWindow::UpdateActionTooltip() {
     if (hoveredAction_.has_value() && hoveredActionRow_.has_value() && *hoveredActionRow_ < rows_.size()) {
         const AltTabListRow& row = rows_[*hoveredActionRow_];
         switch (*hoveredAction_) {
+            // Each tooltip names its own keyboard equivalent. That used
+            // to be a legend pinned along the bottom of the panel, which
+            // spent a permanent strip of height explaining three buttons
+            // that were sitting right there -- and never said which
+            // shortcut went with which. On the button it describes, the
+            // same information costs no layout and cannot be mismatched.
             case ActionButton::Close:
-                text = L"Close";
+                text = L"Close (Del)";
                 break;
             case ActionButton::MinimizeToggle:
                 // Named for what clicking does, which differs by state --
                 // unlike the glyph, which stays the minimize mark in both
                 // (see Paint).
-                text = row.minimized ? L"Restore" : L"Minimize";
+                text = row.minimized ? L"Restore (-)" : L"Minimize (-)";
                 break;
             case ActionButton::MaximizeToggle:
-                text = IsZoomed(row.hwnd) ? L"Restore down" : L"Maximize";
+                text = IsZoomed(row.hwnd) ? L"Restore (+)" : L"Maximize (+)";
                 break;
         }
     }
@@ -1138,9 +1115,9 @@ bool AltTabListWindow::RecomputeScrollOffset() {
     RECT clientRect;
     GetClientRect(window_, &clientRect);
     // Rows/headers only ever scroll within the client area *minus* the
-    // pinned footer band -- see FooterBandHeight's own comment.
+    // client area.
     const int viewportHeight =
-        std::max(0, static_cast<int>(clientRect.bottom - clientRect.top) - FooterBandHeightForState(dpi));
+        std::max(0, static_cast<int>(clientRect.bottom - clientRect.top));
     const int maxScroll = std::max(0, layout.contentHeight - viewportHeight);
 
     int newOffset = std::clamp(scrollOffset_, 0, maxScroll);
@@ -1184,28 +1161,12 @@ void AltTabListWindow::RepaintRow(HWND hwnd) {
     }
 }
 
-int AltTabListWindow::FooterBandHeightForState(UINT dpi) const {
-    return footerLegendEnabled_ ? FooterBandHeight(dpi) : 0;
-}
-
-void AltTabListWindow::SetRowActionsEnabled(bool enabled) {
-    rowActionsEnabled_ = enabled;
-    // Kept in step for every caller that predates the footer having a
-    // flag of its own: switching the row buttons off has always meant
-    // switching the legend that documents them off too. A caller that
-    // wants them apart says so afterwards, which is exactly what the
-    // taskbar hover panel does.
-    footerLegendEnabled_ = enabled;
-}
+void AltTabListWindow::SetRowActionsEnabled(bool enabled) { rowActionsEnabled_ = enabled; }
 
 void AltTabListWindow::SetCommandRow(std::wstring text, wchar_t mnemonic) {
     commandText_ = std::move(text);
     commandMnemonic_ = mnemonic;
     commandHovered_ = false;
-}
-
-void AltTabListWindow::SetFooterLegendEnabled(bool enabled) {
-    footerLegendEnabled_ = enabled;
 }
 
 void AltTabListWindow::Hide() {

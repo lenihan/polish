@@ -3332,9 +3332,6 @@ void OpenTaskbarPanel(int index) {
     // well.
     g_taskbarPanel->SetActiveSectionHeader(button.name.empty() ? button.appId : button.name);
     g_taskbarPanel->SetRowActionsEnabled(true);
-    // No keyboard session is open here, so the Del/-/+ legend would
-    // document keys that do nothing.
-    g_taskbarPanel->SetFooterLegendEnabled(false);
     // Above the list, because it is not one of the windows the list is
     // about -- it is how you get another one.
     g_taskbarPanel->SetCommandRow(L"New window", L'N');
@@ -3610,6 +3607,55 @@ void OnTaskbarRowMaximizeToggle(HWND hwnd) {
 
 bool TaskbarPanelOpen() { return g_taskbarPanelButton >= 0; }
 
+// Whether the pointer is still somewhere that should keep the hover
+// panel open.
+//
+// Three regions, not two. The obvious pair -- the button strip and the
+// panel -- leaves a hole: the panel is anchored a gap away from the
+// strip (kAnchorGapPx, so 16 physical pixels at 200%), and that band
+// belongs to neither. Moving from a button up to the panel crosses it,
+// and the poll that runs while the panel is up closed the panel the
+// moment it sampled the cursor there. Measured at the pixel: with the
+// strip starting at y=1824 and the panel ending at y=1808, y=1828 was
+// on the strip, y=1822 was nowhere, and the panel died.
+//
+// So the band between them counts too -- a corridor from the panel to
+// the button it belongs to. Bounded by the panel's own width and by the
+// gap's own height, so it is a short bridge between two live regions
+// rather than a general amnesty.
+bool CursorKeepsTaskbarPanelOpen(POINT cursor) {
+    if (polish::HitTestTaskbarButton(g_taskbarButtons, cursor).has_value()) {
+        return true;
+    }
+    if (!g_taskbarPanel || !g_taskbarPanel->IsVisible()) {
+        return false;
+    }
+    if (g_taskbarPanel->ContainsPoint(cursor)) {
+        return true;
+    }
+    if (!TaskbarPanelOpen() || static_cast<size_t>(g_taskbarPanelButton) >= g_taskbarButtons.size()) {
+        return false;
+    }
+    RECT panel{};
+    if (!GetWindowRect(g_taskbarPanel->WindowHandle(), &panel)) {
+        return false;
+    }
+    const RECT button = g_taskbarButtons[static_cast<size_t>(g_taskbarPanelButton)].rect;
+    RECT bridge{panel.left, 0, panel.right, 0};
+    if (panel.bottom <= button.top) {
+        // The usual case: taskbar at the bottom, panel above it.
+        bridge.top = panel.bottom;
+        bridge.bottom = button.top;
+    } else if (panel.top >= button.bottom) {
+        // Taskbar at the top of the screen, panel below it.
+        bridge.top = button.bottom;
+        bridge.bottom = panel.top;
+    } else {
+        return false;  // they touch or overlap; there is no gap to bridge
+    }
+    return PtInRect(&bridge, cursor) != FALSE;
+}
+
 // Whether the shared keys belong to the taskbar panel right now.
 //
 // An Alt+Tab session wins when both are up, which is rarer than it
@@ -3704,6 +3750,15 @@ void OnTaskbarHover(uint64_t generation, int index) {
         // The escape hatch: with Ctrl held the shield is already open and
         // the native flyout is on its way, so Polish shows nothing.
         CloseTaskbarPanel();
+        return;
+    }
+    if (g_taskbarPanelButton == index) {
+        // Already showing this very button's list. The hook re-reports a
+        // hover whenever its targets are replaced (SetTargets forgets
+        // which row was under the pointer), and the targets are replaced
+        // on every taskbar re-read -- so without this the panel was
+        // rebuilt several times a second while the pointer simply rested
+        // on a button, each rebuild a full Show() and relayout.
         return;
     }
     if (g_taskbarPanelButton >= 0) {
@@ -4822,13 +4877,10 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 }
                 POINT cursor{};
                 GetCursorPos(&cursor);
-                // HitTestTaskbarButton rather than asking the hook where
-                // it last saw the pointer: the hook only knows what mouse
+                // Asked of the cursor's real position rather than of the
+                // hook's last sighting: the hook only knows what mouse
                 // events told it, and the pointer can be resting still.
-                const bool onStrip = polish::HitTestTaskbarButton(g_taskbarButtons, cursor).has_value();
-                const bool onPanel = g_taskbarPanel && g_taskbarPanel->IsVisible() &&
-                                     g_taskbarPanel->ContainsPoint(cursor);
-                if (!onStrip && !onPanel) {
+                if (!CursorKeepsTaskbarPanelOpen(cursor)) {
                     CloseTaskbarPanel();
                     KillTimer(hwnd, kTaskbarHoverTimerId);
                 }

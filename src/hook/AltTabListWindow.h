@@ -48,10 +48,10 @@ struct AltTabListRow {
 // keyboard equivalents (see AltTabHook::RowAction) so they don't have to
 // be discovered by accident. If a monitor has enough candidates that the
 // full list would overflow its work area, the panel's height is capped
-// instead of growing past the screen, and the headers/rows scroll (see
-// scrollOffset_) to keep the highlighted row in view -- the footer legend
-// stays pinned in place regardless, and a small chevron+count strip
-// (e.g. "▾ 12 more") marks whichever edge(s) still have hidden content.
+// instead of growing past the screen, and the content scrolls (see
+// scrollOffset_) to keep the highlighted row in view, with a small
+// chevron+count strip (e.g. "▾ 12 more") marking whichever edge(s)
+// still have hidden content.
 //
 // On a multi-monitor setup, per explicit user request, one instance of
 // this class exists *per connected monitor* (see main.cpp's
@@ -151,6 +151,8 @@ public:
     static constexpr const wchar_t* kDefaultActiveHeader = L"Running windows";
 
     // Whether rows carry their per-row minimize/maximize/close buttons.
+    // Each one names its own keyboard shortcut in its tooltip; there is
+    // no separate legend.
     //
     // Switched off for an Alt+` tab session, whose rows stand for tabs
     // rather than windows: a tab has no HWND, so every one of those
@@ -158,16 +160,6 @@ public:
     // width for buttons it never draws. Takes effect on the next Show().
     void SetRowActionsEnabled(bool enabled);
 
-    // Whether the footer legend documenting the Del/-/+ keyboard
-    // equivalents is drawn.
-    //
-    // Separate from SetRowActionsEnabled, which it used to follow,
-    // because the taskbar hover panel wants exactly one of the two: its
-    // rows do act on real windows and so keep their buttons, but it is
-    // opened by the mouse with no key held and no session to send keys
-    // to, so a legend for keys that do nothing there would be a lie.
-    // Takes effect on the next Show().
-    void SetFooterLegendEnabled(bool enabled);
 
     // A command row drawn above the window list, or empty for none.
     //
@@ -265,11 +257,7 @@ private:
         std::optional<RECT> commandRect;
         std::optional<RECT> activeHeaderRect;
         std::optional<RECT> minimizedHeaderRect;
-        // Headers + rows only -- the keyboard-shortcut footer legend is
-        // NOT part of this "natural" scrollable layout at all (see
-        // Paint's own comment on FooterBandHeight): it's always pinned to
-        // the bottom of the actual viewport instead, so it stays visible
-        // even while this content scrolls underneath it.
+        // Headers + rows, which is everything the panel draws.
         int contentHeight = 0;
     };
 
@@ -304,10 +292,6 @@ private:
     // the highlight within the already-visible viewport can still take
     // its own cheap narrow-invalidate path instead of a full repaint.
     bool RecomputeScrollOffset();
-    // FooterBandHeight, or zero when the legend is switched off -- the
-    // single place that distinction is made, so layout, painting and
-    // scrolling cannot disagree about how tall the viewport is.
-    int FooterBandHeightForState(UINT dpi) const;
 
     HINSTANCE instance_;
     HWND window_ = nullptr;
@@ -352,7 +336,6 @@ private:
     HWND tooltipWindow_ = nullptr;
 
     bool rowActionsEnabled_ = true;      // see SetRowActionsEnabled
-    bool footerLegendEnabled_ = true;    // see SetFooterLegendEnabled
     std::optional<RECT> anchorRect_;     // see SetAnchorRect
     std::wstring commandText_;           // see SetCommandRow; empty = none
     wchar_t commandMnemonic_ = 0;
