@@ -297,6 +297,9 @@ current todo list.
   window that is minimized or fully covered shows nothing at all. The
   panel skips minimized rows for this reason; a covered one still shows
   nothing.
+- Alttab: Click empty taskbar to bring up
+- Screencapture: capture larger than screen
+- Move/resize windows: need mode that makes this easy
 - Fix halo: when you activate window from taskbar, it doesn't get halo
 - Fix halo: halo goes under explorer windows even when active app is in front (not always)
 - Groups: Active window title should look very different than inactive
