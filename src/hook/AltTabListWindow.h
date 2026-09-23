@@ -36,10 +36,13 @@ struct AltTabListRow {
 // part of the Tab/Shift+Tab cycle itself (see PLAN.md's Alt+Tab-
 // improvements M4). Any row -- highlighted or, per explicit user request,
 // merely hovered by the mouse -- shows small icon buttons at its right
-// edge (M5): close and minimize/restore-toggle always, plus a third
-// maximize/restore-toggle button on active-section rows only (there's no
-// meaningful "maximized" state to toggle for a window that's currently
-// minimized). Clicking any of them acts on that row's window without
+// edge (M5): close, minimize/normal-toggle and maximize/normal-toggle.
+// All three on every row, minimized ones included. The maximize button
+// used to be left off a minimized row, reasoning that a minimized window
+// has no maximized state to toggle -- but that confused "what state is
+// it in" with "where can it go": a minimized window is coming back one
+// way or the other, and the two buttons are how you say at which size.
+// Clicking any of them acts on that row's window without
 // ending the session or moving Tab's own highlight; every row (not just
 // a highlighted/hovered one) reserves the same icon-sized space at its
 // right edge regardless, so row text never reflows width as
@@ -213,10 +216,11 @@ public:
     // immediately refresh this panel's content in place.
     void SetOnRowMinimizeToggle(std::function<void(HWND)> callback) { onRowMinimizeToggle_ = std::move(callback); }
 
-    // Fired by a click on an active-section row's maximize/restore-toggle
-    // icon button -- never drawn or hit-testable on a minimized-section
-    // row (see class comment). Same non-committing, non-relocating
-    // contract as SetOnRowMinimizeToggle otherwise.
+    // Fired by a click on a row's maximize/normal-toggle icon button.
+    // On a minimized row it always means "come back maximized" -- the
+    // button beside it is the one that means "come back normal". Same
+    // non-committing, non-relocating contract as SetOnRowMinimizeToggle
+    // otherwise.
     void SetOnRowMaximizeToggle(std::function<void(HWND)> callback) { onRowMaximizeToggle_ = std::move(callback); }
 
     // Fired when the mouse moves onto a different row, with that row's

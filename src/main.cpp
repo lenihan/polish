@@ -2744,6 +2744,25 @@ void OnAltTabRowMinimizeToggle(HWND hwnd) {
     ApplyAltTabDimming();
 }
 
+// "0" over an Alt+Tab row: back to normal size, whichever end it is at.
+void OnAltTabRowNormal(HWND hwnd) {
+    if (!g_altTabSessionOpen || hwnd == nullptr || !IsWindow(hwnd)) {
+        return;
+    }
+    const bool wasMinimized = IsIconic(hwnd) != FALSE;
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    polish::LogDebug(std::format(L"[Polish] AltTab: row normal -> hwnd={}", reinterpret_cast<void*>(hwnd)));
+    if (wasMinimized) {
+        // It has moved between the two sections, so both lists are stale.
+        UpdateAltTabCandidatesPreservingOrder();
+        RebuildAltTabMinimizedCandidates();
+    }
+    ApplyAltTabDimming();
+    for (auto& panel : g_altTabPanels) {
+        panel.window->RepaintRow(hwnd);
+    }
+}
+
 // Fired by AltTabListWindow's maximize/restore-toggle button, which only
 // ever appears on an active-section row (see PLAN.md's Alt+Tab-
 // improvements M5 follow-up) -- unlike minimize/close, maximize/restore
@@ -2758,14 +2777,23 @@ void OnAltTabRowMaximizeToggle(HWND hwnd) {
     if (!g_altTabSessionOpen || hwnd == nullptr || !IsWindow(hwnd)) {
         return;
     }
+    // No longer restricted to the active list -- a minimized row offers
+    // this button too. Same IsZoomed caveat as the taskbar panel's: a
+    // window minimized from maximized still reports as zoomed.
     const auto it = std::find(g_altTabCandidates.begin(), g_altTabCandidates.end(), hwnd);
-    if (it == g_altTabCandidates.end()) {
-        return;
-    }
-    if (IsZoomed(hwnd)) {
-        ShowWindow(hwnd, SW_RESTORE);
+    if (!IsIconic(hwnd) && IsZoomed(hwnd)) {
+        ShowWindow(hwnd, SW_SHOWNORMAL);
     } else {
         ShowWindow(hwnd, SW_MAXIMIZE);
+    }
+    if (it == g_altTabCandidates.end()) {
+        // It was in the minimized section a moment ago and is maximized
+        // now, so both lists are stale -- rebuild rather than index into
+        // the old one.
+        UpdateAltTabCandidatesPreservingOrder();
+        RebuildAltTabMinimizedCandidates();
+        ApplyAltTabDimming();
+        return;
     }
     g_altTabHighlightIndex = static_cast<size_t>(std::distance(g_altTabCandidates.begin(), it));
     g_altTabSelectionInMinimized = false;
@@ -3560,7 +3588,7 @@ void OnTaskbarRowMinimizeToggle(HWND hwnd) {
     }
     const bool minimizing = !IsIconic(hwnd);
     const bool wasInFront = GetForegroundWindow() == hwnd;
-    polish::LogDebug(std::format(L"[Polish] Taskbar: row {} -> hwnd={}", minimizing ? L"minimize" : L"restore",
+    polish::LogDebug(std::format(L"[Polish] Taskbar: row {} -> hwnd={}", minimizing ? L"minimize" : L"normal",
                                  reinterpret_cast<void*>(hwnd)));
     if (minimizing) {
         ShowWindow(hwnd, SW_MINIMIZE);
@@ -3578,7 +3606,13 @@ void OnTaskbarRowMinimizeToggle(HWND hwnd) {
             }
         }
     } else {
-        ActivateWindowFromTaskbar(hwnd);
+        // SW_SHOWNORMAL rather than ActivateWindowFromTaskbar's
+        // SW_RESTORE: the button says "Normal", and restore would bring
+        // a window that was minimized from maximized back maximized --
+        // which is the other button's job now that there is one.
+        ShowWindow(hwnd, SW_SHOWNORMAL);
+        InjectForegroundUnlockKeystroke();
+        SetForegroundWindow(hwnd);
     }
     // A full rebuild, not RepaintRow. Minimizing changes which *section*
     // the row belongs to, and the panel draws minimized rows muted below
@@ -3596,10 +3630,22 @@ void OnTaskbarRowMaximizeToggle(HWND hwnd) {
     if (!IsWindow(hwnd)) {
         return;
     }
-    const bool restoring = IsZoomed(hwnd) != FALSE;
-    polish::LogDebug(std::format(L"[Polish] Taskbar: row {} -> hwnd={}", restoring ? L"restore down" : L"maximize",
+    // IsZoomed alone would send a minimized row the wrong way: a window
+    // minimized *from* maximized still reports as zoomed, so it would be
+    // "restored" to normal instead of coming back maximized. A minimized
+    // row is always on its way to maximized here -- the button beside it
+    // is the one that brings it back at normal size.
+    const bool toNormal = !IsIconic(hwnd) && IsZoomed(hwnd);
+    const bool wasMinimized = IsIconic(hwnd) != FALSE;
+    polish::LogDebug(std::format(L"[Polish] Taskbar: row {} -> hwnd={}", toNormal ? L"normal" : L"maximize",
                                  reinterpret_cast<void*>(hwnd)));
-    ShowWindow(hwnd, restoring ? SW_RESTORE : SW_MAXIMIZE);
+    ShowWindow(hwnd, toNormal ? SW_SHOWNORMAL : SW_MAXIMIZE);
+    if (wasMinimized) {
+        // It was not on screen a moment ago; bringing it back without
+        // focus would leave it behind whatever is in front.
+        InjectForegroundUnlockKeystroke();
+        SetForegroundWindow(hwnd);
+    }
     if (g_taskbarPanel) {
         g_taskbarPanel->RepaintRow(hwnd);
     }
@@ -3729,6 +3775,30 @@ void NewWindowFromTaskbarPanel() {
     CancelTaskbarPreview();
     CloseTaskbarPanel();
     LaunchNewWindowForButton(button);
+}
+
+// Puts a window back to normal size, from either direction.
+void OnTaskbarRowNormal(HWND hwnd) {
+    if (!IsWindow(hwnd)) {
+        return;
+    }
+    const bool wasMinimized = IsIconic(hwnd) != FALSE;
+    polish::LogDebug(std::format(L"[Polish] Taskbar: row normal -> hwnd={}", reinterpret_cast<void*>(hwnd)));
+    ShowWindow(hwnd, SW_SHOWNORMAL);
+    if (wasMinimized) {
+        InjectForegroundUnlockKeystroke();
+        SetForegroundWindow(hwnd);
+        // It has left the minimized section, so the panel has to be
+        // rebuilt rather than repainted -- the same reasoning as the
+        // minimize toggle's.
+        if (g_taskbarPanel && g_taskbarPanelButton >= 0) {
+            OpenTaskbarPanel(g_taskbarPanelButton);
+        }
+        return;
+    }
+    if (g_taskbarPanel) {
+        g_taskbarPanel->RepaintRow(hwnd);
+    }
 }
 
 // The pointer moved onto a different app button, or off the strip
@@ -5259,6 +5329,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 case polish::AltTabHook::RowAction::MaximizeToggle:
                     OnTaskbarRowMaximizeToggle(target);
                     break;
+                case polish::AltTabHook::RowAction::Normal:
+                    OnTaskbarRowNormal(target);
+                    break;
             }
             return;
         }
@@ -5272,6 +5345,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                 break;
             case polish::AltTabHook::RowAction::MaximizeToggle:
                 OnAltTabRowMaximizeToggle(hwnd);
+                break;
+            case polish::AltTabHook::RowAction::Normal:
+                OnAltTabRowNormal(hwnd);
                 break;
         }
     });

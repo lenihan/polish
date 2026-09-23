@@ -121,6 +121,18 @@ current todo list.
   turns a switch into an un-minimize nobody asked for. They stay
   reachable by clicking their row, which is the gesture that says "this
   one". An app whose windows are all minimized restores the most recent.
+- Row buttons (taskbar and Alt+Tab alike): close, minimize and maximize on
+  every row, minimized ones included. The maximize button used to be left
+  off a minimized row on the reasoning that there is no maximized state to
+  toggle -- which confused "what state is it in" with "where can it go". A
+  minimized window is coming back either way; the two buttons are how you
+  say at which size.
+- Row buttons: "Normal" rather than "Restore", and its own action on its
+  own key rather than a state the other two toggle into. Shortcuts are
+  Backspace close, `-` minimize, `+` (the `=` key, shifted or not)
+  maximize, `0` normal, each named in its button's own tooltip. Normal
+  uses SW_SHOWNORMAL, not SW_RESTORE: restoring a window minimized *from*
+  maximized brings it back maximized, which is the other button's job.
 - Taskbar: an open hover panel is a live view -- opening or closing a
   window of the app whose list is on screen adds or removes a row,
   rather than leaving a header that disagrees with its own rows. Its row
@@ -276,6 +288,7 @@ current todo list.
 
 ## Left to do
 
+- Halo: When an active app closes, it's halo stays
 - Taskbar: the taskbar's own hover highlight is gone, since the shield
   owns the pointer over the strip and the taskbar never sees it. Polish
   should draw its own, or this should be a decision rather than a

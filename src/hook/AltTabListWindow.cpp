@@ -360,16 +360,12 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
                     }
                     return 0;
                 }
-                // Maximize/restore-toggle only exists on an active-section
-                // row -- see class comment.
-                if (!rows_[*rowIndex].minimized) {
-                    RECT maximizeRect = ComputeMaximizeToggleButtonRect(rowRect, dpi);
-                    if (PtInRect(&maximizeRect, pt)) {
-                        if (onRowMaximizeToggle_) {
-                            onRowMaximizeToggle_(rows_[*rowIndex].hwnd);
-                        }
-                        return 0;
+                RECT maximizeRect = ComputeMaximizeToggleButtonRect(rowRect, dpi);
+                if (PtInRect(&maximizeRect, pt)) {
+                    if (onRowMaximizeToggle_) {
+                        onRowMaximizeToggle_(rows_[*rowIndex].hwnd);
                     }
+                    return 0;
                 }
             }
 
@@ -695,12 +691,20 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
                 drawGlyphLine(toggle.left + margin, y, toggle.right - margin, y);
             }
 
-            if (!row.minimized) {
-                // Maximize/restore-toggle, active rows only -- native
-                // Windows glyph shapes: a single square outline to
-                // maximize, two overlapping offset squares to restore.
+            {
+                // Maximize/normal-toggle. Native Windows glyph shapes: a
+                // single square outline to maximize, two overlapping
+                // offset squares to return to normal.
+                //
+                // Drawn on minimized rows as well. It used to be active
+                // rows only, on the reasoning that a minimized window has
+                // no maximized state to toggle -- but that confused "what
+                // state is it in" with "where can it go". A minimized
+                // window is coming back one way or the other, and this is
+                // how you say which size, so it always offers Maximize
+                // there rather than reflecting a state it is not in.
                 const RECT maximizeToggle = ComputeMaximizeToggleButtonRect(rowRect, dpi);
-                if (IsZoomed(row.hwnd)) {
+                if (!row.minimized && IsZoomed(row.hwnd)) {
                     // The native restore glyph's back square is only ever
                     // partly visible -- its bottom-left portion sits
                     // behind the front square. Filling the front square
@@ -1024,7 +1028,7 @@ void AltTabListWindow::UpdateHoveredAction(POINT pt, UINT dpi, const std::vector
             } else if (PtInRect(&toggle, pt)) {
                 newRow = rowIndex;
                 newAction = ActionButton::MinimizeToggle;
-            } else if (!rows_[*rowIndex].minimized && PtInRect(&maximize, pt)) {
+            } else if (PtInRect(&maximize, pt)) {
                 newRow = rowIndex;
                 newAction = ActionButton::MaximizeToggle;
             }
@@ -1070,16 +1074,24 @@ void AltTabListWindow::UpdateActionTooltip() {
             // shortcut went with which. On the button it describes, the
             // same information costs no layout and cannot be mismatched.
             case ActionButton::Close:
-                text = L"Close (Del)";
+                text = L"Close (Backspace)";
                 break;
             case ActionButton::MinimizeToggle:
                 // Named for what clicking does, which differs by state --
                 // unlike the glyph, which stays the minimize mark in both
                 // (see Paint).
-                text = row.minimized ? L"Restore (-)" : L"Minimize (-)";
+                // "Normal", not "Restore": restore is the name of the
+                // mechanism, while normal is the name of the state the
+                // window ends up in -- and with a Maximize button sitting
+                // next to it, the pair reads as the two sizes a window
+                // can have rather than as one verb and one noun.
+                text = row.minimized ? L"Normal (0)" : L"Minimize (-)";
                 break;
             case ActionButton::MaximizeToggle:
-                text = IsZoomed(row.hwnd) ? L"Restore (+)" : L"Maximize (+)";
+                // A minimized window is coming back either way, so the
+                // question is only which size -- never "normal", which is
+                // the other button's job.
+                text = (!row.minimized && IsZoomed(row.hwnd)) ? L"Normal (0)" : L"Maximize (+)";
                 break;
         }
     }

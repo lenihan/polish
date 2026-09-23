@@ -400,20 +400,23 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         }
     }
 
-    if (anySession && (data.vkCode == VK_DELETE || data.vkCode == VK_OEM_MINUS || data.vkCode == VK_OEM_PLUS)) {
+    if (anySession && (data.vkCode == VK_BACK || data.vkCode == VK_OEM_MINUS || data.vkCode == VK_OEM_PLUS ||
+                       data.vkCode == '0')) {
         // Same "must already be in a session, never able to start one"
         // gating and per-key debounce shape as the arrow-key block above.
-        bool& physicallyDown = (data.vkCode == VK_DELETE)       ? deletePhysicallyDown_
+        bool& physicallyDown = (data.vkCode == VK_BACK)         ? backspacePhysicallyDown_
                                 : (data.vkCode == VK_OEM_MINUS) ? minusPhysicallyDown_
-                                                                 : plusPhysicallyDown_;
+                                : (data.vkCode == VK_OEM_PLUS)  ? plusPhysicallyDown_
+                                                                 : zeroPhysicallyDown_;
         if (IsDown(wParam)) {
             if (physicallyDown) {
                 return true;  // OS key-repeat, not a fresh press -- swallow, don't re-fire
             }
             physicallyDown = true;
-            const RowAction action = (data.vkCode == VK_DELETE)       ? RowAction::Close
+            const RowAction action = (data.vkCode == VK_BACK)         ? RowAction::Close
                                       : (data.vkCode == VK_OEM_MINUS) ? RowAction::MinimizeToggle
-                                                                       : RowAction::MaximizeToggle;
+                                      : (data.vkCode == VK_OEM_PLUS)  ? RowAction::MaximizeToggle
+                                                                       : RowAction::Normal;
             PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::RowKeyAction),
                          static_cast<LPARAM>(action));
             return true;

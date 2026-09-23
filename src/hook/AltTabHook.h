@@ -91,9 +91,12 @@ namespace polish {
 // -- the identical bug shape already found and fixed once for Tab
 // itself.
 //
-// Delete/-/+ (see SetOnRowAction), once a session is already active, are
-// recognized and debounced the exact same way -- close/minimize-toggle/
-// maximize-toggle the currently Tab-highlighted row without a mouse.
+// Backspace/-/+/0 (see SetOnRowAction), once a session is already
+// active, are recognized and debounced the exact same way -- close,
+// minimize, maximize and back-to-normal for the currently Tab-
+// highlighted row, without a mouse. Backspace rather than Delete for
+// close: the two sit far apart on most keyboards, and Delete is the one
+// a hand reaching for a list is more likely to hit by accident.
 //
 // A second, unrelated job rides on the same app-lifetime keyboard hook
 // rather than paying for another global hook (see SetOnPasteChord): the
@@ -197,7 +200,13 @@ public:
     // Tab-highlighted; the callback itself is expected to resolve that.
     // Never fires unless sessionActive_ is already true, same gating as
     // arrow-key navigation.
-    enum class RowAction { Close, MinimizeToggle, MaximizeToggle };
+    // Normal is its own action rather than a state the other two toggle
+    // into. Minimize and maximize are opposite ends, and "back to normal"
+    // sits between them -- reachable from either, and belonging to
+    // neither. As a toggle it had no key of its own: you pressed "-" to
+    // un-minimize and "+" to un-maximize, so the same outcome needed a
+    // different key depending on where the window happened to be.
+    enum class RowAction { Close, MinimizeToggle, MaximizeToggle, Normal };
     void SetOnRowAction(std::function<void(RowAction action)> onRowAction) { onRowAction_ = std::move(onRowAction); }
 
     // Lends the navigation, row-action, Escape, Enter and "N" keys to a
@@ -333,9 +342,10 @@ private:
     // Same debounce shape again, one per row-action key -- holding
     // Minus/Plus down shouldn't rapidly toggle minimize/maximize via OS
     // key-repeat any more than holding Tab should rapidly cycle.
-    bool deletePhysicallyDown_ = false;
+    bool backspacePhysicallyDown_ = false;
     bool minusPhysicallyDown_ = false;
     bool plusPhysicallyDown_ = false;
+    bool zeroPhysicallyDown_ = false;
 
     // Same debounce shape again, for the paste chord's two main keys (V
     // and Insert) -- tracked per key, not per chord, so a held V never
