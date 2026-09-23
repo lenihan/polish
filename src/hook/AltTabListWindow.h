@@ -214,6 +214,13 @@ public:
     // whose HWND is null (an Alt+` tab row).
     void SetOnRowHovered(std::function<void(HWND)> callback) { onRowHovered_ = std::move(callback); }
 
+    // Which of a row's three action buttons the pointer is over, if any.
+    // Tracked so the button under the cursor can light up and name itself
+    // the way a real title-bar button does -- without it, three unlabeled
+    // glyphs appear on hover and give no feedback at all about which one
+    // is about to be clicked.
+    enum class ActionButton { Close, MinimizeToggle, MaximizeToggle };
+
     // Fired by a click on a row's close ("X") icon button, same
     // highlighted-or-hovered-only contract as SetOnRowMinimizeToggle. The
     // caller posts a close request to hwnd and leaves ending/continuing
@@ -257,6 +264,11 @@ private:
     // cheap-repaint path, for the same reason (avoid a full-panel
     // repaint on every mouse-move over the list).
     void SetHoveredIndex(std::optional<size_t> index);
+    // Which action button `pt` (in unshifted content coordinates) falls
+    // on, for whichever rows currently draw them.
+    void UpdateHoveredAction(POINT pt, UINT dpi, const std::vector<RECT>& rowRects);
+    // Shows the hovered button's name, or hides the tip when none.
+    void UpdateActionTooltip();
     // Re-derives scrollOffset_ from the current window's actual client
     // height versus ComputeLayout's natural (unclamped) content height,
     // keeping the highlighted row in view with the smallest possible
@@ -298,6 +310,16 @@ private:
     // arrive at all, re-armed on every WM_MOUSEMOVE since it's otherwise
     // a one-shot subscription per MSDN.
     std::optional<size_t> hoveredIndex_;
+    // The row and button the pointer is over, together -- a button only
+    // means something paired with the row it belongs to, and both change
+    // at once.
+    std::optional<size_t> hoveredActionRow_;
+    std::optional<ActionButton> hoveredAction_;
+    // Tracked tooltip for the hovered action button (TTF_TRACK, driven
+    // by this class rather than by the tooltip's own mouse relay -- the
+    // same approach GroupChromeWindow uses for its title-bar buttons).
+    HWND tooltipWindow_ = nullptr;
+
     bool rowActionsEnabled_ = true;      // see SetRowActionsEnabled
     bool footerLegendEnabled_ = true;    // see SetFooterLegendEnabled
     std::optional<RECT> anchorRect_;     // see SetAnchorRect

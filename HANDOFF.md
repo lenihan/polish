@@ -39,6 +39,13 @@ live taskbar on this machine (build 26200):
   so clicking can walk it.
 - **Ctrl+click** jumps to the most recently used other window, so repeated
   ctrl-clicks toggle between the two most recent.
+- Rows carry working minimize/maximize/close buttons, with hover fills and
+  tooltips. They need handlers of their own -- the Alt+Tab panel's are all
+  gated on `g_altTabSessionOpen` and do nothing here.
+- Nothing may inject a Ctrl keystroke while the user might be holding Ctrl.
+  `InjectForegroundUnlockKeystroke` taps F13 instead in that case: tapping
+  Ctrl released the user's own hold, and "tap then re-press" leaves Ctrl
+  stuck down system-wide if they let go at the wrong moment.
 - **Everything else** in the strip still reaches the real taskbar: right-click
   jumplist, middle-click, drag onto a button. Ctrl hands the strip back
   completely, native flyout included. Shift+click is claimed for reverse

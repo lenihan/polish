@@ -89,6 +89,12 @@ current todo list.
   selected in the list, so it says where you already are before it says
   where you could go. Nothing is marked when the foreground window
   belongs to another app.
+- Taskbar: the hover panel's per-row minimize/maximize/close buttons work,
+  light up under the pointer (close in Windows' own close-red, the two
+  toggles in a plain lift) and name themselves with a tooltip. They were
+  wired to the Alt+Tab panel's handlers at first, every one of which opens
+  `if (!g_altTabSessionOpen) return;` -- so all three silently did nothing,
+  the click being dropped on the handler's first line.
 - Taskbar: an open hover panel is a live view -- opening or closing a
   window of the app whose list is on screen adds or removes a row,
   rather than leaving a header that disagrees with its own rows. Its row

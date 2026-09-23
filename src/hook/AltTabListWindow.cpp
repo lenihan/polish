@@ -1,5 +1,6 @@
 #include "hook/AltTabListWindow.h"
 
+#include <commctrl.h>
 #include <shellscalingapi.h>
 #include <windowsx.h>
 
@@ -111,6 +112,15 @@ constexpr COLORREF kHeaderTextColor = RGB(150, 150, 150);
 // "this is what Tab would land on next" (that's the accent color's job).
 constexpr COLORREF kHoverBackgroundColor = RGB(55, 55, 55);
 
+// The close button's hover fill. Windows' own close-button red, because
+// this button does the same irreversible thing its title-bar counterpart
+// does and should be as recognizable -- it is the one action here that
+// cannot be undone by clicking again.
+constexpr COLORREF kCloseHoverColor = RGB(196, 43, 28);
+// The other two get a plain lift instead. They toggle, so they do not
+// warrant a warning color.
+constexpr COLORREF kActionHoverColor = RGB(90, 90, 90);
+
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
 // Horizontal space reserved for the three action buttons at every row's
@@ -164,6 +174,19 @@ RECT ComputeMaximizeToggleButtonRect(const RECT& rowRect, UINT dpi) {
 }  // namespace
 
 AltTabListWindow::AltTabListWindow(HINSTANCE instance) : instance_(instance) {
+    static bool commonControlsInitialized = false;
+    if (!commonControlsInitialized) {
+        // ICC_TAB_CLASSES, not the more obviously-named tooltip flag --
+        // comctl32 groups the tooltip common control in with tab controls
+        // historically, and this is the documented way to make
+        // TOOLTIPS_CLASSW available. Same note as GroupChromeWindow's.
+        INITCOMMONCONTROLSEX icc{};
+        icc.dwSize = sizeof(icc);
+        icc.dwICC = ICC_TAB_CLASSES;
+        InitCommonControlsEx(&icc);
+        commonControlsInitialized = true;
+    }
+
     static bool classRegistered = false;
     if (!classRegistered) {
         WNDCLASSEXW windowClass{};
@@ -185,10 +208,32 @@ AltTabListWindow::AltTabListWindow(HINSTANCE instance) : instance_(instance) {
                                0, 0, nullptr, nullptr, instance_, this);
     if (window_ != nullptr) {
         SetLayeredWindowAttributes(window_, 0, kPanelAlpha, LWA_ALPHA);
+        // One tool covering the whole panel, positioned by hand
+        // (TTM_TRACKPOSITION) rather than one per button: the buttons
+        // move with scrolling and with which row is hovered, so a set of
+        // registered rects would need re-registering constantly. TTF_TRACK
+        // also keeps the tip under this class's control instead of the
+        // tooltip's own mouse relay, which this layered, non-activating
+        // window does not feed.
+        tooltipWindow_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                          WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT,
+                                          CW_USEDEFAULT, CW_USEDEFAULT, window_, nullptr, instance_, nullptr);
+        if (tooltipWindow_ != nullptr) {
+            TOOLINFOW ti{};
+            ti.cbSize = sizeof(ti);
+            ti.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+            ti.hwnd = window_;
+            ti.uId = 1;
+            ti.lpszText = const_cast<LPWSTR>(L"");
+            SendMessageW(tooltipWindow_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+        }
     }
 }
 
 AltTabListWindow::~AltTabListWindow() {
+    if (tooltipWindow_ != nullptr) {
+        DestroyWindow(tooltipWindow_);
+    }
     if (window_ != nullptr) {
         DestroyWindow(window_);
     }
@@ -346,11 +391,15 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
                 }
             }
             SetHoveredIndex(newHover);
+            // After SetHoveredIndex, which may itself have changed which
+            // rows draw buttons at all.
+            UpdateHoveredAction(pt, dpi, rowRects);
             return 0;
         }
 
         case WM_MOUSELEAVE:
             SetHoveredIndex(std::nullopt);
+            UpdateHoveredAction(POINT{-1, -1}, GetDpiForWindow(hwnd), {});
             return 0;
 
         case WM_DPICHANGED: {
@@ -553,6 +602,30 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
             HGDIOBJ oldPen = SelectObject(hdc, glyphPen);
             HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
 
+            // The button under the pointer gets a filled backing, so the
+            // glyphs stop being three anonymous marks and the one about
+            // to be clicked is obvious. Drawn before the glyphs so they
+            // sit on top of it.
+            const bool actionsOnThisRow = hoveredActionRow_.has_value() && *hoveredActionRow_ == i;
+            if (actionsOnThisRow && hoveredAction_.has_value()) {
+                RECT hoveredRect{};
+                switch (*hoveredAction_) {
+                    case ActionButton::Close:
+                        hoveredRect = close;
+                        break;
+                    case ActionButton::MinimizeToggle:
+                        hoveredRect = toggle;
+                        break;
+                    case ActionButton::MaximizeToggle:
+                        hoveredRect = ComputeMaximizeToggleButtonRect(rowRect, dpi);
+                        break;
+                }
+                HBRUSH hoverBrush = CreateSolidBrush(
+                    *hoveredAction_ == ActionButton::Close ? kCloseHoverColor : kActionHoverColor);
+                FillRect(hdc, &hoveredRect, hoverBrush);
+                DeleteObject(hoverBrush);
+            }
+
             const int margin = Scale(kActionButtonGlyphMargin, dpi);
             // Minimize/restore-toggle glyph: always the same single
             // horizontal line near the bottom of the box (the native
@@ -583,7 +656,14 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
                     const int offset = Scale(3, dpi);
                     Rectangle(hdc, maximizeToggle.left + margin + offset, maximizeToggle.top + margin,
                               maximizeToggle.right - margin, maximizeToggle.bottom - margin - offset);
-                    HBRUSH occludeBrush = CreateSolidBrush(rowFillColor);
+                    // Matches whatever is actually behind the glyph --
+                    // the row's own fill normally, but the button's hover
+                    // fill when the pointer is on this very button, or
+                    // the occluding square would paint a patch of row
+                    // color over it.
+                    const bool onThisButton = actionsOnThisRow && hoveredAction_.has_value() &&
+                                              *hoveredAction_ == ActionButton::MaximizeToggle;
+                    HBRUSH occludeBrush = CreateSolidBrush(onThisButton ? kActionHoverColor : rowFillColor);
                     SelectObject(hdc, occludeBrush);
                     Rectangle(hdc, maximizeToggle.left + margin, maximizeToggle.top + margin + offset,
                               maximizeToggle.right - margin - offset, maximizeToggle.bottom - margin);
@@ -880,6 +960,104 @@ void AltTabListWindow::SetHoveredIndex(std::optional<size_t> index) {
     }
 }
 
+void AltTabListWindow::UpdateHoveredAction(POINT pt, UINT dpi, const std::vector<RECT>& rowRects) {
+    std::optional<size_t> newRow;
+    std::optional<ActionButton> newAction;
+
+    // Only the rows that actually draw buttons can have one hovered --
+    // the same two rows Paint and WM_LBUTTONDOWN consider, for the same
+    // reason (see the class comment).
+    if (rowActionsEnabled_) {
+        for (std::optional<size_t> rowIndex : {highlightIndex_, hoveredIndex_}) {
+            if (!rowIndex.has_value() || *rowIndex >= rows_.size() || *rowIndex >= rowRects.size()) {
+                continue;
+            }
+            const RECT& rowRect = rowRects[*rowIndex];
+            RECT close = ComputeCloseButtonRect(rowRect, dpi);
+            RECT toggle = ComputeMinimizeToggleButtonRect(rowRect, dpi);
+            RECT maximize = ComputeMaximizeToggleButtonRect(rowRect, dpi);
+            if (PtInRect(&close, pt)) {
+                newRow = rowIndex;
+                newAction = ActionButton::Close;
+            } else if (PtInRect(&toggle, pt)) {
+                newRow = rowIndex;
+                newAction = ActionButton::MinimizeToggle;
+            } else if (!rows_[*rowIndex].minimized && PtInRect(&maximize, pt)) {
+                newRow = rowIndex;
+                newAction = ActionButton::MaximizeToggle;
+            }
+            if (newAction.has_value()) {
+                break;
+            }
+        }
+    }
+
+    if (newRow == hoveredActionRow_ && newAction == hoveredAction_) {
+        return;
+    }
+    const std::optional<size_t> oldRow = hoveredActionRow_;
+    hoveredActionRow_ = newRow;
+    hoveredAction_ = newAction;
+    UpdateActionTooltip();
+
+    // Narrow invalidate, same shape as SetHoveredIndex -- only the rows
+    // whose buttons changed appearance.
+    for (std::optional<size_t> row : {oldRow, newRow}) {
+        if (!row.has_value() || *row >= rowRects.size()) {
+            continue;
+        }
+        RECT r = rowRects[*row];
+        r.top -= scrollOffset_;
+        r.bottom -= scrollOffset_;
+        InvalidateRect(window_, &r, FALSE);
+    }
+}
+
+void AltTabListWindow::UpdateActionTooltip() {
+    if (tooltipWindow_ == nullptr) {
+        return;
+    }
+    std::wstring text;
+    if (hoveredAction_.has_value() && hoveredActionRow_.has_value() && *hoveredActionRow_ < rows_.size()) {
+        const AltTabListRow& row = rows_[*hoveredActionRow_];
+        switch (*hoveredAction_) {
+            case ActionButton::Close:
+                text = L"Close";
+                break;
+            case ActionButton::MinimizeToggle:
+                // Named for what clicking does, which differs by state --
+                // unlike the glyph, which stays the minimize mark in both
+                // (see Paint).
+                text = row.minimized ? L"Restore" : L"Minimize";
+                break;
+            case ActionButton::MaximizeToggle:
+                text = IsZoomed(row.hwnd) ? L"Restore down" : L"Maximize";
+                break;
+        }
+    }
+
+    TOOLINFOW ti{};
+    ti.cbSize = sizeof(ti);
+    ti.hwnd = window_;
+    ti.uId = 1;
+    if (text.empty()) {
+        SendMessageW(tooltipWindow_, TTM_TRACKACTIVATE, FALSE, reinterpret_cast<LPARAM>(&ti));
+        return;
+    }
+    // Re-applied on every show rather than once at creation, so a theme
+    // change without restarting Polish still takes effect (the same
+    // reasoning GroupChromeWindow::UpdateTooltip gives).
+    ApplyDarkModeToTooltip(tooltipWindow_);
+    ti.lpszText = const_cast<LPWSTR>(text.c_str());
+    SendMessageW(tooltipWindow_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    // Below-right of the cursor, the usual placement -- directly under it
+    // would put the tip beneath the pointer that summoned it.
+    SendMessageW(tooltipWindow_, TTM_TRACKPOSITION, 0, MAKELPARAM(cursor.x + 12, cursor.y + 20));
+    SendMessageW(tooltipWindow_, TTM_TRACKACTIVATE, TRUE, reinterpret_cast<LPARAM>(&ti));
+}
+
 bool AltTabListWindow::RecomputeScrollOffset() {
     if (window_ == nullptr) {
         return false;
@@ -957,6 +1135,12 @@ void AltTabListWindow::Hide() {
     if (window_ != nullptr) {
         ShowWindow(window_, SW_HIDE);
     }
+    // A tracked tooltip is a window of its own and does not go away with
+    // the panel it describes -- it would be left floating over the
+    // desktop naming a button that is no longer on screen.
+    hoveredActionRow_.reset();
+    hoveredAction_.reset();
+    UpdateActionTooltip();
     // Otherwise a stale hoveredIndex_ from before this Hide() could point
     // at the wrong row (or draw buttons prematurely) the moment the panel
     // is shown again somewhere else, before the OS gets around to sending

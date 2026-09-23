@@ -2329,28 +2329,39 @@ void OnAltTabCycle(bool backward, polish::AltTabHook::SessionKind kind) {
 // here, so this stays a separate, smaller local helper rather than
 // reusing that one). Shared by OnAltTabCommit and ActivateGroupTab,
 // below -- both call SetForegroundWindow from this background process.
-void InjectHarmlessCtrlKeystroke() {
-    // Ctrl already down means the user is holding it -- a Ctrl+click, say.
-    // The key-up below would then clear that hold as far as the OS is
-    // concerned, even though their finger has not moved, so a third event
-    // puts it back.
+void InjectForegroundUnlockKeystroke() {
+    // Which key gets tapped depends on whether the user is holding Ctrl,
+    // and that is the whole subtlety here.
     //
-    // Measured, not theorised: with Ctrl+click bound to "toggle to the
-    // most recent other window", holding Ctrl and clicking four times
-    // produced one toggle and then three plain cycles. The injected
-    // key-up had released Ctrl behind the user's back, so every click
-    // after the first read as unmodified. Anything that injects a
-    // modifier has to hand back the state it found.
-    const bool ctrlWasHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
-    INPUT inputs[3]{};
+    // Ctrl is the usual choice and stays the usual choice: it does
+    // nothing on its own, and this has been the Alt+Tab commit path's
+    // behaviour all along. But it is the wrong key to tap while the user
+    // is *holding* Ctrl -- a Ctrl+click. The injected key-up releases
+    // their hold as far as the OS is concerned, even though their finger
+    // has not moved. Measured: holding Ctrl and clicking four times gave
+    // one toggle and then three plain cycles, because every click after
+    // the first read as unmodified.
+    //
+    // Restoring it afterwards (tap, then press Ctrl again) was tried and
+    // is worse. It leaves a window in which the user can release Ctrl
+    // between the read and the SendInput, after which the injected
+    // key-down has no matching key-up and Ctrl is stuck down
+    // system-wide -- the same class of bug AltTabHook's own comment
+    // records for a swallowed Alt-up, and it outlives this process.
+    //
+    // So when Ctrl is held, tap something else entirely. F13 does not
+    // exist on any ordinary keyboard, which is exactly the point: it
+    // cannot be a key the user is holding, so its down/up pair can never
+    // disturb a state someone is relying on.
+    const bool ctrlHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    const WORD key = ctrlHeld ? VK_F13 : VK_CONTROL;
+    INPUT inputs[2]{};
     inputs[0].type = INPUT_KEYBOARD;
-    inputs[0].ki.wVk = VK_CONTROL;
+    inputs[0].ki.wVk = key;
     inputs[1].type = INPUT_KEYBOARD;
-    inputs[1].ki.wVk = VK_CONTROL;
+    inputs[1].ki.wVk = key;
     inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-    inputs[2].type = INPUT_KEYBOARD;
-    inputs[2].ki.wVk = VK_CONTROL;
-    SendInput(ctrlWasHeld ? 3 : 2, inputs, sizeof(INPUT));
+    SendInput(2, inputs, sizeof(INPUT));
 }
 
 void OnAltTabCommit() {
@@ -2372,7 +2383,7 @@ void OnAltTabCommit() {
             // iconic member (see PLAN.md's Alt+Tab-improvements M4).
             ShowWindow(target, SW_RESTORE);
         }
-        InjectHarmlessCtrlKeystroke();
+        InjectForegroundUnlockKeystroke();
         const BOOL result = SetForegroundWindow(target);
         polish::LogDebug(std::format(
             L"[Polish] AltTab: commit -> hwnd={} minimized={} SetForegroundWindow result={} actualForeground={}",
@@ -3275,6 +3286,65 @@ void OpenTaskbarPanel(int index) {
     }
 }
 
+// The hover panel's per-row buttons.
+//
+// Its own, rather than the Alt+Tab panel's OnAltTabRow* handlers, which
+// is what it was first wired to. Every one of those opens with
+// `if (!g_altTabSessionOpen) return;` -- they do not only act on a
+// window, they also fix up that session's candidate list and highlight
+// index afterwards, so without a session they are not merely unnecessary
+// but wrong. The result was all three buttons silently doing nothing on
+// the taskbar panel: the click was hit-tested, dispatched, and dropped on
+// the first line of the handler.
+//
+// These act on the window and stop. The list behind the panel is rebuilt
+// from the taskbar anyway -- a closing window reaches MarkTaskbarDirty
+// through EVENT_OBJECT_DESTROY like any other -- so there is no local
+// bookkeeping to keep straight.
+void OnTaskbarRowClose(HWND hwnd) {
+    if (!IsWindow(hwnd)) {
+        return;
+    }
+    polish::LogDebug(std::format(L"[Polish] Taskbar: row close -> hwnd={}", reinterpret_cast<void*>(hwnd)));
+    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+}
+
+void OnTaskbarRowMinimizeToggle(HWND hwnd) {
+    if (!IsWindow(hwnd)) {
+        return;
+    }
+    const bool minimizing = !IsIconic(hwnd);
+    polish::LogDebug(std::format(L"[Polish] Taskbar: row {} -> hwnd={}", minimizing ? L"minimize" : L"restore",
+                                 reinterpret_cast<void*>(hwnd)));
+    if (minimizing) {
+        ShowWindow(hwnd, SW_MINIMIZE);
+    } else {
+        ShowWindow(hwnd, SW_RESTORE);
+        InjectForegroundUnlockKeystroke();
+        SetForegroundWindow(hwnd);
+    }
+    // The row's own glyphs read live state at paint time, so a repaint is
+    // all they need. Deliberately not a full rebuild: that would re-sort
+    // the row into (or out of) the minimized section and move it under
+    // the pointer that just clicked it.
+    if (g_taskbarPanel) {
+        g_taskbarPanel->RepaintRow(hwnd);
+    }
+}
+
+void OnTaskbarRowMaximizeToggle(HWND hwnd) {
+    if (!IsWindow(hwnd)) {
+        return;
+    }
+    const bool restoring = IsZoomed(hwnd) != FALSE;
+    polish::LogDebug(std::format(L"[Polish] Taskbar: row {} -> hwnd={}", restoring ? L"restore down" : L"maximize",
+                                 reinterpret_cast<void*>(hwnd)));
+    ShowWindow(hwnd, restoring ? SW_RESTORE : SW_MAXIMIZE);
+    if (g_taskbarPanel) {
+        g_taskbarPanel->RepaintRow(hwnd);
+    }
+}
+
 // The pointer moved onto a different app button, or off the strip
 // (index -1).
 void OnTaskbarHover(uint64_t generation, int index) {
@@ -3324,7 +3394,7 @@ void OnTaskbarCycleClick(uint64_t generation, int index, polish::TaskbarHook::Cl
         // activating the app's one remaining window is the closest thing
         // to what the user asked for.
         if (windows.size() == 1 && IsWindow(windows.front())) {
-            InjectHarmlessCtrlKeystroke();
+            InjectForegroundUnlockKeystroke();
             SetForegroundWindow(windows.front());
         }
         return;
@@ -3344,7 +3414,7 @@ void OnTaskbarCycleClick(uint64_t generation, int index, polish::TaskbarHook::Cl
         if (IsIconic(target)) {
             ShowWindow(target, SW_RESTORE);
         }
-        InjectHarmlessCtrlKeystroke();
+        InjectForegroundUnlockKeystroke();
         const BOOL toggled = SetForegroundWindow(target);
         if (g_taskbarPanel && g_taskbarPanelButton == index) {
             const auto row = std::find(g_taskbarPanelRows.begin(), g_taskbarPanelRows.end(), target);
@@ -3423,7 +3493,7 @@ void OnTaskbarCycleClick(uint64_t generation, int index, polish::TaskbarHook::Cl
         // brings it to front.
         ShowWindow(target, SW_RESTORE);
     }
-    InjectHarmlessCtrlKeystroke();
+    InjectForegroundUnlockKeystroke();
     const BOOL result = SetForegroundWindow(target);
     g_taskbarCycleActivated = target;
 
@@ -3954,7 +4024,7 @@ void ActivateGroupTab(polish::GroupId id, size_t index) {
     ReflowGroupTo(id);
 
     if (const auto active = group->ActiveWindow(); active.has_value() && IsWindow(*active)) {
-        InjectHarmlessCtrlKeystroke();
+        InjectForegroundUnlockKeystroke();
         SetForegroundWindow(chromeIt->second->Handle());
         SetFocus(*active);
     }
@@ -4791,12 +4861,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             if (IsIconic(hwnd)) {
                 ShowWindow(hwnd, SW_RESTORE);
             }
-            InjectHarmlessCtrlKeystroke();
+            InjectForegroundUnlockKeystroke();
             SetForegroundWindow(hwnd);
         });
-        g_taskbarPanel->SetOnRowMinimizeToggle(OnAltTabRowMinimizeToggle);
-        g_taskbarPanel->SetOnRowMaximizeToggle(OnAltTabRowMaximizeToggle);
-        g_taskbarPanel->SetOnRowClose(OnAltTabRowClose);
+        g_taskbarPanel->SetOnRowMinimizeToggle(OnTaskbarRowMinimizeToggle);
+        g_taskbarPanel->SetOnRowMaximizeToggle(OnTaskbarRowMaximizeToggle);
+        g_taskbarPanel->SetOnRowClose(OnTaskbarRowClose);
         // Pointing at a row halos the real window where it actually sits,
         // which is the thing a thumbnail only approximates. One shared
         // halo is enough: exactly one row is hovered at a time.
