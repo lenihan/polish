@@ -132,14 +132,23 @@ public:
     void RepaintRow(HWND hwnd);
 
     // The text of the heading above the non-minimized rows. Defaults to
-    // "Active"; the caller sets an app's name while a session is scoped to
-    // one app (Alt+`), so the panel says what it is showing -- and must
-    // set it back to "Active" when the scope widens. Takes effect on the
+    // "Running windows"; the caller sets an app's name while a session is
+    // scoped to one app (Alt+`), so the panel says what it is showing --
+    // and must set it back when the scope widens. Takes effect on the
     // next Show() (which lays out and paints from scratch), so call it
     // before Show() rather than expecting an already-visible panel to
     // update. A setter rather than a Show() parameter because the cheap
     // SetHighlight path never needs it.
     void SetActiveSectionHeader(std::wstring text) { activeHeader_ = std::move(text); }
+
+    // What that heading says when the list is not scoped to one app.
+    //
+    // A named constant because two separate places in main.cpp set the
+    // header back to it after an Alt+` session ends, and a bare literal
+    // in each meant the default and the reset could disagree -- as they
+    // briefly did, leaving a panel that said "Running windows" until the
+    // first Alt+` and "Active" ever after.
+    static constexpr const wchar_t* kDefaultActiveHeader = L"Running windows";
 
     // Whether rows carry their per-row minimize/maximize/close buttons.
     //
@@ -286,7 +295,12 @@ private:
     HINSTANCE instance_;
     HWND window_ = nullptr;
     std::vector<AltTabListRow> rows_;
-    std::wstring activeHeader_ = L"Active";  // see SetActiveSectionHeader
+    // "Running", not "Active": only one window is ever active -- the one
+    // with focus -- and this section lists every window that is merely
+    // running, which is a different thing. The old wording said the list
+    // was full of active windows while marking exactly one of them as
+    // selected, contradicting itself.
+    std::wstring activeHeader_ = kDefaultActiveHeader;  // see SetActiveSectionHeader
     std::optional<size_t> highlightIndex_;
     // Vertical pixel offset applied only when there are more rows than
     // fit in the panel's height-capped viewport (see kViewportMarginPx in

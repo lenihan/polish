@@ -181,6 +181,18 @@ constexpr UINT kTaskbarDwellMs = 220;
 //
 // Short enough that the gap is imperceptible, long enough that the burst
 // of events one app launch produces still costs a single UIA read.
+// How long the pointer rests on a row before that window is brought to
+// the front to look at.
+//
+// A dwell rather than an immediate raise: previewing is a real
+// activation (a background process cannot raise another window in
+// z-order without one -- measured, see docs/LIMITATIONS.md #8), so
+// sweeping down a list of five rows with no dwell would activate five
+// windows in a row. Short enough to feel like looking, long enough that
+// passing over a row on the way to another one does not disturb it.
+constexpr UINT_PTR kTaskbarPreviewTimerId = 12;
+constexpr UINT kTaskbarPreviewDwellMs = 160;
+
 constexpr UINT_PTR kTaskbarDirtyTimerId = 11;
 constexpr UINT kTaskbarDirtyDebounceMs = 120;
 
@@ -457,6 +469,7 @@ void OnObjectFocusChanged(HWND hwnd);
 void ForgetTaskbarWindow(HWND hwnd);
 void MarkTaskbarDirty();
 bool IsTaskbarOwnedWindow(HWND hwnd);
+bool TaskbarPreviewInProgress();
 
 // Forward-declared so ReflowGroupTo (defined further down) can call them
 // after GroupManager::ApplyLayout drops a member that turned out to be
@@ -1006,7 +1019,15 @@ void OnForegroundChanged(HWND newForeground) {
     // Tracks every real window that becomes foreground, not just
     // candidate windows -- Alt+Tab candidate filtering (candidate +
     // non-minimized) happens where this list is consumed, not here.
-    g_activationHistory.MoveToFront(newForeground);
+    //
+    // Except while the taskbar panel is previewing a row. Those
+    // activations are the user looking, not choosing, and recording them
+    // would reorder the very list being looked at -- hover three rows and
+    // the app's MRU order would be rewritten by nothing more than a
+    // pointer passing over it.
+    if (!TaskbarPreviewInProgress()) {
+        g_activationHistory.MoveToFront(newForeground);
+    }
     std::wstring mruOrder;
     for (HWND hwnd : g_activationHistory.OrderedWindows()) {
         if (!mruOrder.empty()) {
@@ -1872,7 +1893,7 @@ void ApplyAltTabDimming() {
                                         (g_altTabMinimized != g_altTabListWindowLastMinimized);
         if (candidatesChanged) {
             for (auto& panel : g_altTabPanels) {
-                panel.window->SetActiveSectionHeader(L"Active");
+                panel.window->SetActiveSectionHeader(polish::AltTabListWindow::kDefaultActiveHeader);
             }
             std::wstring rowDump;
             for (HWND hwnd : g_altTabCandidates) {
@@ -2033,7 +2054,7 @@ void EndTabSession() {
         // Restored for whatever window session comes next, which does
         // want its rows actionable.
         panel.window->SetRowActionsEnabled(true);
-        panel.window->SetActiveSectionHeader(L"Active");
+        panel.window->SetActiveSectionHeader(polish::AltTabListWindow::kDefaultActiveHeader);
     }
     g_altTabListWindowLastCandidates.clear();
     g_altTabListWindowLastMinimized.clear();
@@ -2900,6 +2921,26 @@ std::vector<HWND> g_taskbarPanelRows;
 // reorders it. Treating that reordering as a change is what used to make
 // the list re-sort itself under the pointer on every click.
 std::vector<HWND> g_taskbarPanelWindows;
+
+// Hovering a row brings that window to the front to look at, and moving
+// away puts things back as they were.
+//
+// It has to be a real activation. A background process cannot raise
+// another process's window by z-order alone: SetWindowPos with HWND_TOP
+// and SWP_NOACTIVATE returns TRUE and does nothing at all, measured
+// against a foreign window at depth 6 that stayed at depth 6. So the
+// preview activates, and this remembers what to put back.
+//
+// g_taskbarPreviewRestore is the window that was in front when the
+// preview began -- nullptr when nothing is being previewed.
+HWND g_taskbarPreviewRestore = nullptr;
+// The row waiting out the dwell, if any.
+HWND g_taskbarPreviewPending = nullptr;
+// True from the first preview activation until things are put back.
+// While set, foreground changes are not recorded as real use -- a window
+// the user only looked at must not climb the MRU order, or looking at a
+// list would silently reorder it.
+bool g_taskbarPreviewing = false;
 // The button the dwell timer is counting down for.
 int g_taskbarDwellButton = -1;
 
@@ -3015,6 +3056,7 @@ std::vector<HWND> TaskbarWindowsInMruOrder() {
 }
 
 void OpenTaskbarPanel(int index);
+void EndTaskbarPreview();
 
 // The app's most recently used window that is not the one already in
 // front -- what Ctrl+click jumps to, and therefore what makes repeated
@@ -3176,6 +3218,7 @@ HICON TaskbarRowIcon(HWND hwnd) {
 }
 
 void CloseTaskbarPanel() {
+    EndTaskbarPreview();
     KillTimer(g_messageWindow, kTaskbarDwellTimerId);
     g_taskbarDwellButton = -1;
     if (g_taskbarPanelButton < 0) {
@@ -3302,6 +3345,82 @@ bool ActivateWindowFromTaskbar(HWND hwnd) {
     }
     InjectForegroundUnlockKeystroke();
     return SetForegroundWindow(hwnd) != FALSE;
+}
+
+bool TaskbarPreviewInProgress() { return g_taskbarPreviewing; }
+
+// Stops previewing and puts the foreground back where it was.
+//
+// Separate from CancelTaskbarPreview below, which forgets the restore
+// target instead of using it -- the difference between the pointer
+// wandering off a row and the user actually choosing it.
+void EndTaskbarPreview() {
+    KillTimer(g_messageWindow, kTaskbarPreviewTimerId);
+    g_taskbarPreviewPending = nullptr;
+    if (!g_taskbarPreviewing) {
+        return;
+    }
+    HWND restore = g_taskbarPreviewRestore;
+    g_taskbarPreviewRestore = nullptr;
+    // Cleared before the activation, not after: this one *is* real use
+    // and should be recorded, and leaving the flag set would also swallow
+    // the foreground change it causes.
+    g_taskbarPreviewing = false;
+    if (restore != nullptr && IsWindow(restore) && !IsIconic(restore) && GetForegroundWindow() != restore) {
+        polish::LogDebug(
+            std::format(L"[Polish] Taskbar: preview over, back to hwnd={}", reinterpret_cast<void*>(restore)));
+        ActivateWindowFromTaskbar(restore);
+    }
+}
+
+// Keeps whatever the preview activated, rather than putting the old
+// window back -- for when a hover turns into a real choice.
+void CancelTaskbarPreview() {
+    KillTimer(g_messageWindow, kTaskbarPreviewTimerId);
+    g_taskbarPreviewPending = nullptr;
+    g_taskbarPreviewRestore = nullptr;
+    g_taskbarPreviewing = false;
+}
+
+// A row was hovered (or left, with nullptr). Arms the dwell; the actual
+// activation happens in the timer.
+void OnTaskbarRowHovered(HWND hwnd) {
+    if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd)) {
+        // Minimized rows are deliberately not previewed: showing one
+        // means restoring it, which is a change the user did not ask for
+        // and which un-minimizing back would not perfectly undo.
+        KillTimer(g_messageWindow, kTaskbarPreviewTimerId);
+        g_taskbarPreviewPending = nullptr;
+        return;
+    }
+    if (hwnd == GetForegroundWindow()) {
+        // Already what you are looking at; nothing to bring forward, and
+        // nothing to put back afterwards.
+        KillTimer(g_messageWindow, kTaskbarPreviewTimerId);
+        g_taskbarPreviewPending = nullptr;
+        return;
+    }
+    g_taskbarPreviewPending = hwnd;
+    SetTimer(g_messageWindow, kTaskbarPreviewTimerId, kTaskbarPreviewDwellMs, nullptr);
+}
+
+// The dwell elapsed with the pointer still on the row.
+void ShowTaskbarPreview() {
+    KillTimer(g_messageWindow, kTaskbarPreviewTimerId);
+    HWND target = g_taskbarPreviewPending;
+    g_taskbarPreviewPending = nullptr;
+    if (target == nullptr || !IsWindow(target) || IsIconic(target)) {
+        return;
+    }
+    if (!g_taskbarPreviewing) {
+        // Captured once, at the start of a run of previews -- not per
+        // row. Stepping down three rows and leaving should return to
+        // where the user actually was, not to the row above.
+        g_taskbarPreviewRestore = GetForegroundWindow();
+        g_taskbarPreviewing = true;
+    }
+    polish::LogDebug(std::format(L"[Polish] Taskbar: preview hwnd={}", reinterpret_cast<void*>(target)));
+    ActivateWindowFromTaskbar(target);
 }
 
 // The next window after `from` in the panel's own display order that is
@@ -3439,6 +3558,10 @@ void OnTaskbarCycleClick(uint64_t generation, int index, polish::TaskbarHook::Cl
     if (index < 0 || static_cast<size_t>(index) >= g_taskbarButtonWindows.size()) {
         return;
     }
+    // The click is a choice, so whatever a preview brought forward stays
+    // brought forward -- putting the old window back here would undo the
+    // very thing the user just clicked past.
+    CancelTaskbarPreview();
     const std::wstring appId = g_taskbarButtons[static_cast<size_t>(index)].appId;
     const std::vector<HWND>& windows = g_taskbarButtonWindows[static_cast<size_t>(index)];
     if (windows.size() < 2) {
@@ -4488,6 +4611,8 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 KillTimer(hwnd, kHaloRestoreTimerId);
                 g_haloMinimizeSuppressed = false;
                 UpdateActiveWindowHalo(GetForegroundWindow());
+            } else if (wParam == kTaskbarPreviewTimerId) {
+                ShowTaskbarPreview();
             } else if (wParam == kTaskbarDirtyTimerId) {
                 KillTimer(hwnd, kTaskbarDirtyTimerId);
                 RequestTaskbarRefresh();
@@ -4896,6 +5021,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         // first show is the latency-sensitive one.
         g_taskbarPanel = std::make_unique<polish::AltTabListWindow>(instance);
         g_taskbarPanel->SetOnRowActivated([](HWND hwnd) {
+            // Before CloseTaskbarPanel, which would otherwise end the
+            // preview by putting the previous window back -- undoing the
+            // click on its way out.
+            CancelTaskbarPreview();
             CloseTaskbarPanel();
             ActivateWindowFromTaskbar(hwnd);
         });
@@ -4906,6 +5035,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         // which is the thing a thumbnail only approximates. One shared
         // halo is enough: exactly one row is hovered at a time.
         g_taskbarPanel->SetOnRowHovered([](HWND hwnd) {
+            OnTaskbarRowHovered(hwnd);
             if (hwnd != nullptr && IsWindow(hwnd) && !IsIconic(hwnd)) {
                 if (g_activeWindowHalo) {
                     g_activeWindowHalo->ShowAroundTarget(hwnd);

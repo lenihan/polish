@@ -1,6 +1,7 @@
 #include "hook/AltTabListWindow.h"
 
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <shellscalingapi.h>
 #include <windowsx.h>
 
@@ -13,6 +14,24 @@ namespace polish {
 namespace {
 
 constexpr wchar_t kWindowClassName[] = L"PolishAltTabListWindow";
+
+// DWM's Win11 corner rounding. Spelled out rather than relying on the
+// SDK's dwmapi.h, which only declares these when the build targets a new
+// enough NTDDI -- an older toolchain would otherwise fail to compile
+// rather than simply not round.
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+constexpr DWORD DWMWA_WINDOW_CORNER_PREFERENCE = 33;
+#endif
+constexpr DWORD kCornerPreferenceRound = 2;  // DWMWCP_ROUND
+
+// Asks DWM to round a window's corners. A no-op on a Windows build that
+// predates the attribute -- DwmSetWindowAttribute returns a failure HRESULT
+// for an unknown attribute and changes nothing, which is exactly the
+// wanted degradation.
+void ApplyRoundedCorners(HWND window) {
+    const DWORD preference = kCornerPreferenceRound;
+    DwmSetWindowAttribute(window, DWMWA_WINDOW_CORNER_PREFERENCE, &preference, sizeof(preference));
+}
 
 // Logical (96 DPI) px -- scaled fresh at every layout/paint via Scale(),
 // never cached, same convention GroupChromeWindow/GroupPickerWindow use.
@@ -208,6 +227,7 @@ AltTabListWindow::AltTabListWindow(HINSTANCE instance) : instance_(instance) {
                                0, 0, nullptr, nullptr, instance_, this);
     if (window_ != nullptr) {
         SetLayeredWindowAttributes(window_, 0, kPanelAlpha, LWA_ALPHA);
+        ApplyRoundedCorners(window_);
         // One tool covering the whole panel, positioned by hand
         // (TTM_TRACKPOSITION) rather than one per button: the buttons
         // move with scrolling and with which row is hovered, so a set of
