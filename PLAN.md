@@ -77,6 +77,14 @@ current todo list.
 - Taskbar: shift-clicking a button with 2+ windows cycles the same list
   backwards, the way Shift reverses Alt+Tab. That claims the native
   shift+click (open a new instance), which middle-click still does.
+- Taskbar: ctrl-clicking jumps to the most recently used *other* window,
+  so repeated ctrl-clicks toggle between the two most recent -- the tap
+  half of the Alt+Tab split, against click-to-cycle's hold half. Read
+  from `ActivationHistory` live rather than from the button's cached
+  list, which is only as fresh as the last taskbar read and would go
+  stale under a fast repeat. This narrows the Ctrl escape hatch to
+  everything except the left button: Ctrl+hover still shows the native
+  flyout and Ctrl+right/middle-click still reach the taskbar.
 - Taskbar: hovering a button marks the app's currently-focused window as
   selected in the list, so it says where you already are before it says
   where you could go. Nothing is marked when the foreground window

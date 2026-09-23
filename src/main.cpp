@@ -2330,13 +2330,27 @@ void OnAltTabCycle(bool backward, polish::AltTabHook::SessionKind kind) {
 // reusing that one). Shared by OnAltTabCommit and ActivateGroupTab,
 // below -- both call SetForegroundWindow from this background process.
 void InjectHarmlessCtrlKeystroke() {
-    INPUT inputs[2]{};
+    // Ctrl already down means the user is holding it -- a Ctrl+click, say.
+    // The key-up below would then clear that hold as far as the OS is
+    // concerned, even though their finger has not moved, so a third event
+    // puts it back.
+    //
+    // Measured, not theorised: with Ctrl+click bound to "toggle to the
+    // most recent other window", holding Ctrl and clicking four times
+    // produced one toggle and then three plain cycles. The injected
+    // key-up had released Ctrl behind the user's back, so every click
+    // after the first read as unmodified. Anything that injects a
+    // modifier has to hand back the state it found.
+    const bool ctrlWasHeld = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+    INPUT inputs[3]{};
     inputs[0].type = INPUT_KEYBOARD;
     inputs[0].ki.wVk = VK_CONTROL;
     inputs[1].type = INPUT_KEYBOARD;
     inputs[1].ki.wVk = VK_CONTROL;
     inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-    SendInput(2, inputs, sizeof(INPUT));
+    inputs[2].type = INPUT_KEYBOARD;
+    inputs[2].ki.wVk = VK_CONTROL;
+    SendInput(ctrlWasHeld ? 3 : 2, inputs, sizeof(INPUT));
 }
 
 void OnAltTabCommit() {
@@ -2991,6 +3005,33 @@ std::vector<HWND> TaskbarWindowsInMruOrder() {
 
 void OpenTaskbarPanel(int index);
 
+// The app's most recently used window that is not the one already in
+// front -- what Ctrl+click jumps to, and therefore what makes repeated
+// Ctrl+clicks toggle between the two most recent.
+//
+// Read from g_activationHistory rather than from the button's cached
+// window list, even though that list is already MRU-ordered: the cached
+// one is only as fresh as the last taskbar read, and a toggle is exactly
+// the gesture someone repeats faster than that. The history is updated on
+// every foreground change, so it is never behind.
+HWND MostRecentOtherWindow(const std::vector<HWND>& windows, HWND foreground) {
+    for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+        if (hwnd != foreground && IsWindow(hwnd) &&
+            std::find(windows.begin(), windows.end(), hwnd) != windows.end()) {
+            return hwnd;
+        }
+    }
+    // Nothing of this app's has been focused during this process run, so
+    // there is no recency to go on -- take the list's own order, which
+    // falls back to Z-order for exactly these windows.
+    for (HWND hwnd : windows) {
+        if (hwnd != foreground && IsWindow(hwnd)) {
+            return hwnd;
+        }
+    }
+    return nullptr;
+}
+
 // Whether two window lists hold the same windows, in any order. Taken by
 // value because it sorts them; the lists are a handful of entries.
 bool SameWindowSet(std::vector<HWND> a, std::vector<HWND> b) {
@@ -3266,7 +3307,8 @@ void OnTaskbarHover(uint64_t generation, int index) {
 }
 
 // A left-click was swallowed on a button with 2+ windows.
-void OnTaskbarCycleClick(uint64_t generation, int index, bool backward) {
+void OnTaskbarCycleClick(uint64_t generation, int index, polish::TaskbarHook::ClickAction action) {
+    const bool backward = action == polish::TaskbarHook::ClickAction::CycleBackward;
     if (generation != g_taskbarGeneration || !g_settings.taskbarEnabled) {
         return;
     }
@@ -3285,6 +3327,33 @@ void OnTaskbarCycleClick(uint64_t generation, int index, bool backward) {
             InjectHarmlessCtrlKeystroke();
             SetForegroundWindow(windows.front());
         }
+        return;
+    }
+
+    if (action == polish::TaskbarHook::ClickAction::ToggleRecent) {
+        // A toggle has no position in a list and keeps none: it always
+        // means "the other one", so it deliberately does not resume, or
+        // start, a walk. Ending any walk in progress is what stops a
+        // later plain click from carrying on from wherever the toggling
+        // happened to leave the foreground.
+        const HWND target = MostRecentOtherWindow(windows, GetForegroundWindow());
+        EndTaskbarCycleSession();
+        if (target == nullptr) {
+            return;
+        }
+        if (IsIconic(target)) {
+            ShowWindow(target, SW_RESTORE);
+        }
+        InjectHarmlessCtrlKeystroke();
+        const BOOL toggled = SetForegroundWindow(target);
+        if (g_taskbarPanel && g_taskbarPanelButton == index) {
+            const auto row = std::find(g_taskbarPanelRows.begin(), g_taskbarPanelRows.end(), target);
+            if (row != g_taskbarPanelRows.end()) {
+                g_taskbarPanel->SetHighlight(static_cast<size_t>(row - g_taskbarPanelRows.begin()));
+            }
+        }
+        polish::LogDebug(std::format(L"[Polish] Taskbar: toggle button {} -> hwnd={} SetForegroundWindow result={}",
+                                     index, reinterpret_cast<void*>(target), toggled != FALSE));
         return;
     }
 
@@ -4387,6 +4456,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         case polish::TaskbarHook::kHoverMessage:
         case polish::TaskbarHook::kCycleClickMessage:
         case polish::TaskbarHook::kCycleBackClickMessage:
+        case polish::TaskbarHook::kToggleClickMessage:
         case polish::TaskbarHook::kReplayPressMessage:
             if (g_taskbarHook) {
                 g_taskbarHook->HandleHookMessage(message, wParam, lParam);

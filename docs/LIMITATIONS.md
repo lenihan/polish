@@ -274,9 +274,12 @@ gets a full pass in Phase 3; today it records what's already known.
       anything the native taskbar would have done there (the right-click
       jumplist, middle-click, drag-and-drop onto a button) has to be
       handed back deliberately. How, and what does *not* work, is the
-      next entry. Shift+click is the exception: Polish claims it for
-      reverse-cycling, so the native shift+click (open a new instance)
-      moves to middle-click, which already did the same thing.
+      next entry. The left button is the exception: Polish claims plain
+      click (cycle), Shift+click (cycle backwards) and Ctrl+click (toggle
+      to the most recent other window). Native shift+click, which opens a
+      new instance, moves to middle-click, which already did the same
+      thing. Ctrl still hands everything else back -- hover, right-click
+      and middle-click all behave as they would without Polish.
     - **The taskbar's own hover highlight is lost**, since the taskbar no
       longer sees the pointer. Polish has to draw its own or accept its
       absence.

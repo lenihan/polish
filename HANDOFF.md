@@ -33,7 +33,12 @@ live taskbar on this machine (build 26200):
   MRU order, over an order frozen at the first click. **Shift+click** walks
   the same list backwards. Verified across three windows: forward 1-2-3-1,
   reverse 3-2-1-3.
-- The hovered list marks the app's currently-focused window as selected.
+- The hovered list marks the app's currently-focused window as selected, and
+  a fresh hover re-sorts MRU-first, so the row below the selected one is
+  always the next window you would want. An open list holds its order still
+  so clicking can walk it.
+- **Ctrl+click** jumps to the most recently used other window, so repeated
+  ctrl-clicks toggle between the two most recent.
 - **Everything else** in the strip still reaches the real taskbar: right-click
   jumplist, middle-click, drag onto a button. Ctrl hands the strip back
   completely, native flyout included. Shift+click is claimed for reverse
@@ -85,6 +90,13 @@ of these look like they should work:
 4. **Ctrl needs one mouse move to take effect** when pressed with the pointer
    already resting on a button, because pass-through is driven by mouse events
    plus a 100ms poll. Accepted, not fixed.
+5. **Ctrl is now two things at once**, which may want resolving. Arriving on a
+   button with Ctrl already held gives the native flyout (the escape hatch);
+   pressing Ctrl once Polish's own list is already open leaves that list up and
+   ctrl-click toggles. Both are defensible on their own, but which one you get
+   depends on *when* you pressed Ctrl. Making Ctrl entirely Polish's would be
+   consistent, at the cost of the only remaining "behave as though Polish were
+   not installed" gesture.
 5. **Secondary taskbars are untested.** One monitor on this machine. The
    shield creates one window per taskbar `HMONITOR` and `AutomationId` repeats
    across taskbars, so this is where a regression would hide.

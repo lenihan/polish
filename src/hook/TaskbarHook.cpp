@@ -127,7 +127,7 @@ void ReplayButtonDown(WPARAM message, DWORD mouseData, bool release) {
 }  // namespace
 
 TaskbarHook::TaskbarHook(HWND messageWindow, std::function<void(uint64_t, int)> onHoverChanged,
-                          std::function<void(uint64_t, int, bool)> onCycleClick,
+                          std::function<void(uint64_t, int, ClickAction)> onCycleClick,
                           std::function<void(bool)> setPassThrough)
     : messageWindow_(messageWindow),
       onHoverChanged_(std::move(onHoverChanged)),
@@ -253,17 +253,24 @@ bool TaskbarHook::HandleMouseEvent(WPARAM message, POINT screenPt, DWORD mouseDa
     const int index = HitTest(screenPt);
 
     // The press Polish claims: a left-click on an app with somewhere to
-    // cycle, with or without Shift. Only Ctrl is excluded, because only
-    // Ctrl is the escape hatch -- see the class comment on why Shift is
-    // claimed rather than left to the taskbar.
-    const bool claimingThisPress = !ctrlHeld && message == WM_LBUTTONDOWN && index >= 0 &&
-                                   targets_[static_cast<size_t>(index)].cyclesOnClick;
+    // go, with or without a modifier. Both modifiers mean something here
+    // -- see the class comment on what each takes over.
+    const bool claimingThisPress =
+        message == WM_LBUTTONDOWN && index >= 0 && targets_[static_cast<size_t>(index)].cyclesOnClick;
     if (claimingThisPress) {
-        // Stays shut: this press is not going anywhere.
-        ApplyPassThrough(false);
+        // Left exactly as Ctrl set it, rather than forced shut: the press
+        // is swallowed either way, and slamming the shield closed under a
+        // held Ctrl would fight the hover poll, which is about to reopen
+        // it on Ctrl's behalf.
+        ApplyPassThrough(ctrlHeld);
         swallowedLeftDown_ = true;
-        PostMessageW(messageWindow_, IsShiftHeld() ? kCycleBackClickMessage : kCycleClickMessage,
-                     static_cast<WPARAM>(generation_), static_cast<LPARAM>(index));
+        // Ctrl wins when both are down. It is the coarser gesture -- "the
+        // other one" rather than "one step back" -- so it is the one a
+        // hand fumbling both modifiers more likely meant.
+        const UINT claimed = ctrlHeld          ? kToggleClickMessage
+                             : IsShiftHeld()   ? kCycleBackClickMessage
+                                               : kCycleClickMessage;
+        PostMessageW(messageWindow_, claimed, static_cast<WPARAM>(generation_), static_cast<LPARAM>(index));
         return true;
     }
 
@@ -321,9 +328,13 @@ void TaskbarHook::HandleHookMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         if (onHoverChanged_) {
             onHoverChanged_(generation, index);
         }
-    } else if (message == kCycleClickMessage || message == kCycleBackClickMessage) {
+    } else if (message == kCycleClickMessage || message == kCycleBackClickMessage ||
+               message == kToggleClickMessage) {
         if (onCycleClick_) {
-            onCycleClick_(generation, index, message == kCycleBackClickMessage);
+            const ClickAction action = message == kToggleClickMessage    ? ClickAction::ToggleRecent
+                                       : message == kCycleBackClickMessage ? ClickAction::CycleBackward
+                                                                           : ClickAction::CycleForward;
+            onCycleClick_(generation, index, action);
         }
     }
 }
