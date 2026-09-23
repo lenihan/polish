@@ -2,6 +2,7 @@
 
 #include <objbase.h>
 #include <shellapi.h>
+#include <shobjidl_core.h>
 #include <tlhelp32.h>
 
 #include <algorithm>
@@ -470,6 +471,13 @@ void ForgetTaskbarWindow(HWND hwnd);
 void MarkTaskbarDirty();
 bool IsTaskbarOwnedWindow(HWND hwnd);
 bool TaskbarPreviewInProgress();
+// The taskbar hover panel's keyboard surface, needed by the Alt+Tab
+// hook's callbacks above -- both panels share those keys, and which one
+// is showing decides where they go.
+bool TaskbarPanelOpen();
+bool TaskbarPanelOwnsKeys();
+void CloseTaskbarPanel();
+void EndTaskbarPreview();
 
 // Forward-declared so ReflowGroupTo (defined further down) can call them
 // after GroupManager::ApplyLayout drops a member that turned out to be
@@ -2417,6 +2425,14 @@ void OnAltTabCommit() {
 }
 
 void OnAltTabCancel() {
+    if (TaskbarPanelOwnsKeys()) {
+        // Escape over the taskbar list means "never mind" -- put back
+        // whatever the previewing moved away from, then close.
+        EndTaskbarPreview();
+        CloseTaskbarPanel();
+        polish::LogDebug(L"[Polish] Taskbar: panel cancelled");
+        return;
+    }
     if (g_tabSessionOpen) {
         // Escape during a tab session, including one still waiting on its
         // list -- EndTabSession clears g_tabCommitPending, so a result
@@ -2933,6 +2949,15 @@ std::vector<HWND> g_taskbarPanelWindows;
 //
 // g_taskbarPreviewRestore is the window that was in front when the
 // preview began -- nullptr when nothing is being previewed.
+// Which row the keyboard is on, as an index into g_taskbarPanelRows, or
+// -1 when the keyboard has not been used since the panel opened.
+//
+// Separate from the panel's own highlight, which follows the foreground
+// window: arrowing previews as it goes so the two usually agree, but the
+// keyboard must keep its place even on a row whose window declined to
+// come forward, rather than silently snapping back.
+int g_taskbarKeyIndex = -1;
+
 HWND g_taskbarPreviewRestore = nullptr;
 // The row waiting out the dwell, if any.
 HWND g_taskbarPreviewPending = nullptr;
@@ -3225,6 +3250,10 @@ void CloseTaskbarPanel() {
         return;
     }
     g_taskbarPanelButton = -1;
+    g_taskbarKeyIndex = -1;
+    if (g_altTabHook) {
+        g_altTabHook->SetExternalSessionActive(false);
+    }
     g_taskbarPanelRows.clear();
     g_taskbarPanelWindows.clear();
     if (g_taskbarPanel) {
@@ -3306,6 +3335,9 @@ void OpenTaskbarPanel(int index) {
     // No keyboard session is open here, so the Del/-/+ legend would
     // document keys that do nothing.
     g_taskbarPanel->SetFooterLegendEnabled(false);
+    // Above the list, because it is not one of the windows the list is
+    // about -- it is how you get another one.
+    g_taskbarPanel->SetCommandRow(L"New window", L'N');
     g_taskbarPanel->SetAnchorRect(button.rect);
     // The app's own window that is currently in front, if any, shows as
     // selected -- so the list says where you already are before it says
@@ -3322,11 +3354,65 @@ void OpenTaskbarPanel(int index) {
     }
     g_taskbarPanel->Show(rows, selected, MonitorFromRect(&button.rect, MONITOR_DEFAULTTONEAREST));
     g_taskbarPanelButton = index;
+    // From here the panel claims the navigation, row-action, Escape,
+    // Enter and N keys -- see AltTabHook::SetExternalSessionActive.
+    if (g_altTabHook) {
+        g_altTabHook->SetExternalSessionActive(true);
+    }
     g_taskbarPanelWindows = ordered;
     g_taskbarPanelRows.clear();
     for (const polish::AltTabListRow& row : rows) {
         g_taskbarPanelRows.push_back(row.hwnd);
     }
+}
+
+// Opens another window of the app a taskbar button stands for.
+//
+// Two routes, because neither covers both kinds of app. A packaged app
+// has a real AppUserModelID the shell can activate directly. A plain
+// Win32 app does not -- its "AUMID" is a shell-synthesized string that
+// ActivateApplication rejects -- so the only handle on it is the
+// executable behind one of its existing windows.
+//
+// Neither route guesses what "new window" means for a given app: both
+// ask the shell to start it again, which is what middle-clicking its
+// taskbar button does.
+bool LaunchNewWindowForButton(size_t buttonIndex) {
+    if (buttonIndex >= g_taskbarButtonWindows.size() || g_taskbarButtonWindows[buttonIndex].empty()) {
+        return false;
+    }
+    const HWND sample = g_taskbarButtonWindows[buttonIndex].front();
+
+    if (const std::optional<std::wstring> packaged = polish::GetPackagedAppAumid(sample)) {
+        IApplicationActivationManager* manager = nullptr;
+        HRESULT hr = CoCreateInstance(CLSID_ApplicationActivationManager, nullptr, CLSCTX_LOCAL_SERVER,
+                                      IID_PPV_ARGS(&manager));
+        if (SUCCEEDED(hr) && manager != nullptr) {
+            DWORD pid = 0;
+            hr = manager->ActivateApplication(packaged->c_str(), nullptr, AO_NONE, &pid);
+            manager->Release();
+            polish::LogDebug(std::format(L"[Polish] Taskbar: new window via AUMID \"{}\" hr=0x{:08x}", *packaged,
+                                         static_cast<uint32_t>(hr)));
+            if (SUCCEEDED(hr)) {
+                return true;
+            }
+        }
+        // Falls through to the executable rather than giving up: a
+        // packaged app still has one, and it may well start.
+    }
+
+    const std::optional<std::wstring> executable = polish::GetWindowProcessImagePath(sample);
+    if (!executable) {
+        polish::LogDebug(L"[Polish] Taskbar: new window failed -- no executable path for this app");
+        return false;
+    }
+    // ShellExecuteW's success threshold is the documented > 32, not zero.
+    const auto result = reinterpret_cast<INT_PTR>(
+        ShellExecuteW(nullptr, L"open", executable->c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+    const bool launched = result > 32;
+    polish::LogDebug(std::format(L"[Polish] Taskbar: new window via \"{}\" -> {}", *executable,
+                                 launched ? L"started" : L"failed"));
+    return launched;
 }
 
 // Brings a window to the front the way every taskbar gesture needs it
@@ -3423,6 +3509,10 @@ void ShowTaskbarPreview() {
     ActivateWindowFromTaskbar(target);
 }
 
+// Whether the click-to-cycle walk may land on this window. See the skip
+// loop in OnTaskbarCycleClick for why minimized ones are passed over.
+bool CanCycleTo(HWND hwnd) { return hwnd != nullptr && IsWindow(hwnd) && !IsIconic(hwnd); }
+
 // The next window after `from` in the panel's own display order that is
 // not minimized, wrapping, or nullptr if the app has none left.
 //
@@ -3516,6 +3606,83 @@ void OnTaskbarRowMaximizeToggle(HWND hwnd) {
     if (g_taskbarPanel) {
         g_taskbarPanel->RepaintRow(hwnd);
     }
+}
+
+bool TaskbarPanelOpen() { return g_taskbarPanelButton >= 0; }
+
+// Whether the shared keys belong to the taskbar panel right now.
+//
+// An Alt+Tab session wins when both are up, which is rarer than it
+// sounds but entirely reachable: the panel opens on hover, so resting
+// the pointer on a taskbar button and then pressing Alt+Tab leaves both
+// showing. Alt+Tab is the deliberate gesture of the two -- it took a
+// keystroke, while the panel only took the pointer coming to rest -- so
+// it keeps the arrows.
+bool TaskbarPanelOwnsKeys() { return TaskbarPanelOpen() && !g_altTabSessionOpen && !g_tabSessionOpen; }
+
+// Moves the keyboard selection and previews whatever it lands on.
+//
+// Previewing immediately rather than after a dwell, unlike the mouse: an
+// arrow key is a deliberate act, and there is no equivalent of sweeping
+// across rows on the way somewhere else.
+void MoveTaskbarKeySelection(int delta, bool toEnd) {
+    if (!g_taskbarPanel || g_taskbarPanelRows.empty()) {
+        return;
+    }
+    const int count = static_cast<int>(g_taskbarPanelRows.size());
+    if (toEnd) {
+        g_taskbarKeyIndex = delta < 0 ? 0 : count - 1;
+    } else if (g_taskbarKeyIndex < 0) {
+        // First arrow press: start from whatever is in front, so Down
+        // means "the one after this" rather than "the top of the list".
+        const auto current =
+            std::find(g_taskbarPanelRows.begin(), g_taskbarPanelRows.end(), GetForegroundWindow());
+        const int base = current == g_taskbarPanelRows.end()
+                             ? (delta < 0 ? 0 : -1)
+                             : static_cast<int>(current - g_taskbarPanelRows.begin());
+        g_taskbarKeyIndex = ((base + delta) % count + count) % count;
+    } else {
+        g_taskbarKeyIndex = ((g_taskbarKeyIndex + delta) % count + count) % count;
+    }
+
+    const HWND target = g_taskbarPanelRows[static_cast<size_t>(g_taskbarKeyIndex)];
+    g_taskbarPanel->SetHighlight(static_cast<size_t>(g_taskbarKeyIndex));
+    if (target != nullptr && IsWindow(target) && !IsIconic(target)) {
+        if (!g_taskbarPreviewing) {
+            g_taskbarPreviewRestore = GetForegroundWindow();
+            g_taskbarPreviewing = true;
+        }
+        ActivateWindowFromTaskbar(target);
+    }
+}
+
+// The row the keyboard is on, or the one in front when it has not been
+// used -- what Del/-/+ and Enter act on.
+HWND CurrentTaskbarKeyWindow() {
+    if (g_taskbarKeyIndex >= 0 && static_cast<size_t>(g_taskbarKeyIndex) < g_taskbarPanelRows.size()) {
+        return g_taskbarPanelRows[static_cast<size_t>(g_taskbarKeyIndex)];
+    }
+    const auto current = std::find(g_taskbarPanelRows.begin(), g_taskbarPanelRows.end(), GetForegroundWindow());
+    return current == g_taskbarPanelRows.end() ? nullptr : *current;
+}
+
+// Enter: keep what is selected and put the list away.
+void CommitTaskbarPanel() {
+    const HWND target = CurrentTaskbarKeyWindow();
+    CancelTaskbarPreview();
+    CloseTaskbarPanel();
+    ActivateWindowFromTaskbar(target);
+}
+
+// "N": another window of this app.
+void NewWindowFromTaskbarPanel() {
+    if (!TaskbarPanelOpen()) {
+        return;
+    }
+    const size_t button = static_cast<size_t>(g_taskbarPanelButton);
+    CancelTaskbarPreview();
+    CloseTaskbarPanel();
+    LaunchNewWindowForButton(button);
 }
 
 // The pointer moved onto a different app button, or off the strip
@@ -3643,19 +3810,44 @@ void OnTaskbarCycleClick(uint64_t generation, int index, polish::TaskbarHook::Cl
             current == windows.end()
                 ? 0
                 : polish::AdvanceHighlight(static_cast<size_t>(current - windows.begin()), windows.size(), backward);
+        // Index 0 is only right if it is somewhere the walk may land; the
+        // skip loop below fixes it up otherwise, in the same direction.
     }
 
-    // A window can close between the freeze and the click. Skipped in the
-    // same direction the walk is going, so a dead entry never bounces it
-    // back the way it came.
+    // Step over anything the walk should not land on, in the same
+    // direction it is going so a skipped entry never bounces it back the
+    // way it came. Two kinds get skipped:
+    //
+    //   - windows closed between the freeze and the click;
+    //   - minimized windows. Cycling is for moving between the windows
+    //     you have in front of you, and landing on a minimized one turns
+    //     a switch into an un-minimize the user did not ask for. They
+    //     stay reachable by clicking their row in the list, which is the
+    //     gesture that does say "this one".
     size_t attempts = 0;
-    while (attempts < g_taskbarCycleOrder.size() && !IsWindow(g_taskbarCycleOrder[g_taskbarCycleIndex])) {
+    while (attempts < g_taskbarCycleOrder.size() && !CanCycleTo(g_taskbarCycleOrder[g_taskbarCycleIndex])) {
         g_taskbarCycleIndex = polish::AdvanceHighlight(g_taskbarCycleIndex, g_taskbarCycleOrder.size(), backward);
         ++attempts;
     }
-    const HWND target = g_taskbarCycleOrder[g_taskbarCycleIndex];
-    if (!IsWindow(target)) {
+    HWND target = g_taskbarCycleOrder[g_taskbarCycleIndex];
+    if (!CanCycleTo(target)) {
+        // Every window of this app is minimized, so there is nothing to
+        // cycle between -- but the click still has to do something, and
+        // bringing back the most recent one is what the taskbar would
+        // have done with it.
+        target = nullptr;
+        for (HWND hwnd : g_taskbarCycleOrder) {
+            if (IsWindow(hwnd)) {
+                target = hwnd;
+                break;
+            }
+        }
         EndTaskbarCycleSession();
+        if (target != nullptr) {
+            ActivateWindowFromTaskbar(target);
+            polish::LogDebug(std::format(L"[Polish] Taskbar: cycle button {} -> all minimized, restoring hwnd={}",
+                                         index, reinterpret_cast<void*>(target)));
+        }
         return;
     }
 
@@ -4957,7 +5149,45 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         polish::LogDebug(std::format(L"[Polish] Alt+` is bound to VK_OEM_3, which types '{}' on the active keyboard layout",
                                       printed != 0 ? std::wstring(1, static_cast<wchar_t>(printed)) : std::wstring(L"?")));
     }
-    g_altTabHook->SetOnNavigate(OnAltTabNavigate);
+    g_altTabHook->SetOnNavigate([](polish::AltTabHook::NavigateStep step) {
+        if (TaskbarPanelOwnsKeys()) {
+            switch (step) {
+                case polish::AltTabHook::NavigateStep::Prev:
+                    MoveTaskbarKeySelection(-1, /*toEnd=*/false);
+                    break;
+                case polish::AltTabHook::NavigateStep::Next:
+                    MoveTaskbarKeySelection(1, /*toEnd=*/false);
+                    break;
+                case polish::AltTabHook::NavigateStep::First:
+                case polish::AltTabHook::NavigateStep::PageUp:
+                    MoveTaskbarKeySelection(-1, /*toEnd=*/true);
+                    break;
+                case polish::AltTabHook::NavigateStep::Last:
+                case polish::AltTabHook::NavigateStep::PageDown:
+                    MoveTaskbarKeySelection(1, /*toEnd=*/true);
+                    break;
+                case polish::AltTabHook::NavigateStep::PrevPanel:
+                case polish::AltTabHook::NavigateStep::NextPanel:
+                    // Left/Right move between monitors' panels in an
+                    // Alt+Tab session. One app's window list has no such
+                    // second panel to move to, so they do nothing here
+                    // rather than something arbitrary.
+                    break;
+            }
+            return;
+        }
+        OnAltTabNavigate(step);
+    });
+    g_altTabHook->SetOnCommitKey([] {
+        if (TaskbarPanelOwnsKeys()) {
+            CommitTaskbarPanel();
+        }
+    });
+    g_altTabHook->SetOnNewKey([] {
+        if (TaskbarPanelOwnsKeys()) {
+            NewWindowFromTaskbarPanel();
+        }
+    });
     g_altTabHook->SetOnPasteChord([] { PlayBullseye(polish::BullseyePhase::Paste); });
     // Del/-/+ act on whichever row Tab-cycling currently has highlighted
     // -- there's no keyboard equivalent of a mouse hover, so this is
@@ -4965,6 +5195,21 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // mouse-driven callbacks (SetOnRowClose etc.), which can also fire
     // for a merely-hovered, non-highlighted row.
     g_altTabHook->SetOnRowAction([](polish::AltTabHook::RowAction action) {
+        if (TaskbarPanelOwnsKeys()) {
+            const HWND target = CurrentTaskbarKeyWindow();
+            switch (action) {
+                case polish::AltTabHook::RowAction::Close:
+                    OnTaskbarRowClose(target);
+                    break;
+                case polish::AltTabHook::RowAction::MinimizeToggle:
+                    OnTaskbarRowMinimizeToggle(target);
+                    break;
+                case polish::AltTabHook::RowAction::MaximizeToggle:
+                    OnTaskbarRowMaximizeToggle(target);
+                    break;
+            }
+            return;
+        }
         const HWND hwnd = CurrentAltTabHighlightedWindow();
         switch (action) {
             case polish::AltTabHook::RowAction::Close:
@@ -5031,6 +5276,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         g_taskbarPanel->SetOnRowMinimizeToggle(OnTaskbarRowMinimizeToggle);
         g_taskbarPanel->SetOnRowMaximizeToggle(OnTaskbarRowMaximizeToggle);
         g_taskbarPanel->SetOnRowClose(OnTaskbarRowClose);
+        g_taskbarPanel->SetOnCommandRow(NewWindowFromTaskbarPanel);
         // Pointing at a row halos the real window where it actually sits,
         // which is the thing a thumbnail only approximates. One shared
         // halo is enough: exactly one row is hovered at a time.

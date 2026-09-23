@@ -169,6 +169,20 @@ public:
     // Takes effect on the next Show().
     void SetFooterLegendEnabled(bool enabled);
 
+    // A command row drawn above the window list, or empty for none.
+    //
+    // Not an AltTabListRow with a flag on it: a row stands for a window,
+    // and everything here that walks rows -- the highlight, the hover,
+    // the per-row buttons, the minimized partition -- would then have to
+    // special-case an entry with no HWND. Keeping it outside the row list
+    // means none of them need to know it exists.
+    //
+    // `mnemonic` is drawn after the text but never bound here: this
+    // window has no keyboard focus of its own (see the class comment), so
+    // the owner binds the key and this only advertises it.
+    void SetCommandRow(std::wstring text, wchar_t mnemonic);
+    void SetOnCommandRow(std::function<void()> callback) { onCommandRow_ = std::move(callback); }
+
     // Pins the panel just outside `anchor` (a screen rect in physical
     // pixels) instead of centering it on the monitor.
     //
@@ -246,6 +260,9 @@ private:
     // has no activeHeaderRect).
     struct RowLayout {
         std::vector<RECT> rowRects;
+        // The command row, when there is one -- above everything, and
+        // never part of rowRects (see SetCommandRow).
+        std::optional<RECT> commandRect;
         std::optional<RECT> activeHeaderRect;
         std::optional<RECT> minimizedHeaderRect;
         // Headers + rows only -- the keyboard-shortcut footer legend is
@@ -337,6 +354,10 @@ private:
     bool rowActionsEnabled_ = true;      // see SetRowActionsEnabled
     bool footerLegendEnabled_ = true;    // see SetFooterLegendEnabled
     std::optional<RECT> anchorRect_;     // see SetAnchorRect
+    std::wstring commandText_;           // see SetCommandRow; empty = none
+    wchar_t commandMnemonic_ = 0;
+    bool commandHovered_ = false;
+    std::function<void()> onCommandRow_;
     std::function<void(HWND)> onRowActivated_;
     std::function<void(HWND)> onRowMinimizeToggle_;
     std::function<void(HWND)> onRowMaximizeToggle_;

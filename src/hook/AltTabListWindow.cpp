@@ -335,6 +335,16 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             const UINT dpi = GetDpiForWindow(hwnd);
             const RowLayout layout = ComputeLayout(dpi);
 
+            if (layout.commandRect.has_value()) {
+                RECT commandRect = *layout.commandRect;
+                if (PtInRect(&commandRect, pt)) {
+                    if (onCommandRow_) {
+                        onCommandRow_();
+                    }
+                    return 0;
+                }
+            }
+
             // Action-button hit targets take priority over the row-body
             // hit-test below -- they only ever exist on the highlighted
             // row and/or the hovered row (see class comment), and
@@ -414,10 +424,25 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             // After SetHoveredIndex, which may itself have changed which
             // rows draw buttons at all.
             UpdateHoveredAction(pt, dpi, rowRects);
+
+            const std::optional<RECT> commandRect = ComputeLayout(dpi).commandRect;
+            const bool overCommand =
+                commandRect.has_value() && PtInRect(&commandRect.value(), pt) != FALSE;
+            if (overCommand != commandHovered_) {
+                commandHovered_ = overCommand;
+                RECT invalid = *commandRect;
+                invalid.top -= scrollOffset_;
+                invalid.bottom -= scrollOffset_;
+                InvalidateRect(window_, &invalid, FALSE);
+            }
             return 0;
         }
 
         case WM_MOUSELEAVE:
+            if (commandHovered_) {
+                commandHovered_ = false;
+                InvalidateRect(hwnd, nullptr, FALSE);
+            }
             SetHoveredIndex(std::nullopt);
             UpdateHoveredAction(POINT{-1, -1}, GetDpiForWindow(hwnd), {});
             return 0;
@@ -453,6 +478,10 @@ AltTabListWindow::RowLayout AltTabListWindow::ComputeLayout(UINT dpi) const {
     const bool hasActiveRow = std::any_of(rows_.begin(), rows_.end(), [](const AltTabListRow& r) { return !r.minimized; });
 
     int top = paddingY;
+    if (!commandText_.empty()) {
+        layout.commandRect = RECT{paddingX, top, paddingX + width, top + rowHeight};
+        top += rowHeight + sectionGap;
+    }
     if (hasActiveRow) {
         layout.activeHeaderRect = RECT{paddingX, top, paddingX + width, top + headerHeight};
         top += headerHeight;
@@ -543,6 +572,28 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     const int rowCornerRadius = Scale(kRowCornerRadius, dpi);
     const int sectionGap = Scale(kSectionGapHeight, dpi);
     const COLORREF accentColor = GetAccentColor();
+
+    if (layout.commandRect.has_value()) {
+        RECT commandRect = *layout.commandRect;
+        if (commandHovered_) {
+            HBRUSH fill = CreateSolidBrush(kHoverBackgroundColor);
+            FillRect(hdc, &commandRect, fill);
+            DeleteObject(fill);
+        }
+        RECT textRect = commandRect;
+        textRect.left += rowPaddingX;
+        textRect.right -= rowPaddingX;
+        SetTextColor(hdc, kTextColor);
+        DrawTextW(hdc, commandText_.c_str(), -1, &textRect,
+                  DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+        if (commandMnemonic_ != 0) {
+            // Right-aligned and muted, like the section headings: this is
+            // a hint about which key does it, not part of the label.
+            const std::wstring key(1, commandMnemonic_);
+            SetTextColor(hdc, kHeaderTextColor);
+            DrawTextW(hdc, key.c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_RIGHT | DT_NOPREFIX);
+        }
+    }
 
     SelectObject(hdc, headerFont);
     SetTextColor(hdc, kHeaderTextColor);
@@ -1145,6 +1196,12 @@ void AltTabListWindow::SetRowActionsEnabled(bool enabled) {
     // wants them apart says so afterwards, which is exactly what the
     // taskbar hover panel does.
     footerLegendEnabled_ = enabled;
+}
+
+void AltTabListWindow::SetCommandRow(std::wstring text, wchar_t mnemonic) {
+    commandText_ = std::move(text);
+    commandMnemonic_ = mnemonic;
+    commandHovered_ = false;
 }
 
 void AltTabListWindow::SetFooterLegendEnabled(bool enabled) {

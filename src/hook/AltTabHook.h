@@ -200,6 +200,30 @@ public:
     enum class RowAction { Close, MinimizeToggle, MaximizeToggle };
     void SetOnRowAction(std::function<void(RowAction action)> onRowAction) { onRowAction_ = std::move(onRowAction); }
 
+    // Lends the navigation, row-action, Escape, Enter and "N" keys to a
+    // panel that has no Alt-hold behind it and no keyboard focus of its
+    // own -- the taskbar hover list, which is opened by the mouse.
+    //
+    // Without this there is no way for such a panel to be driven from the
+    // keyboard at all: it is WS_EX_NOACTIVATE, so it never receives a
+    // keystroke, and the keys have to be taken globally or not at all.
+    // They are taken on exactly the same terms an Alt+Tab session takes
+    // them -- swallowed while the panel is up, inert the rest of the
+    // time -- and the window in which that happens is narrow, because the
+    // panel only exists while the pointer is resting on the taskbar or on
+    // the panel itself.
+    //
+    // Deliberately a second flag rather than setting sessionActive_: that
+    // one is owned by the Alt-hold state machine, and an outsider writing
+    // it would make Alt-up commit a session that never started.
+    void SetExternalSessionActive(bool active) { externalSessionActive_ = active; }
+
+    // Enter, and "N", while a session of either kind is active. Enter
+    // means "this one, keep it"; the caller decides what N stands for
+    // (the taskbar panel opens a new window of the app).
+    void SetOnCommitKey(std::function<void()> onCommitKey) { onCommitKey_ = std::move(onCommitKey); }
+    void SetOnNewKey(std::function<void()> onNewKey) { onNewKey_ = std::move(onNewKey); }
+
     // Ctrl+V or Shift+Insert (Alt not held) was pressed. A fresh press only
     // -- OS key-repeat while held is debounced like Tab's. The keystroke is
     // never swallowed, and the callback is posted rather than run inside
@@ -258,6 +282,8 @@ private:
     std::function<void(NavigateStep step)> onNavigate_;
     std::function<void(RowAction action)> onRowAction_;
     std::function<void()> onPasteChord_;
+    std::function<void()> onCommitKey_;
+    std::function<void()> onNewKey_;
     HHOOK hook_ = nullptr;
     HHOOK mouseHook_ = nullptr;
 
@@ -265,6 +291,11 @@ private:
     // matching Alt-up is swallowed (via commit or, if Escape cancelled
     // first, whenever Alt is eventually released) -- see class comment.
     bool sessionActive_ = false;
+    // See SetExternalSessionActive. Read alongside sessionActive_
+    // everywhere the navigation/row-action/Escape keys are gated.
+    bool externalSessionActive_ = false;
+    bool enterPhysicallyDown_ = false;
+    bool newKeyPhysicallyDown_ = false;
     // Meaningful only while sessionActive_. Reset by EndSession().
     SessionKind sessionKind_ = SessionKind::Windows;
     bool shiftHeld_ = false;

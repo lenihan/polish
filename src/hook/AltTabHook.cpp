@@ -20,7 +20,20 @@ AltTabHook* g_instance = nullptr;
 // same way RowKeyAction carries its RowAction -- one action rather than
 // one per direction, now that there are eight of them.
 // PasteChord is unrelated to Alt+Tab sessions -- see SetOnPasteChord.
-enum class HookAction : WPARAM { CycleForward, CycleBackward, Commit, Cancel, Navigate, RowKeyAction, PasteChord };
+// CommitKey and NewKey are the two an external, focus-less panel adds on
+// top of what an Alt+Tab session needs -- it has no Alt to release, so
+// "keep this one" needs a key of its own.
+enum class HookAction : WPARAM {
+    CycleForward,
+    CycleBackward,
+    Commit,
+    Cancel,
+    Navigate,
+    RowKeyAction,
+    PasteChord,
+    CommitKey,
+    NewKey
+};
 
 // The navigation key -> step mapping, and the definition of which keys
 // count as navigation keys at all (anything this returns nullopt for is
@@ -336,11 +349,36 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         }
     }
 
-    if (sessionActive_) {
-        // Strictly gated on sessionActive_ already being true -- unlike
+    // Either kind of session claims the keys below. See
+    // SetExternalSessionActive for what the second one is.
+    const bool anySession = sessionActive_ || externalSessionActive_;
+
+    if (anySession && (data.vkCode == VK_RETURN || data.vkCode == 'N')) {
+        // Only meaningful to a panel with no Alt to release -- but gated
+        // on a session either way, so neither key does anything when no
+        // panel is up.
+        const bool isEnter = data.vkCode == VK_RETURN;
+        bool& physicallyDown = isEnter ? enterPhysicallyDown_ : newKeyPhysicallyDown_;
+        if (IsDown(wParam)) {
+            if (physicallyDown) {
+                return true;  // OS key-repeat, not a fresh press
+            }
+            physicallyDown = true;
+            PostMessageW(messageWindow_, kHookMessage,
+                         static_cast<WPARAM>(isEnter ? HookAction::CommitKey : HookAction::NewKey), 0);
+            return true;
+        }
+        if (IsUp(wParam)) {
+            physicallyDown = false;
+            return true;
+        }
+    }
+
+    if (anySession) {
+        // Strictly gated on a session already being active -- unlike
         // Tab, these keys are used constantly system-wide and must never
         // be able to start a session on their own, nor have any effect
-        // when Alt+Tab isn't active. See class comment.
+        // when no panel is up. See class comment.
         if (const std::optional<AltTabHook::NavigateStep> step = NavigateStepForKey(data.vkCode)) {
             bool& physicallyDown = navigateKeysDown_[static_cast<size_t>(*step)];
             if (IsDown(wParam)) {
@@ -362,7 +400,7 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         }
     }
 
-    if (sessionActive_ && (data.vkCode == VK_DELETE || data.vkCode == VK_OEM_MINUS || data.vkCode == VK_OEM_PLUS)) {
+    if (anySession && (data.vkCode == VK_DELETE || data.vkCode == VK_OEM_MINUS || data.vkCode == VK_OEM_PLUS)) {
         // Same "must already be in a session, never able to start one"
         // gating and per-key debounce shape as the arrow-key block above.
         bool& physicallyDown = (data.vkCode == VK_DELETE)       ? deletePhysicallyDown_
@@ -386,12 +424,15 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         }
     }
 
-    if (data.vkCode == VK_ESCAPE && IsDown(wParam) && sessionActive_) {
+    if (data.vkCode == VK_ESCAPE && IsDown(wParam) && anySession) {
         // Ends the session outright (unlike Alt-up above, Escape is safe
         // to swallow -- it's not a modifier, so it carries none of the
         // stuck-state risk). If Alt is still physically held afterward
         // and the user presses Tab again, that correctly starts a fresh
         // session rather than silently doing nothing.
+        // EndSession only unwinds the Alt-hold machinery; an external
+        // panel is told to close by the Cancel below and clears its own
+        // flag then.
         EndSession();
         PostMessageW(messageWindow_, kHookMessage, static_cast<WPARAM>(HookAction::Cancel), 0);
         return true;
@@ -425,6 +466,16 @@ void AltTabHook::HandleHookMessage(WPARAM wParam, LPARAM lParam) {
         case HookAction::Navigate:
             if (onNavigate_) {
                 onNavigate_(static_cast<NavigateStep>(lParam));
+            }
+            break;
+        case HookAction::CommitKey:
+            if (onCommitKey_) {
+                onCommitKey_();
+            }
+            break;
+        case HookAction::NewKey:
+            if (onNewKey_) {
+                onNewKey_();
             }
             break;
         case HookAction::RowKeyAction:

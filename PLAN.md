@@ -102,6 +102,25 @@ current todo list.
   where rows are deliberately allowed to move under the pointer -- the
   reshuffle is what the gesture asked for, unlike the MRU reordering the
   panel goes out of its way to suppress.
+- Taskbar: the hover panel is keyboard-drivable with the same keys as
+  Alt+Tab -- Up/Down and Home/End/PageUp/PageDown move the selection
+  (previewing as they go), Del/-/+ act on the selected row, Escape puts
+  the previewed window back and closes. Enter and N are additions: the
+  panel has no Alt to release, so "keep this one" needs a key, and N
+  opens another window of the app. It borrows those keys from
+  AltTabHook's existing keyboard hook rather than installing a second
+  one (`SetExternalSessionActive`); an Alt+Tab session wins if both are
+  somehow showing, since it is the more deliberate gesture.
+- Taskbar: the panel's first entry is a "New window" command row. Packaged
+  apps are started through their real AppUserModelID; everything else
+  through the executable behind one of its existing windows, because a
+  plain Win32 app's AUMID is shell-synthesized and ActivateApplication
+  rejects it.
+- Taskbar: click-to-cycle skips minimized windows -- cycling is for moving
+  between the windows in front of you, and landing on a minimized one
+  turns a switch into an un-minimize nobody asked for. They stay
+  reachable by clicking their row, which is the gesture that says "this
+  one". An app whose windows are all minimized restores the most recent.
 - Taskbar: an open hover panel is a live view -- opening or closing a
   window of the app whose list is on screen adds or removes a row,
   rather than leaving a header that disagrees with its own rows. Its row
