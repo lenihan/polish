@@ -83,7 +83,16 @@ current todo list.
   belongs to another app.
 - Taskbar: an open hover panel is a live view -- opening or closing a
   window of the app whose list is on screen adds or removes a row,
-  rather than leaving a header that disagrees with its own rows.
+  rather than leaving a header that disagrees with its own rows. Its row
+  *order* is held still while it is open, though: the underlying list is
+  MRU and activating a window reorders it, so refreshing from it made the
+  row you just clicked jump to the top and the list re-sort under the
+  pointer. A fresh open takes MRU order; a refresh keeps what is on
+  screen and appends anything new at the end.
+- Taskbar: with the panel open, a click walks *that* list rather than a
+  separately frozen one -- "the next window" means the next row down,
+  which is the only thing a click on a visible list can honestly mean.
+  The frozen-order session still backs clicks made with no panel open.
 - Window filters: `IsCandidateWindowShape` accepts `WS_CAPTION` *or*
   `WS_THICKFRAME`, not `WS_CAPTION` alone. Requiring a caption silently
   excluded real windows from everything Polish does -- found via a

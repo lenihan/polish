@@ -2868,9 +2868,12 @@ int g_taskbarPanelButton = -1;
 // end. Kept so a click can highlight the row it just activated without
 // rebuilding (and re-sorting, and visibly reshuffling) the list.
 std::vector<HWND> g_taskbarPanelRows;
-// The button's window list exactly as the open panel was built from it,
-// before that partitioning. Compared against a fresh read to notice that
-// the app gained or lost a window while its list was on screen.
+// Which windows the open panel was built from. Compared as a *set*
+// against a fresh read, to notice the app gaining or losing a window
+// while its list is on screen -- and deliberately not as a sequence,
+// because the fresh read is in MRU order and activating a window
+// reorders it. Treating that reordering as a change is what used to make
+// the list re-sort itself under the pointer on every click.
 std::vector<HWND> g_taskbarPanelWindows;
 // The button the dwell timer is counting down for.
 int g_taskbarDwellButton = -1;
@@ -2988,6 +2991,17 @@ std::vector<HWND> TaskbarWindowsInMruOrder() {
 
 void OpenTaskbarPanel(int index);
 
+// Whether two window lists hold the same windows, in any order. Taken by
+// value because it sorts them; the lists are a handful of entries.
+bool SameWindowSet(std::vector<HWND> a, std::vector<HWND> b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    std::sort(a.begin(), a.end());
+    std::sort(b.begin(), b.end());
+    return a == b;
+}
+
 // Re-resolves which windows each button stands for and hands the result
 // to the shield and the hook. Called whenever a taskbar read completes.
 void RebuildTaskbarTargets() {
@@ -3036,7 +3050,7 @@ void RebuildTaskbarTargets() {
     // for that button really changed, because Show() re-lays the panel
     // out and rows must not reshuffle under the pointer for nothing.
     if (g_taskbarPanelButton >= 0 && static_cast<size_t>(g_taskbarPanelButton) < g_taskbarButtonWindows.size() &&
-        g_taskbarButtonWindows[static_cast<size_t>(g_taskbarPanelButton)] != g_taskbarPanelWindows) {
+        !SameWindowSet(g_taskbarButtonWindows[static_cast<size_t>(g_taskbarPanelButton)], g_taskbarPanelWindows)) {
         OpenTaskbarPanel(g_taskbarPanelButton);
     }
     polish::LogDebug(std::format(L"[Polish] Taskbar: {} button(s) mapped against {} window(s) in {}ms (generation {})",
@@ -3139,9 +3153,37 @@ void OpenTaskbarPanel(int index) {
         return;
     }
 
+    // The order to draw in. A fresh open takes the MRU order, which is
+    // the useful one to arrive at: most recent first. A refresh of a
+    // panel already on screen keeps the order it is already showing.
+    //
+    // That distinction is the whole point. The underlying list is rebuilt
+    // in MRU order, and activating a window moves it to the front of MRU
+    // -- so refreshing from it would re-sort the list on every click and
+    // the row you just activated would jump to the top. What the user
+    // sees has to hold still while they are clicking through it; a list
+    // that reorders itself under the pointer cannot be walked.
+    std::vector<HWND> ordered;
+    if (g_taskbarPanelButton == index && !g_taskbarPanelRows.empty()) {
+        for (HWND hwnd : g_taskbarPanelRows) {
+            if (std::find(windows.begin(), windows.end(), hwnd) != windows.end()) {
+                ordered.push_back(hwnd);
+            }
+        }
+        // Anything that has appeared since goes on the end, where it does
+        // not displace a row the user may be aiming at.
+        for (HWND hwnd : windows) {
+            if (std::find(ordered.begin(), ordered.end(), hwnd) == ordered.end()) {
+                ordered.push_back(hwnd);
+            }
+        }
+    } else {
+        ordered = windows;
+    }
+
     std::vector<polish::AltTabListRow> rows;
-    rows.reserve(windows.size());
-    for (HWND hwnd : windows) {
+    rows.reserve(ordered.size());
+    for (HWND hwnd : ordered) {
         polish::AltTabListRow row;
         row.hwnd = hwnd;
         wchar_t title[256] = L"";
@@ -3185,7 +3227,7 @@ void OpenTaskbarPanel(int index) {
     }
     g_taskbarPanel->Show(rows, selected, MonitorFromRect(&button.rect, MONITOR_DEFAULTTONEAREST));
     g_taskbarPanelButton = index;
-    g_taskbarPanelWindows = windows;
+    g_taskbarPanelWindows = ordered;
     g_taskbarPanelRows.clear();
     for (const polish::AltTabListRow& row : rows) {
         g_taskbarPanelRows.push_back(row.hwnd);
@@ -3246,11 +3288,29 @@ void OnTaskbarCycleClick(uint64_t generation, int index, bool backward) {
         return;
     }
 
+    // With the list on screen, that list is what the click walks. No
+    // frozen session is needed for it and none is consulted: the panel's
+    // own order is already held still (see OpenTaskbarPanel), so "the
+    // next window" means the next row down, which is the only thing a
+    // click on a visible list can honestly mean.
+    const bool usingPanelOrder =
+        g_taskbarPanel && g_taskbarPanelButton == index && g_taskbarPanelRows.size() >= 2;
+
     // Resume the frozen walk only if this is the same app and nothing has
     // stolen the foreground since -- see g_taskbarCycleActivated.
-    const bool resuming = appId == g_taskbarCycleAppId && !g_taskbarCycleOrder.empty() &&
+    const bool resuming = !usingPanelOrder && appId == g_taskbarCycleAppId && !g_taskbarCycleOrder.empty() &&
                           g_taskbarCycleActivated != nullptr && GetForegroundWindow() == g_taskbarCycleActivated;
-    if (resuming) {
+    if (usingPanelOrder) {
+        g_taskbarCycleAppId = appId;
+        g_taskbarCycleOrder = g_taskbarPanelRows;
+        const auto current =
+            std::find(g_taskbarCycleOrder.begin(), g_taskbarCycleOrder.end(), GetForegroundWindow());
+        g_taskbarCycleIndex = current == g_taskbarCycleOrder.end()
+                                  ? 0
+                                  : polish::AdvanceHighlight(
+                                        static_cast<size_t>(current - g_taskbarCycleOrder.begin()),
+                                        g_taskbarCycleOrder.size(), backward);
+    } else if (resuming) {
         g_taskbarCycleIndex = polish::AdvanceHighlight(g_taskbarCycleIndex, g_taskbarCycleOrder.size(), backward);
     } else {
         g_taskbarCycleAppId = appId;
