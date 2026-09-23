@@ -95,6 +95,13 @@ current todo list.
   wired to the Alt+Tab panel's handlers at first, every one of which opens
   `if (!g_altTabSessionOpen) return;` -- so all three silently did nothing,
   the click being dropped on the handler's first line.
+- Taskbar: minimizing a window from the hover panel moves its row down
+  into the Minimized section straight away, and if it was the window in
+  front, focus moves to that app's next non-minimized window rather than
+  dropping to whatever happened to be behind it. This is the one case
+  where rows are deliberately allowed to move under the pointer -- the
+  reshuffle is what the gesture asked for, unlike the MRU reordering the
+  panel goes out of its way to suppress.
 - Taskbar: an open hover panel is a live view -- opening or closing a
   window of the app whose list is on screen adds or removes a row,
   rather than leaving a header that disagrees with its own rows. Its row

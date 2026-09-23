@@ -3286,6 +3286,45 @@ void OpenTaskbarPanel(int index) {
     }
 }
 
+// Brings a window to the front the way every taskbar gesture needs it
+// brought: restored first if minimized, then the foreground unlock, then
+// the activation. Gathered into one place because five callers now want
+// exactly this and had begun to drift apart.
+bool ActivateWindowFromTaskbar(HWND hwnd) {
+    if (hwnd == nullptr || !IsWindow(hwnd)) {
+        return false;
+    }
+    if (IsIconic(hwnd)) {
+        // A minimized window needs an explicit restore before
+        // SetForegroundWindow reliably brings it to front -- the same
+        // finding Alt+Tab's commit path relies on.
+        ShowWindow(hwnd, SW_RESTORE);
+    }
+    InjectForegroundUnlockKeystroke();
+    return SetForegroundWindow(hwnd) != FALSE;
+}
+
+// The next window after `from` in the panel's own display order that is
+// not minimized, wrapping, or nullptr if the app has none left.
+//
+// Display order rather than MRU: this answers "which row does the
+// selection move to", and the rows are what the user is looking at.
+HWND NextNonMinimizedPanelWindow(HWND from) {
+    const size_t count = g_taskbarPanelRows.size();
+    if (count == 0) {
+        return nullptr;
+    }
+    const auto at = std::find(g_taskbarPanelRows.begin(), g_taskbarPanelRows.end(), from);
+    const size_t start = at == g_taskbarPanelRows.end() ? 0 : static_cast<size_t>(at - g_taskbarPanelRows.begin());
+    for (size_t step = 1; step <= count; ++step) {
+        HWND candidate = g_taskbarPanelRows[(start + step) % count];
+        if (candidate != from && IsWindow(candidate) && !IsIconic(candidate)) {
+            return candidate;
+        }
+    }
+    return nullptr;
+}
+
 // The hover panel's per-row buttons.
 //
 // Its own, rather than the Alt+Tab panel's OnAltTabRow* handlers, which
@@ -3314,21 +3353,36 @@ void OnTaskbarRowMinimizeToggle(HWND hwnd) {
         return;
     }
     const bool minimizing = !IsIconic(hwnd);
+    const bool wasInFront = GetForegroundWindow() == hwnd;
     polish::LogDebug(std::format(L"[Polish] Taskbar: row {} -> hwnd={}", minimizing ? L"minimize" : L"restore",
                                  reinterpret_cast<void*>(hwnd)));
     if (minimizing) {
         ShowWindow(hwnd, SW_MINIMIZE);
+        // Minimizing the window you were looking at should leave you in
+        // the same app, not drop you on whatever happens to be behind it.
+        // Only when it *was* in front: minimizing a background window
+        // from the list is a tidying-up gesture and should not steal
+        // focus to somewhere new.
+        if (wasInFront) {
+            HWND next = NextNonMinimizedPanelWindow(hwnd);
+            if (next != nullptr) {
+                ActivateWindowFromTaskbar(next);
+                polish::LogDebug(std::format(L"[Polish] Taskbar: row minimize moved on to hwnd={}",
+                                             reinterpret_cast<void*>(next)));
+            }
+        }
     } else {
-        ShowWindow(hwnd, SW_RESTORE);
-        InjectForegroundUnlockKeystroke();
-        SetForegroundWindow(hwnd);
+        ActivateWindowFromTaskbar(hwnd);
     }
-    // The row's own glyphs read live state at paint time, so a repaint is
-    // all they need. Deliberately not a full rebuild: that would re-sort
-    // the row into (or out of) the minimized section and move it under
-    // the pointer that just clicked it.
-    if (g_taskbarPanel) {
-        g_taskbarPanel->RepaintRow(hwnd);
+    // A full rebuild, not RepaintRow. Minimizing changes which *section*
+    // the row belongs to, and the panel draws minimized rows muted below
+    // a divider -- repainting in place would leave a minimized window
+    // sitting in the active section, saying the opposite of what just
+    // happened. The row moving under the pointer is the point of the
+    // gesture here, unlike the MRU reordering OpenTaskbarPanel goes out
+    // of its way to suppress.
+    if (g_taskbarPanel && g_taskbarPanelButton >= 0) {
+        OpenTaskbarPanel(g_taskbarPanelButton);
     }
 }
 
@@ -3393,9 +3447,8 @@ void OnTaskbarCycleClick(uint64_t generation, int index, polish::TaskbarHook::Cl
         // message. The click is already eaten and cannot be given back --
         // activating the app's one remaining window is the closest thing
         // to what the user asked for.
-        if (windows.size() == 1 && IsWindow(windows.front())) {
-            InjectForegroundUnlockKeystroke();
-            SetForegroundWindow(windows.front());
+        if (windows.size() == 1) {
+            ActivateWindowFromTaskbar(windows.front());
         }
         return;
     }
@@ -3411,11 +3464,7 @@ void OnTaskbarCycleClick(uint64_t generation, int index, polish::TaskbarHook::Cl
         if (target == nullptr) {
             return;
         }
-        if (IsIconic(target)) {
-            ShowWindow(target, SW_RESTORE);
-        }
-        InjectForegroundUnlockKeystroke();
-        const BOOL toggled = SetForegroundWindow(target);
+        const bool toggled = ActivateWindowFromTaskbar(target);
         if (g_taskbarPanel && g_taskbarPanelButton == index) {
             const auto row = std::find(g_taskbarPanelRows.begin(), g_taskbarPanelRows.end(), target);
             if (row != g_taskbarPanelRows.end()) {
@@ -3423,7 +3472,7 @@ void OnTaskbarCycleClick(uint64_t generation, int index, polish::TaskbarHook::Cl
             }
         }
         polish::LogDebug(std::format(L"[Polish] Taskbar: toggle button {} -> hwnd={} SetForegroundWindow result={}",
-                                     index, reinterpret_cast<void*>(target), toggled != FALSE));
+                                     index, reinterpret_cast<void*>(target), toggled));
         return;
     }
 
@@ -3487,14 +3536,7 @@ void OnTaskbarCycleClick(uint64_t generation, int index, polish::TaskbarHook::Cl
         return;
     }
 
-    if (IsIconic(target)) {
-        // Same finding Alt+Tab's commit relies on: a minimized window
-        // needs an explicit restore before SetForegroundWindow reliably
-        // brings it to front.
-        ShowWindow(target, SW_RESTORE);
-    }
-    InjectForegroundUnlockKeystroke();
-    const BOOL result = SetForegroundWindow(target);
+    const bool result = ActivateWindowFromTaskbar(target);
     g_taskbarCycleActivated = target;
 
     // The panel stays up. Clicking is how you walk the list, so closing it
@@ -3514,7 +3556,7 @@ void OnTaskbarCycleClick(uint64_t generation, int index, polish::TaskbarHook::Cl
     polish::LogDebug(std::format(
         L"[Polish] Taskbar: cycle{} button {} -> {} of {} hwnd={} SetForegroundWindow result={}",
         backward ? L" back" : L"", index, g_taskbarCycleIndex + 1, g_taskbarCycleOrder.size(),
-        reinterpret_cast<void*>(target), result != FALSE));
+        reinterpret_cast<void*>(target), result));
 }
 
 // Brings the whole feature up or down -- the tray toggle, and startup.
@@ -4855,14 +4897,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         g_taskbarPanel = std::make_unique<polish::AltTabListWindow>(instance);
         g_taskbarPanel->SetOnRowActivated([](HWND hwnd) {
             CloseTaskbarPanel();
-            if (!IsWindow(hwnd)) {
-                return;
-            }
-            if (IsIconic(hwnd)) {
-                ShowWindow(hwnd, SW_RESTORE);
-            }
-            InjectForegroundUnlockKeystroke();
-            SetForegroundWindow(hwnd);
+            ActivateWindowFromTaskbar(hwnd);
         });
         g_taskbarPanel->SetOnRowMinimizeToggle(OnTaskbarRowMinimizeToggle);
         g_taskbarPanel->SetOnRowMaximizeToggle(OnTaskbarRowMaximizeToggle);
