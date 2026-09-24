@@ -1702,6 +1702,56 @@ struct MonitorRowsResult {
 // over g_altTabMinimized) -- see g_altTabSelectionInMinimized. Centralizing
 // this one lookup is what lets BuildAltTabListRowsForMonitor mark the
 // right row highlighted regardless of which section it's actually in.
+// Which input last chose a row, so a row-action shortcut can act on
+// whichever the user actually meant.
+//
+// Pointing at a row should win, so that a window can be closed or
+// resized without first clicking it and making it current -- but not
+// unconditionally. The pointer is almost always resting on *something*
+// while either panel is up, so "hover wins if the mouse is over a row"
+// would quietly hijack the arrow keys: arrow down three rows, press
+// minimize, and the window under the motionless pointer would be the one
+// that minimized. Comparing when each last happened keeps both working,
+// and matches what someone doing either would expect.
+ULONGLONG g_rowChoiceHoverTick = 0;
+ULONGLONG g_rowChoiceKeyTick = 0;
+// Where the pointer was when hover last counted as a choice. See below.
+POINT g_rowChoiceLastCursor{};
+
+void NoteRowChosenByHover() {
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    if (cursor.x == g_rowChoiceLastCursor.x && cursor.y == g_rowChoiceLastCursor.y) {
+        // The pointer has not moved: the row beneath it changed because
+        // the *list* did, not because the user pointed somewhere new.
+        //
+        // This is not a rare case. Arrowing through the list previews each
+        // row by activating its window, which can relayout the panel, and
+        // moving a window under a stationary pointer makes Windows deliver
+        // a WM_MOUSEMOVE -- indistinguishable here from a real one. Taking
+        // it at face value let the keyboard hand priority back to the
+        // mouse by accident, so which input won depended on whether the
+        // panel happened to relayout. Measured: two runs of the same test
+        // disagreed for exactly that reason.
+        return;
+    }
+    g_rowChoiceLastCursor = cursor;
+    g_rowChoiceHoverTick = GetTickCount64();
+}
+void NoteRowChosenByKeyboard() { g_rowChoiceKeyTick = GetTickCount64(); }
+bool RowHoverIsMoreRecent() { return g_rowChoiceHoverTick > g_rowChoiceKeyTick; }
+
+// The row an Alt+Tab row-action shortcut should act on: whatever the
+// mouse is over if that is the more recent choice, otherwise the
+// Tab-highlighted row. Its own function rather than a branch at the call
+// site because "highlighted" and "acted on" are no longer the same thing,
+// and the difference is easy to lose track of.
+//
+// Any panel may hold the hovered row -- there is one per monitor and the
+// pointer is over exactly one of them -- so the first that reports a row
+// is the answer.
+HWND CurrentAltTabActionWindow();
+
 HWND CurrentAltTabHighlightedWindow() {
     if (g_altTabSelectionInMinimized) {
         return (g_altTabMinimizedHighlightIndex < g_altTabMinimized.size())
@@ -2195,6 +2245,7 @@ void OnTabCycle(bool backward) {
 // kind arrives first tears the other down -- that is also what makes the
 // hook's mid-hold switching work, since it simply posts the other kind.
 void OnAltTabCycle(bool backward, polish::AltTabHook::SessionKind kind) {
+    NoteRowChosenByKeyboard();
     if (kind == polish::AltTabHook::SessionKind::Tabs) {
         if (g_altTabSessionOpen) {
             EndAltTabSession();
@@ -2527,6 +2578,7 @@ void MoveAltTabHighlightToAdjacentPanel(bool forward) {
 }
 
 void OnAltTabNavigate(polish::AltTabHook::NavigateStep step) {
+    NoteRowChosenByKeyboard();
     if (!g_altTabSessionOpen) {
         return;
     }
@@ -2897,6 +2949,17 @@ void OnAltTabRowClose(HWND hwnd) {
 // topology changes are rare and never happen mid-Alt+Tab-session in
 // practice (ends any open session first regardless, to be safe if one
 // somehow is).
+HWND CurrentAltTabActionWindow() {
+    if (RowHoverIsMoreRecent()) {
+        for (const AltTabMonitorPanel& panel : g_altTabPanels) {
+            if (HWND hovered = panel.window->HoveredRowWindow()) {
+                return hovered;
+            }
+        }
+    }
+    return CurrentAltTabHighlightedWindow();
+}
+
 void RefreshAltTabPanels() {
     if (g_altTabSessionOpen) {
         EndAltTabSession();
@@ -2908,6 +2971,13 @@ void RefreshAltTabPanels() {
         panel.window->SetOnRowMinimizeToggle(OnAltTabRowMinimizeToggle);
         panel.window->SetOnRowMaximizeToggle(OnAltTabRowMaximizeToggle);
         panel.window->SetOnRowClose(OnAltTabRowClose);
+        // Only to record that the mouse chose a row; the highlight itself
+        // stays where Tab put it (see RowHoverIsMoreRecent).
+        panel.window->SetOnRowHovered([](HWND hwnd) {
+            if (hwnd != nullptr) {
+                NoteRowChosenByHover();
+            }
+        });
         g_altTabPanels.push_back(std::move(panel));
     }
     polish::LogDebug(std::format(L"[Polish] AltTab: panels rebuilt for {} monitor(s)", g_altTabPanels.size()));
@@ -2985,6 +3055,7 @@ std::vector<HWND> g_taskbarPanelWindows;
 // keyboard must keep its place even on a row whose window declined to
 // come forward, rather than silently snapping back.
 int g_taskbarKeyIndex = -1;
+
 
 HWND g_taskbarPreviewRestore = nullptr;
 // The row waiting out the dwell, if any.
@@ -3645,7 +3716,20 @@ void OnTaskbarRowMaximizeToggle(HWND hwnd) {
         // focus would leave it behind whatever is in front.
         InjectForegroundUnlockKeystroke();
         SetForegroundWindow(hwnd);
+        // And it has left the Minimized section, so the panel has to be
+        // rebuilt rather than repainted -- a repaint redraws the row
+        // where it is, leaving a window that is now maximized still
+        // sitting under the "Minimized" heading until the panel is closed
+        // and opened again. Same reasoning as the minimize toggle's and
+        // OnTaskbarRowNormal's; this was the one path that kept the
+        // cheap repaint when it could not.
+        if (g_taskbarPanel && g_taskbarPanelButton >= 0) {
+            OpenTaskbarPanel(g_taskbarPanelButton);
+        }
+        return;
     }
+    // Still in the same section -- only the glyph changes, and it reads
+    // live state at paint time.
     if (g_taskbarPanel) {
         g_taskbarPanel->RepaintRow(hwnd);
     }
@@ -3721,6 +3805,7 @@ void MoveTaskbarKeySelection(int delta, bool toEnd) {
     if (!g_taskbarPanel || g_taskbarPanelRows.empty()) {
         return;
     }
+    NoteRowChosenByKeyboard();
     const int count = static_cast<int>(g_taskbarPanelRows.size());
     if (toEnd) {
         g_taskbarKeyIndex = delta < 0 ? 0 : count - 1;
@@ -3751,6 +3836,11 @@ void MoveTaskbarKeySelection(int delta, bool toEnd) {
 // The row the keyboard is on, or the one in front when it has not been
 // used -- what Del/-/+ and Enter act on.
 HWND CurrentTaskbarKeyWindow() {
+    if (g_taskbarPanel && RowHoverIsMoreRecent()) {
+        if (HWND hovered = g_taskbarPanel->HoveredRowWindow()) {
+            return hovered;
+        }
+    }
     if (g_taskbarKeyIndex >= 0 && static_cast<size_t>(g_taskbarKeyIndex) < g_taskbarPanelRows.size()) {
         return g_taskbarPanelRows[static_cast<size_t>(g_taskbarKeyIndex)];
     }
@@ -5335,7 +5425,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
             return;
         }
-        const HWND hwnd = CurrentAltTabHighlightedWindow();
+        const HWND hwnd = CurrentAltTabActionWindow();
         switch (action) {
             case polish::AltTabHook::RowAction::Close:
                 OnAltTabRowClose(hwnd);
@@ -5409,6 +5499,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         // which is the thing a thumbnail only approximates. One shared
         // halo is enough: exactly one row is hovered at a time.
         g_taskbarPanel->SetOnRowHovered([](HWND hwnd) {
+            if (hwnd != nullptr) {
+                NoteRowChosenByHover();
+            }
             OnTaskbarRowHovered(hwnd);
             if (hwnd != nullptr && IsWindow(hwnd) && !IsIconic(hwnd)) {
                 if (g_activeWindowHalo) {

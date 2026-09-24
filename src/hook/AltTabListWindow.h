@@ -233,6 +233,16 @@ public:
     // whose HWND is null (an Alt+` tab row).
     void SetOnRowHovered(std::function<void(HWND)> callback) { onRowHovered_ = std::move(callback); }
 
+    // The window whose row the mouse is currently over, or nullptr.
+    //
+    // Exposed so the row-action shortcuts can act on what the user is
+    // pointing at rather than on whatever is selected -- the point of
+    // having them is to manage a window without first having to click it
+    // and make it current. Already nullptr while the panel is hidden:
+    // Hide() forgets the hovered row precisely so a stale one cannot
+    // outlive the panel it belonged to.
+    HWND HoveredRowWindow() const;
+
     // Which of a row's three action buttons the pointer is over, if any.
     // Tracked so the button under the cursor can light up and name itself
     // the way a real title-bar button does -- without it, three unlabeled

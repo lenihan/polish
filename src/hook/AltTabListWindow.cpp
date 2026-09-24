@@ -1175,6 +1175,13 @@ void AltTabListWindow::RepaintRow(HWND hwnd) {
 
 void AltTabListWindow::SetRowActionsEnabled(bool enabled) { rowActionsEnabled_ = enabled; }
 
+HWND AltTabListWindow::HoveredRowWindow() const {
+    if (!hoveredIndex_.has_value() || *hoveredIndex_ >= rows_.size()) {
+        return nullptr;
+    }
+    return rows_[*hoveredIndex_].hwnd;
+}
+
 void AltTabListWindow::SetCommandRow(std::wstring text, wchar_t mnemonic) {
     commandText_ = std::move(text);
     commandMnemonic_ = mnemonic;

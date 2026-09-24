@@ -95,6 +95,13 @@ current todo list.
   wired to the Alt+Tab panel's handlers at first, every one of which opens
   `if (!g_altTabSessionOpen) return;` -- so all three silently did nothing,
   the click being dropped on the handler's first line.
+- Taskbar: any row action that changes whether a window is minimized
+  rebuilds the panel rather than repainting the row -- minimize, Normal,
+  and maximize alike. A repaint redraws the row where it already is, so a
+  window that had just been maximized out of the Minimized section stayed
+  sitting under that heading until the panel was closed and reopened.
+  Maximize was the last path still taking the cheap repaint when it could
+  not.
 - Taskbar: minimizing a window from the hover panel moves its row down
   into the Minimized section straight away, and if it was the window in
   front, focus moves to that app's next non-minimized window rather than
@@ -133,6 +140,19 @@ current todo list.
   maximize, `0` normal, each named in its button's own tooltip. Normal
   uses SW_SHOWNORMAL, not SW_RESTORE: restoring a window minimized *from*
   maximized brings it back maximized, which is the other button's job.
+- Row shortcuts (taskbar and Alt+Tab alike) act on the row under the
+  pointer when that is the more recent choice, so a window can be closed
+  or resized without first clicking it and making it current. Not
+  unconditionally, though: the pointer is almost always resting on some
+  row while either panel is up, so "hover always wins" would hijack the
+  arrow keys. Whichever input last chose a row wins.
+- Row shortcuts: a hover notification only counts as a choice when the
+  cursor has actually moved. Arrowing through the list previews each row
+  by activating its window, which can relayout the panel, and moving a
+  window under a stationary pointer makes Windows deliver a WM_MOUSEMOVE
+  indistinguishable from a real one -- so the keyboard was handing
+  priority back to the mouse by accident, and which input won depended on
+  whether a relayout happened to occur.
 - Taskbar: an open hover panel is a live view -- opening or closing a
   window of the app whose list is on screen adds or removes a row,
   rather than leaving a header that disagrees with its own rows. Its row
@@ -287,7 +307,9 @@ current todo list.
   look before this moves out of "needs verifying".
 
 ## Left to do
-
+- Remove Groups: Too hacky. Does not support UWP.
+- Taskbar: click on empty taskbar opens alttab. Click again to go to next. Shift+click to go backward
+- Taskbar: right click on empty taskbar opents `tab. Right click again to go to next. Shift+Right Click to go backward
 - Halo: When an active app closes, it's halo stays
 - Taskbar: the taskbar's own hover highlight is gone, since the shield
   owns the pointer over the strip and the taskbar never sees it. Polish
