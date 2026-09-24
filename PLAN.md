@@ -153,6 +153,27 @@ current todo list.
   indistinguishable from a real one -- so the keyboard was handing
   priority back to the mouse by accident, and which input won depended on
   whether a relayout happened to occur.
+- Row buttons: a minimized row draws maximize / normal / close, not
+  maximize / minimize / close. The middle button used to keep the native
+  minimize mark in both states on the reasoning that it stays "the
+  minimize control" -- but on a minimized row it no longer minimizes, so
+  the mark described an action the button does not perform. It now draws
+  the two-overlapping-squares normal glyph there, which is what its
+  tooltip has said since Normal got a name of its own.
+- Taskbar: an open panel also rebuilds when a row's *minimized state*
+  changes, not only when the window set does. Minimizing changes no
+  window's existence, so a membership comparison alone cannot see it, and
+  a window minimized from its own title bar stayed listed as running in a
+  panel that was already on screen.
+- Taskbar: the maximize and Normal buttons bring their window to the
+  front and leave the panel's selection on it. Resizing a window you
+  cannot see is not much use, and the selected row means "the window in
+  front", so leaving the selection elsewhere had the panel contradict
+  what had just happened. They also cancel any preview in progress --
+  clicking a button is a choice, and ending the preview instead would put
+  the previously-front window back when the pointer left, undoing it.
+  The minimize button deliberately does the opposite and moves focus off
+  the window, to the app's next one.
 - Taskbar: an open hover panel is a live view -- opening or closing a
   window of the app whose list is on screen adds or removes a row,
   rather than leaving a header that disagrees with its own rows. Its row

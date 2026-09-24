@@ -3035,6 +3035,13 @@ std::vector<HWND> g_taskbarPanelRows;
 // reorders it. Treating that reordering as a change is what used to make
 // the list re-sort itself under the pointer on every click.
 std::vector<HWND> g_taskbarPanelWindows;
+// Whether each of g_taskbarPanelRows was minimized when the panel was
+// built. Compared against live state so a window minimized by any other
+// means -- its own title bar, a keyboard shortcut, another app -- moves
+// into the Minimized section of a panel that is already on screen.
+// Membership alone does not catch it: minimizing changes no window's
+// existence, so SameWindowSet says nothing has changed.
+std::vector<bool> g_taskbarPanelMinimized;
 
 // Hovering a row brings that window to the front to look at, and moving
 // away puts things back as they were.
@@ -3267,9 +3274,22 @@ void RebuildTaskbarTargets() {
     // exactly that) has to add a row. Rebuilt only when the window list
     // for that button really changed, because Show() re-lays the panel
     // out and rows must not reshuffle under the pointer for nothing.
-    if (g_taskbarPanelButton >= 0 && static_cast<size_t>(g_taskbarPanelButton) < g_taskbarButtonWindows.size() &&
-        !SameWindowSet(g_taskbarButtonWindows[static_cast<size_t>(g_taskbarPanelButton)], g_taskbarPanelWindows)) {
-        OpenTaskbarPanel(g_taskbarPanelButton);
+    if (g_taskbarPanelButton >= 0 && static_cast<size_t>(g_taskbarPanelButton) < g_taskbarButtonWindows.size()) {
+        const bool membershipChanged =
+            !SameWindowSet(g_taskbarButtonWindows[static_cast<size_t>(g_taskbarPanelButton)], g_taskbarPanelWindows);
+        // A window minimized or restored behind the panel's back changes
+        // which section its row belongs to, and the buttons that row
+        // offers, without changing membership at all.
+        bool minimizedChanged = false;
+        for (size_t i = 0; i < g_taskbarPanelRows.size() && i < g_taskbarPanelMinimized.size(); ++i) {
+            if ((IsIconic(g_taskbarPanelRows[i]) != FALSE) != g_taskbarPanelMinimized[i]) {
+                minimizedChanged = true;
+                break;
+            }
+        }
+        if (membershipChanged || minimizedChanged) {
+            OpenTaskbarPanel(g_taskbarPanelButton);
+        }
     }
     polish::LogDebug(std::format(L"[Polish] Taskbar: {} button(s) mapped against {} window(s) in {}ms (generation {})",
                                  g_taskbarButtons.size(), resolved.size(), GetTickCount64() - startTick,
@@ -3354,6 +3374,7 @@ void CloseTaskbarPanel() {
         g_altTabHook->SetExternalSessionActive(false);
     }
     g_taskbarPanelRows.clear();
+    g_taskbarPanelMinimized.clear();
     g_taskbarPanelWindows.clear();
     if (g_taskbarPanel) {
         g_taskbarPanel->Hide();
@@ -3457,8 +3478,10 @@ void OpenTaskbarPanel(int index) {
     }
     g_taskbarPanelWindows = ordered;
     g_taskbarPanelRows.clear();
+    g_taskbarPanelMinimized.clear();
     for (const polish::AltTabListRow& row : rows) {
         g_taskbarPanelRows.push_back(row.hwnd);
+        g_taskbarPanelMinimized.push_back(row.minimized);
     }
 }
 
@@ -3630,6 +3653,29 @@ HWND NextNonMinimizedPanelWindow(HWND from) {
     return nullptr;
 }
 
+// What the maximize and normal buttons do once they have resized the
+// window: bring it forward and leave the panel pointing at it.
+//
+// Resizing a window you cannot see is not much use -- and the selected
+// row means "the window in front", so leaving the selection elsewhere
+// would have the panel contradict what just happened. The preview is
+// cancelled rather than ended: clicking a button is a choice, and ending
+// the preview would put the previously-front window back, undoing the
+// very thing that was just asked for.
+//
+// Not shared with the minimize button, which deliberately does the
+// opposite -- it moves focus *off* the window, to the app's next one.
+void FinishTaskbarRowResize(HWND hwnd) {
+    CancelTaskbarPreview();
+    ActivateWindowFromTaskbar(hwnd);
+    if (g_taskbarPanel) {
+        const auto row = std::find(g_taskbarPanelRows.begin(), g_taskbarPanelRows.end(), hwnd);
+        if (row != g_taskbarPanelRows.end()) {
+            g_taskbarPanel->SetHighlight(static_cast<size_t>(row - g_taskbarPanelRows.begin()));
+        }
+    }
+}
+
 // The hover panel's per-row buttons.
 //
 // Its own, rather than the Alt+Tab panel's OnAltTabRow* handlers, which
@@ -3712,27 +3758,20 @@ void OnTaskbarRowMaximizeToggle(HWND hwnd) {
                                  reinterpret_cast<void*>(hwnd)));
     ShowWindow(hwnd, toNormal ? SW_SHOWNORMAL : SW_MAXIMIZE);
     if (wasMinimized) {
-        // It was not on screen a moment ago; bringing it back without
-        // focus would leave it behind whatever is in front.
-        InjectForegroundUnlockKeystroke();
-        SetForegroundWindow(hwnd);
-        // And it has left the Minimized section, so the panel has to be
+        // It has left the Minimized section, so the panel has to be
         // rebuilt rather than repainted -- a repaint redraws the row
         // where it is, leaving a window that is now maximized still
-        // sitting under the "Minimized" heading until the panel is closed
-        // and opened again. Same reasoning as the minimize toggle's and
-        // OnTaskbarRowNormal's; this was the one path that kept the
-        // cheap repaint when it could not.
+        // sitting under the "Minimized" heading. Same reasoning as the
+        // minimize toggle's and OnTaskbarRowNormal's.
         if (g_taskbarPanel && g_taskbarPanelButton >= 0) {
             OpenTaskbarPanel(g_taskbarPanelButton);
         }
-        return;
-    }
-    // Still in the same section -- only the glyph changes, and it reads
-    // live state at paint time.
-    if (g_taskbarPanel) {
+    } else if (g_taskbarPanel) {
+        // Still in the same section -- only the glyph changes, and it
+        // reads live state at paint time.
         g_taskbarPanel->RepaintRow(hwnd);
     }
+    FinishTaskbarRowResize(hwnd);
 }
 
 bool TaskbarPanelOpen() { return g_taskbarPanelButton >= 0; }
@@ -3876,19 +3915,17 @@ void OnTaskbarRowNormal(HWND hwnd) {
     polish::LogDebug(std::format(L"[Polish] Taskbar: row normal -> hwnd={}", reinterpret_cast<void*>(hwnd)));
     ShowWindow(hwnd, SW_SHOWNORMAL);
     if (wasMinimized) {
-        InjectForegroundUnlockKeystroke();
-        SetForegroundWindow(hwnd);
         // It has left the minimized section, so the panel has to be
         // rebuilt rather than repainted -- the same reasoning as the
-        // minimize toggle's.
+        // minimize toggle's. Rebuilt first, so the selection set below
+        // lands on rows that exist.
         if (g_taskbarPanel && g_taskbarPanelButton >= 0) {
             OpenTaskbarPanel(g_taskbarPanelButton);
         }
-        return;
-    }
-    if (g_taskbarPanel) {
+    } else if (g_taskbarPanel) {
         g_taskbarPanel->RepaintRow(hwnd);
     }
+    FinishTaskbarRowResize(hwnd);
 }
 
 // The pointer moved onto a different app button, or off the strip

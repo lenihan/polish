@@ -680,59 +680,69 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
             }
 
             const int margin = Scale(kActionButtonGlyphMargin, dpi);
-            // Minimize/restore-toggle glyph: always the same single
-            // horizontal line near the bottom of the box (the native
-            // title-bar minimize glyph), on an active row and a minimized
-            // one alike -- rather than a second, unfamiliar glyph for
-            // "restore from minimized", the button just keeps reading as
-            // "the minimize control" in both of its states.
-            {
+
+            // Whether the pointer is on this particular button, which the
+            // normal glyph needs: it occludes part of itself with a solid
+            // fill, and that fill has to match whatever is actually
+            // behind it.
+            const auto onButton = [&](ActionButton which) {
+                return actionsOnThisRow && hoveredAction_.has_value() && *hoveredAction_ == which;
+            };
+
+            // A single square outline: "make this fill the screen".
+            const auto drawMaximizeGlyph = [&](const RECT& box) {
+                Rectangle(hdc, box.left + margin, box.top + margin, box.right - margin, box.bottom - margin);
+            };
+
+            // Two overlapping offset squares: "put this back to normal
+            // size". The native restore glyph's back square is only ever
+            // partly visible -- its bottom-left portion sits behind the
+            // front one -- so the front square is filled before being
+            // outlined, erasing whatever of the back square would
+            // otherwise show through. Plain outlines would just show both
+            // squares' lines crossing through each other.
+            const auto drawNormalGlyph = [&](const RECT& box, ActionButton which) {
+                const int offset = Scale(3, dpi);
+                Rectangle(hdc, box.left + margin + offset, box.top + margin, box.right - margin,
+                          box.bottom - margin - offset);
+                HBRUSH occludeBrush = CreateSolidBrush(onButton(which) ? kActionHoverColor : rowFillColor);
+                SelectObject(hdc, occludeBrush);
+                Rectangle(hdc, box.left + margin, box.top + margin + offset, box.right - margin - offset,
+                          box.bottom - margin);
+                SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                DeleteObject(occludeBrush);
+            };
+
+            // The middle button. On an ordinary row it minimizes, and
+            // draws the native title-bar minimize mark. On a minimized
+            // row it means "come back at normal size", and draws the
+            // normal glyph -- not the minimize mark it used to keep in
+            // both states. A minimized window has nothing to minimize,
+            // so a minimize mark there described an action the button no
+            // longer performs, and left the row offering what looked like
+            // minimize/maximize/close instead of normal/maximize/close.
+            if (row.minimized) {
+                drawNormalGlyph(toggle, ActionButton::MinimizeToggle);
+            } else {
                 const int y = toggle.bottom - margin;
                 drawGlyphLine(toggle.left + margin, y, toggle.right - margin, y);
             }
 
             {
-                // Maximize/normal-toggle. Native Windows glyph shapes: a
-                // single square outline to maximize, two overlapping
-                // offset squares to return to normal.
+                // The right-hand button: maximize, or back to normal when
+                // the window already fills the screen.
                 //
                 // Drawn on minimized rows as well. It used to be active
                 // rows only, on the reasoning that a minimized window has
                 // no maximized state to toggle -- but that confused "what
                 // state is it in" with "where can it go". A minimized
-                // window is coming back one way or the other, and this is
-                // how you say which size, so it always offers Maximize
-                // there rather than reflecting a state it is not in.
+                // window is coming back one way or the other, and the two
+                // buttons are how you say at which size.
                 const RECT maximizeToggle = ComputeMaximizeToggleButtonRect(rowRect, dpi);
                 if (!row.minimized && IsZoomed(row.hwnd)) {
-                    // The native restore glyph's back square is only ever
-                    // partly visible -- its bottom-left portion sits
-                    // behind the front square. Filling the front square
-                    // with the row's own background color before
-                    // outlining it erases whatever of the back square's
-                    // outline would otherwise show through underneath,
-                    // the same opaque-front-face look the native glyph
-                    // has (plain NULL_BRUSH outlines would just show both
-                    // squares' lines crossing through each other instead).
-                    const int offset = Scale(3, dpi);
-                    Rectangle(hdc, maximizeToggle.left + margin + offset, maximizeToggle.top + margin,
-                              maximizeToggle.right - margin, maximizeToggle.bottom - margin - offset);
-                    // Matches whatever is actually behind the glyph --
-                    // the row's own fill normally, but the button's hover
-                    // fill when the pointer is on this very button, or
-                    // the occluding square would paint a patch of row
-                    // color over it.
-                    const bool onThisButton = actionsOnThisRow && hoveredAction_.has_value() &&
-                                              *hoveredAction_ == ActionButton::MaximizeToggle;
-                    HBRUSH occludeBrush = CreateSolidBrush(onThisButton ? kActionHoverColor : rowFillColor);
-                    SelectObject(hdc, occludeBrush);
-                    Rectangle(hdc, maximizeToggle.left + margin, maximizeToggle.top + margin + offset,
-                              maximizeToggle.right - margin - offset, maximizeToggle.bottom - margin);
-                    SelectObject(hdc, GetStockObject(NULL_BRUSH));
-                    DeleteObject(occludeBrush);
+                    drawNormalGlyph(maximizeToggle, ActionButton::MaximizeToggle);
                 } else {
-                    Rectangle(hdc, maximizeToggle.left + margin, maximizeToggle.top + margin,
-                              maximizeToggle.right - margin, maximizeToggle.bottom - margin);
+                    drawMaximizeGlyph(maximizeToggle);
                 }
             }
 
