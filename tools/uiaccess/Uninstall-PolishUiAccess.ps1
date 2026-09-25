@@ -9,6 +9,8 @@ if (-not ((whoami /groups) -match 'S-1-16-(12288|16384)')) {
     exit $p.ExitCode
 }
 Get-Process polish_uia -ErrorAction Ignore | Stop-Process -Force
+$run = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+if ((Get-ItemProperty $run -Name Polish -ErrorAction Ignore).Polish -like '*\Polish\polish_uia.exe*') { Remove-ItemProperty $run -Name Polish }
 Remove-Item (Join-Path $env:ProgramFiles 'Polish') -Recurse -Force -ErrorAction Ignore
 foreach ($store in 'Cert:\LocalMachine\Root', 'Cert:\CurrentUser\My') {
     Get-ChildItem $store | Where-Object { $_.Subject -eq $Subject } | Remove-Item -Force

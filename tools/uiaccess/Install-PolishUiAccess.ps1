@@ -7,16 +7,18 @@
 #   3. Copies polish_uia.exe to %ProgramFiles%\Polish (a secure location is
 #      also required) and signs it.
 #
-# It does not touch start-at-login; launch the installed exe yourself.
+# Start-at-login is left alone unless you pass -StartAtLogin, which points
+# the existing HKCU Run value "Polish" at the installed exe.
 # Undo with Uninstall-PolishUiAccess.ps1. See docs/UIACCESS.md.
-param([string]$Exe = (Join-Path $PSScriptRoot '..\..\build\Release\polish_uia.exe'), [switch]$Elevated)
+param([string]$Exe = (Join-Path $PSScriptRoot '..\..\build\Release\polish_uia.exe'), [switch]$StartAtLogin, [switch]$Elevated)
 $ErrorActionPreference = 'Stop'
 $Subject = 'CN=Polish UIAccess (dev, safe to delete)'
 $Dir = Join-Path $env:ProgramFiles 'Polish'
 
 if (-not ((whoami /groups) -match 'S-1-16-(12288|16384)')) {
     if ($Elevated) { throw 'Relaunched elevated but still not Administrator; aborting instead of relaunching again.' }
-    $p = Start-Process pwsh -Verb RunAs -Wait -PassThru -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Exe', (Resolve-Path $Exe).Path, '-Elevated'
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath, '-Exe', (Resolve-Path $Exe).Path, '-Elevated') + $(if ($StartAtLogin) { '-StartAtLogin' })
+    $p = Start-Process pwsh -Verb RunAs -Wait -PassThru -ArgumentList $argList
     exit $p.ExitCode
 }
 
@@ -37,4 +39,8 @@ $target = Join-Path $Dir 'polish_uia.exe'
 Copy-Item $Exe $target -Force
 $sig = Set-AuthenticodeSignature -FilePath $target -Certificate $cert -HashAlgorithm SHA256
 if ($sig.Status -ne 'Valid') { throw "signing failed: $($sig.Status) $($sig.StatusMessage)" }
+if ($StartAtLogin) {
+    Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name Polish -Value "`"$target`""
+    Write-Host 'start-at-login now launches the UIAccess build'
+}
 Write-Host "Installed and signed: $target (thumbprint $($cert.Thumbprint))"

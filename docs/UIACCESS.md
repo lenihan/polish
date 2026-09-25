@@ -24,7 +24,8 @@ The startup log says which mode is active ("UIAccess token: yes/no").
 
 Install creates a dedicated certificate (non-exportable key, CurrentUser\My),
 trusts only its public half in LocalMachine\Root, and signs the copy in
-Program Files. It does not change start-at-login. Rebuilding requires
+Program Files. Start-at-login is unchanged unless you pass `-StartAtLogin`,
+which points the existing Run value at the installed exe. Rebuilding requires
 re-running Install to re-sign.
 
 ## What trusting the certificate means
