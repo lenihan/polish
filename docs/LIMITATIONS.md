@@ -359,3 +359,60 @@ gets a full pass in Phase 3; today it records what's already known.
     button one continuous gesture. The exception is a click faster than a
     message-loop turn, where the release is swallowed too and the replay
     carries it.
+
+24. **The shield can be bypassed by the shell, and nothing a normal process
+    does reliably wins it back -- so it is a fallback, not the mechanism.**
+    Two separate causes were found; both end in the native flyout appearing
+    over Polish's own list, where it cannot be covered again (#22).
+
+    **A. The taskbar raised above the shield.** With the Start menu open,
+    `WindowFromPoint` over an app button returns `Shell_TrayWnd` instead of
+    `PolishTaskbarShield`, while the shield itself looks healthy: right
+    rect, `WS_EX_TOPMOST`, not click-through, visible, same z-depth. The
+    taskbar stops appearing in the top-level z-order chain at all, which is
+    what a window in a higher band looks like from outside. Re-asserting
+    `HWND_TOPMOST` does not win it back, recreating the shield does not, and
+    `SetParent` into `Shell_TrayWnd` is refused with error 87. This is the
+    same wall #22 records for `SetWindowBand` (shell UI at band 16, every
+    band 1-18 refused, UIAccess reaching only band 2).
+
+    Whether and when it clears is **not** something to lean on. It was seen
+    clearing the instant Start closed (twice, at half-second resolution) and
+    it was seen persisting with Start closed and across a Polish restart;
+    a user reported the flyout still covering Polish's list after restarting
+    explorer itself. An earlier version of this entry claimed the promotion
+    was permanent; a later one claimed it recovered immediately. Both were
+    over-generalised from a handful of samples, and at least the first was
+    measured with Start still open (the probe's Escape went to whatever had
+    focus). Treat the behaviour as unpredictable.
+
+    **B. Uncovering the strip on a failed read.** Polish re-reads the taskbar
+    through UI Automation, and used to hide the shield and clear every target
+    on any unusable or empty read, retrying only on the 3 second timer. That
+    is about ten flyout dwells (250-450 ms) of exposure, and explorer
+    restarting is exactly when reads fail. `TaskbarCreated` also uncovered
+    the strip, and a refresh requested while one was in flight was dropped.
+    Now a bad read keeps the last-known-good shield and retries in 250 ms,
+    only degrading after three in a row (`TaskbarReadPolicy.h`), the
+    `TaskbarCreated` handler leaves the shield in place, a request that
+    arrives mid-read is remembered rather than dropped, and a secondary
+    taskbar's shield is only hidden after it has been absent for three
+    updates. A stale shield over a taskbar that has gone is harmless; an
+    absent one over a taskbar that has come back is the bug.
+
+    **What does work reliably is what other tools do: act inside
+    explorer.exe.** Windhawk's "Disable Taskbar Thumbnails" mod hooks
+    `HoverFlyoutController::ShowTaskListButtonHoverFlyout` (with
+    `HoverFlyoutModel::TransitionToFlyoutVisibleStickyState` and
+    `FlyoutFrame::CanFitAndUpdateScaleFactor`) in `Taskbar.View.dll` /
+    `ExplorerExtensions.dll`, resolving symbols from PDBs and selecting by
+    explorer's file version; ExplorerPatcher and StartAllBack patch the
+    taskbar in-process as well. Nothing out-of-process was found that does.
+    The trade-off is fragility across Windows updates -- the upstream mod's
+    own "not working anymore" report on build 26200.8313 is exactly that --
+    which is why the shield stays as the fallback. See PLAN.md.
+
+    Polish detects the bypass by hit-test (`TaskbarShield::CoversPoint`;
+    nothing about the shield's own state reveals it) and stands its own
+    window list down while it holds, so the user does not see two stacked
+    lists. That does not stop the native flyout appearing.

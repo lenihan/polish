@@ -41,6 +41,7 @@
 #include "windowtracking/GroupManager.h"
 #include "windowtracking/RectUtils.h"
 #include "windowtracking/TaskbarButtons.h"
+#include "windowtracking/TaskbarReadPolicy.h"
 #include "windowtracking/WindowFilters.h"
 #include "windowtracking/WindowZOrder.h"
 
@@ -3095,6 +3096,25 @@ uint64_t g_taskbarGeneration = 0;
 // Whether a read is already queued, so a burst of refresh triggers
 // (explorer restarting mid-display-change, say) costs one enumeration.
 bool g_taskbarRefreshInFlight = false;
+// A refresh was asked for while one was in flight -- see
+// RequestTaskbarRefresh.
+bool g_taskbarRefreshPending = false;
+// How many reads in a row have come back unusable or empty, which is what
+// decides when the shield is finally allowed to give up its last-known-good
+// position. See TaskbarReadPolicy.h.
+polish::ReadPolicyState g_taskbarReadPolicy;
+
+// True once the shield has been found to be bypassed -- the taskbar
+// raised above it, so the pointer reaches the real taskbar and the native
+// flyout comes back however well the shield is positioned. Opening the
+// Start menu does this permanently; see docs/LIMITATIONS.md #24.
+//
+// While it holds, Polish stops showing its own window list. Not because
+// the list stops working -- it would still open and its rows would still
+// act -- but because it would appear *underneath* the native flyout,
+// leaving two lists of the same windows stacked on each other. One list
+// that is not the one asked for beats two.
+bool g_taskbarShieldBypassed = false;
 
 // A click-to-cycle session: the app's window list frozen at the first
 // click, plus how far through it the user has clicked.
@@ -3300,16 +3320,26 @@ void RebuildTaskbarTargets() {
 // comes back identical is dropped by TaskbarButtonsEqual, and a request
 // made while one is already queued is skipped outright.
 void RequestTaskbarRefresh() {
-    if (!g_settings.taskbarEnabled || g_uiaWorker == nullptr || g_taskbarRefreshInFlight) {
+    if (!g_settings.taskbarEnabled || g_uiaWorker == nullptr) {
+        return;
+    }
+    if (g_taskbarRefreshInFlight) {
+        // Remembered rather than dropped. A request that arrives while a
+        // read is already out used to vanish, on the reasoning that the
+        // read in flight would cover it -- but that read may have been
+        // *started* before whatever prompted this one. Most importantly
+        // TaskbarCreated: a read begun just before explorer restarted
+        // describes the old taskbar, and dropping the request meant the
+        // first look at the new one waited for the slow timer.
+        g_taskbarRefreshPending = true;
         return;
     }
     g_taskbarRefreshInFlight = true;
     g_uiaWorker->RequestTaskbarButtons();
 }
 
-// A taskbar read has come back (kTaskbarButtonsReadyMessage).
-void OnTaskbarButtonsReady(uint64_t generation) {
-    g_taskbarRefreshInFlight = false;
+// Applies one finished read to the shield and the hook.
+void ApplyTaskbarRead(uint64_t generation) {
     if (!g_settings.taskbarEnabled || g_uiaWorker == nullptr || g_taskbarShield == nullptr ||
         g_taskbarHook == nullptr) {
         return;
@@ -3318,16 +3348,41 @@ void OnTaskbarButtonsReady(uint64_t generation) {
     if (snapshot.generation != generation || !snapshot.resolved) {
         return;
     }
+
+    // A single bad read must never uncover the strip. It used to: a failed
+    // read hid the shield and cleared every target, and the next attempt
+    // was the 3 second safety-net timer -- about ten times the native
+    // flyout's dwell, and once the flyout is up nothing Polish can do
+    // covers it again (docs/LIMITATIONS.md #22). Explorer restarting is
+    // exactly when reads fail, and exactly when someone testing a change
+    // is most likely to be hovering the taskbar. See TaskbarReadPolicy.h.
+    const bool haveLastGood = !g_taskbarButtons.empty();
+    switch (polish::DecideOnRead(g_taskbarReadPolicy, snapshot.taskbarUsable, snapshot.buttons.size(),
+                                 haveLastGood)) {
+        case polish::ReadDecision::KeepLastGood:
+            polish::LogDebug(std::format(L"[Polish] Taskbar: bad read ({} of {} tolerated) -- keeping the shield "
+                                         L"where it is and retrying in {}ms",
+                                         g_taskbarReadPolicy.consecutiveBadReads, polish::kBadReadsBeforeDegrade,
+                                         polish::kBadReadRetryMs));
+            SetTimer(g_messageWindow, kTaskbarDirtyTimerId, polish::kBadReadRetryMs, nullptr);
+            return;
+        case polish::ReadDecision::Degrade:
+            polish::LogDebug(L"[Polish] Taskbar: WARNING the taskbar could not be read for several attempts in a "
+                             L"row -- uncovering the strip and standing down until it can be");
+            g_taskbarButtons.clear();
+            g_taskbarButtonWindows.clear();
+            g_taskbarShield->Hide();
+            g_taskbarHook->SetTargets(generation, {});
+            SetTimer(g_messageWindow, kTaskbarDirtyTimerId, polish::kBadReadRetryMs, nullptr);
+            return;
+        case polish::ReadDecision::Apply:
+            break;
+    }
     if (!snapshot.taskbarUsable) {
-        // The taskbar could not be read at all -- an OS build that
-        // reshaped the tree, or explorer mid-restart. Uncover it and
-        // leave the shell completely alone rather than shield a strip
-        // whose position is a guess. The safety-net timer keeps asking,
-        // so a restarting explorer recovers on its own.
-        g_taskbarButtons.clear();
-        g_taskbarButtonWindows.clear();
-        g_taskbarShield->Hide();
-        g_taskbarHook->SetTargets(generation, {});
+        // Nothing was being shielded and nothing could be read: nothing to
+        // apply. Keep trying at the quick cadence rather than the slow one,
+        // so the first good read after a restart lands promptly.
+        SetTimer(g_messageWindow, kTaskbarDirtyTimerId, polish::kBadReadRetryMs, nullptr);
         return;
     }
     const bool unchanged = polish::TaskbarButtonsEqual(snapshot.buttons, g_taskbarButtons);
@@ -3342,6 +3397,18 @@ void OnTaskbarButtonsReady(uint64_t generation) {
     // Rebuilt either way: the windows behind an unchanged set of buttons
     // still move, open and close, and that changes which buttons cycle.
     RebuildTaskbarTargets();
+}
+
+// A taskbar read has come back (kTaskbarButtonsReadyMessage).
+void OnTaskbarButtonsReady(uint64_t generation) {
+    g_taskbarRefreshInFlight = false;
+    ApplyTaskbarRead(generation);
+    if (g_taskbarRefreshPending) {
+        // Whatever asked while that read was out gets its own read now,
+        // rather than being answered by one that predates it.
+        g_taskbarRefreshPending = false;
+        RequestTaskbarRefresh();
+    }
 }
 
 // Drops everything the taskbar feature remembers about one window, on
@@ -3387,6 +3454,11 @@ void CloseTaskbarPanel() {
 // Opens (or re-points) the window list for one app button.
 void OpenTaskbarPanel(int index) {
     if (!g_taskbarPanel || index < 0 || static_cast<size_t>(index) >= g_taskbarButtonWindows.size()) {
+        return;
+    }
+    if (g_taskbarShieldBypassed) {
+        // The native flyout is going to appear over the top of anything
+        // shown here -- see g_taskbarShieldBypassed.
         return;
     }
     const std::vector<HWND>& windows = g_taskbarButtonWindows[static_cast<size_t>(index)];
@@ -3926,6 +3998,36 @@ void OnTaskbarRowNormal(HWND hwnd) {
         g_taskbarPanel->RepaintRow(hwnd);
     }
     FinishTaskbarRowResize(hwnd);
+}
+
+// Notices the shield being bypassed -- the taskbar raised above it, so
+// the pointer reaches the real taskbar however well the shield is
+// positioned. See docs/LIMITATIONS.md #24.
+//
+// A hit-test rather than anything about the shield's own state, because
+// the shield looks perfectly healthy throughout: right rect, topmost set,
+// not click-through, visible. Only asking what actually owns the point
+// reveals it.
+void UpdateTaskbarShieldBypassed() {
+    if (!g_taskbarShield || g_taskbarButtons.empty()) {
+        return;
+    }
+    const RECT& first = g_taskbarButtons.front().rect;
+    const POINT centre{first.left + (first.right - first.left) / 2, first.top + (first.bottom - first.top) / 2};
+    const bool bypassed = !g_taskbarShield->CoversPoint(centre);
+    if (bypassed == g_taskbarShieldBypassed) {
+        return;
+    }
+    g_taskbarShieldBypassed = bypassed;
+    if (bypassed) {
+        polish::LogDebug(
+            L"[Polish] Taskbar: the shield is being bypassed -- the taskbar has been raised above it (the Start "
+            L"menu does this while it is open; see docs/LIMITATIONS.md #24). The native flyout will appear, so "
+            L"Polish's own window list is standing down.");
+        CloseTaskbarPanel();
+    } else {
+        polish::LogDebug(L"[Polish] Taskbar: the shield covers the strip again, window list back on");
+    }
 }
 
 // The pointer moved onto a different app button, or off the strip
@@ -5016,18 +5118,19 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             g_trayIcon->HandleTaskbarRecreated();
         }
         // Explorer restarted: every taskbar HWND and UIA element the last
-        // read produced is now invalid, and the shield is covering pixels
-        // that belong to a taskbar that no longer exists.
+        // read produced is invalid, so the list and the cycle session go.
+        //
+        // The shield and the targets deliberately do NOT. This used to
+        // uncover the strip here, on the reasoning that it now covered a
+        // taskbar that no longer existed -- but the replacement taskbar
+        // comes up in the same place, and the moments right after a
+        // restart are exactly when the pointer is likeliest to be resting
+        // on it. A stale shield over a taskbar that has gone is harmless;
+        // an absent one over a taskbar that has come back is the bug. The
+        // fresh read below replaces the picture as soon as it can.
         CloseTaskbarPanel();
-        g_taskbarButtons.clear();
-        g_taskbarButtonWindows.clear();
         EndTaskbarCycleSession();
-        if (g_taskbarShield) {
-            g_taskbarShield->Hide();
-        }
-        if (g_taskbarHook) {
-            g_taskbarHook->SetTargets(g_taskbarGeneration, {});
-        }
+        g_taskbarReadPolicy = {};
         RequestTaskbarRefresh();
         return 0;
     }
@@ -5072,6 +5175,11 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 if (g_taskbarShield && g_taskbarHook) {
                     g_taskbarShield->SetPassThrough(g_taskbarHook->PassThroughWanted());
                 }
+                // Here rather than only on the safety net: this is the
+                // one moment the answer changes anything the user can
+                // see, and waiting out the slower timer left the list
+                // standing down for seconds after Start had closed.
+                UpdateTaskbarShieldBypassed();
                 POINT cursor{};
                 GetCursorPos(&cursor);
                 // Asked of the cursor's real position rather than of the
@@ -5082,6 +5190,26 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                     KillTimer(hwnd, kTaskbarHoverTimerId);
                 }
             } else if (wParam == kTaskbarRefreshTimerId) {
+                UpdateTaskbarShieldBypassed();
+                // The shield should never be open at an idle sample: it
+                // opens only for a gesture the taskbar is being handed,
+                // and those are over in well under this timer's period.
+                // Finding it open here means the pointer is sitting on
+                // the strip with the taskbar receiving it, which is
+                // exactly the state that lets the native flyout back --
+                // so say so, because the alternative is guessing from a
+                // report that it "came back".
+                if (g_taskbarShield && g_taskbarShield->IsPassThrough()) {
+                    POINT cursor{};
+                    GetCursorPos(&cursor);
+                    polish::LogDebug(std::format(
+                        L"[Polish] Taskbar: WARNING shield still open at idle -- cursor=({},{}) ctrl={} "
+                        L"button={} opens={}",
+                        cursor.x, cursor.y, (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0,
+                        (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 ||
+                            (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0,
+                        g_taskbarShield->PassThroughOpenCount()));
+                }
                 // Repeating, so deliberately not killed here -- see
                 // kTaskbarRefreshTimerId for why the taskbar needs a
                 // poll on top of the events that do fire.

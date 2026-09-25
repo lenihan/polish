@@ -78,6 +78,22 @@ public:
     void SetPassThrough(bool passThrough);
     bool IsPassThrough() const { return passThrough_; }
 
+    // How many times the shield has been opened since the process
+    // started. Only ever read for diagnostics: the shield being open is
+    // what lets the native flyout back, so a report of the flyout
+    // reappearing is answerable from the log by whether this moved.
+    unsigned PassThroughOpenCount() const { return passThroughOpens_; }
+
+    // Whether the shield actually owns `screenPoint` -- that is, whether
+    // hit-testing there lands on it rather than on something above it.
+    //
+    // Not a rect check: the point of asking is that the shield can be
+    // exactly where it should be, visible and opaque, and still be
+    // bypassed because the taskbar has been raised above it. Opening the
+    // Start menu does that permanently (docs/LIMITATIONS.md #24), and
+    // nothing about the shield's own state reveals it.
+    bool CoversPoint(POINT screenPoint) const;
+
     // Uncovers every strip, leaving the native taskbar completely
     // untouched. The tray toggle's off switch, and what the destructor
     // does implicitly.
@@ -88,6 +104,9 @@ private:
         HMONITOR taskbar = nullptr;
         HWND window = nullptr;
         RECT rect{};  // last applied, to skip no-op SetWindowPos churn
+        // Consecutive Updates in which this taskbar was absent from the
+        // buttons. See Update: one absence is not evidence of anything.
+        int missedUpdates = 0;
     };
 
     HWND CreateShieldWindow();
@@ -95,6 +114,7 @@ private:
     HINSTANCE instance_;
     std::vector<Shield> shields_;
     bool passThrough_ = false;
+    unsigned passThroughOpens_ = 0;
 };
 
 }  // namespace polish

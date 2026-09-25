@@ -36,6 +36,7 @@ add_library(polish_core STATIC
     src/windowtracking/WindowZOrder.cpp
     src/windowtracking/WindowReparenting.cpp
     src/windowtracking/TaskbarButtons.cpp
+    src/windowtracking/TaskbarReadPolicy.cpp
     src/tray/TrayIcon.cpp
     src/hook/ActiveWindowHalo.cpp
     src/hook/BullseyeOverlay.cpp

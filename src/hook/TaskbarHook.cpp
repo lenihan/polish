@@ -231,6 +231,13 @@ void TaskbarHook::ApplyPassThrough(bool on) {
 }
 
 bool TaskbarHook::PassThroughWanted() const {
+    POINT cursor{};
+    if (!GetCursorPos(&cursor) || HitTest(cursor) < 0) {
+        // Off the strip there is nothing to hand over, and leaving the
+        // shield open would greet the pointer's return with the native
+        // flyout. See the same check in HandleMouseEvent.
+        return false;
+    }
     // Ctrl first, and on its own: the escape hatch has to restore the
     // native flyout too, not merely stop Polish acting, so it hands the
     // strip back even with no button down.
@@ -297,10 +304,21 @@ bool TaskbarHook::HandleMouseEvent(WPARAM message, POINT screenPt, DWORD mouseDa
         return true;
     }
 
+    // Only ever open over the strip. The shield covers nothing else, so
+    // opening it while the pointer is elsewhere buys nothing -- and costs
+    // a great deal: it stays open, and the moment the pointer returns to
+    // the strip the taskbar gets the hover and its flyout comes back, on
+    // top of Polish's own list.
+    //
+    // Measured: pressing a mouse button anywhere over the hover panel --
+    // clicking a row, or one of its buttons -- opened the shield, because
+    // this asked only "is a button down" and never "is the pointer over
+    // anything the shield covers".
+    //
     // AnyMouseButtonDown cannot answer for a press happening right now --
     // the hook runs ahead of the state it would read -- but every other
     // event is safely behind it.
-    ApplyPassThrough(ctrlHeld || AnyMouseButtonDown());
+    ApplyPassThrough(index >= 0 && (ctrlHeld || AnyMouseButtonDown()));
 
     if (message == WM_MOUSEMOVE) {
         // Never swallowed: returning non-zero for a move freezes the

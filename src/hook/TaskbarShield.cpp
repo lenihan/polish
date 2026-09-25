@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "windowtracking/TaskbarReadPolicy.h"
+
 namespace polish {
 
 namespace {
@@ -99,6 +101,9 @@ void TaskbarShield::SetPassThrough(bool passThrough) {
         return;
     }
     passThrough_ = passThrough;
+    if (passThrough) {
+        ++passThroughOpens_;
+    }
     for (const Shield& shield : shields_) {
         if (shield.window == nullptr) {
             continue;
@@ -152,20 +157,41 @@ void TaskbarShield::Update(const std::vector<TaskbarButton>& buttons) {
                      strip.rect.bottom - strip.rect.top,
                      SWP_NOACTIVATE | SWP_SHOWWINDOW | (moved ? 0 : SWP_NOMOVE | SWP_NOSIZE));
         shield->rect = strip.rect;
+        shield->missedUpdates = 0;
     }
 
     // A taskbar that has gone away (monitor disconnected) or has no app
     // buttons left on it. Hidden rather than destroyed -- monitors come
     // back, and an empty taskbar fills up again the moment an app opens.
+    //
+    // Not on the first absence, though. A secondary taskbar that fails to
+    // read contributes no buttons and says nothing (UiaWorker ignores its
+    // result), so a single missing taskbar is as likely to be a flaky read
+    // as a real change -- and hiding the shield over one that is still
+    // there hands its buttons to the native flyout. Same reasoning, and the
+    // same threshold, as TaskbarReadPolicy for the primary taskbar.
     for (Shield& shield : shields_) {
         const bool stillCovered = std::any_of(strips.begin(), strips.end(), [&shield](const Strip& strip) {
             return strip.taskbar == shield.taskbar;
         });
-        if (!stillCovered && shield.window != nullptr) {
+        if (stillCovered || shield.window == nullptr) {
+            continue;
+        }
+        if (++shield.missedUpdates >= kBadReadsBeforeDegrade) {
             ShowWindow(shield.window, SW_HIDE);
             shield.rect = RECT{};
         }
     }
+}
+
+bool TaskbarShield::CoversPoint(POINT screenPoint) const {
+    const HWND at = WindowFromPoint(screenPoint);
+    for (const Shield& shield : shields_) {
+        if (shield.window != nullptr && shield.window == at) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void TaskbarShield::Hide() {

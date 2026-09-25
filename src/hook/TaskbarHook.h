@@ -127,7 +127,10 @@ public:
     void SetTargets(uint64_t generation, std::vector<Target> targets);
 
     // Whether the shield should currently be letting events through:
-    // Ctrl held, or a mouse button down that Polish has not claimed.
+    // the pointer over the strip, and either Ctrl held or a mouse button
+    // down that Polish has not claimed. Off the strip the answer is
+    // always no -- the shield covers nothing there, and leaving it open
+    // would hand the pointer to the taskbar the moment it came back.
     //
     // Public because the hook alone cannot keep it current. It only ever
     // sees mouse events, so a Ctrl press or a button release with the

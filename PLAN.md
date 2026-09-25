@@ -174,6 +174,28 @@ current todo list.
   the previously-front window back when the pointer left, undoing it.
   The minimize button deliberately does the opposite and moves focus off
   the window, to the app's next one.
+- Taskbar: the shield only ever opens while the pointer is over the
+  button strip it covers. It used to open on any mouse button being down,
+  wherever the pointer was -- so clicking a row in the hover panel opened
+  it, and moving back down to the strip then handed the pointer to the
+  real taskbar and brought its flyout back on top of Polish's own list.
+  Opening the shield anywhere else buys nothing, since it covers nothing
+  there, and costs exactly that.
+- Taskbar: a failed or empty taskbar read no longer uncovers the strip. It
+  keeps the last-known-good shield, retries in 250 ms, and only degrades
+  after three bad reads in a row; `TaskbarCreated` leaves the shield in
+  place; a refresh requested mid-read is remembered rather than dropped.
+  This was a real, ordinary cause of the native flyout reappearing --
+  about ten flyout dwells of exposure per failed read, worst right after an
+  explorer restart. See docs/LIMITATIONS.md #24.
+- Taskbar (next, gated on a spike): suppress the native hover flyout
+  *inside* explorer.exe via a Windhawk mod, keeping the shield as the
+  fallback. Step 0 is to install Windhawk and confirm the upstream
+  "Disable Taskbar Thumbnails" mod (mode Disabled) works on this build --
+  26200.9457, Taskbar.View.dll 2607.28001 -- before building anything. The
+  mod would no-op the hover flyout only while Polish's single-instance
+  mutex exists and Ctrl is not held, so quitting Polish restores native
+  behaviour with no cleanup.
 - Taskbar: an open hover panel is a live view -- opening or closing a
   window of the app whose list is on screen adds or removes a row,
   rather than leaving a header that disagrees with its own rows. Its row

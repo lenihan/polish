@@ -703,11 +703,14 @@ void UiaWorker::EnumerateTaskbarButtons(const Request& request) {
     }
 
     if (!usable) {
-        // Logged as a warning because it disables the feature outright:
-        // an OS build that renames the button class or reshapes the tree
-        // lands here, and this line is the only evidence of why the
-        // taskbar features went quiet. See docs/LIMITATIONS.md.
-        LogDebug(L"[Polish] Taskbar: WARNING could not read the taskbar's buttons, taskbar features disabled");
+        // Logged as a warning because it is the only evidence of why the
+        // taskbar features may go quiet: an OS build that renames the
+        // button class or reshapes the tree lands here, and so does
+        // explorer starting up. One occurrence is not fatal -- the caller
+        // holds the last-known-good shield through a few of these before
+        // giving up (see TaskbarReadPolicy.h) -- so this says what
+        // happened rather than claiming the feature is off.
+        LogDebug(L"[Polish] Taskbar: WARNING could not read the taskbar's buttons");
     } else {
         LogDebug(std::format(L"[Polish] Taskbar: {} button(s) in {}ms", buttons.size(),
                              GetTickCount64() - startTick));
