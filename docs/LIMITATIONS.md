@@ -234,11 +234,20 @@ gets a full pass in Phase 3; today it records what's already known.
       top, even when the panel re-asserts `HWND_TOPMOST` *after* the
       flyout is already on screen.
     - **Raising a window's z-band with `SetWindowBand`** -- every band
-      from 1 to 18 refused with `ERROR_ACCESS_DENIED`. That API is gated
-      behind UIAccess, and UIAccess only grants `ZBID_UIACCESS` (band 2)
-      while shell UI reaches `ZBID_SYSTEM_TOOLS` (band 16). **So UIAccess
-      is not a way around this either** -- worth stating explicitly, since
-      it looks like one.
+      from 1 to 18 refused with `ERROR_ACCESS_DENIED`. That call is refused
+      outright (a public write-up says it "will never work"), so it is the
+      wrong tool, not evidence that the band cannot be reached.
+
+      *Correction (Phase 0 of the Start-menu work).* This entry used to
+      conclude "UIAccess only grants band 2 while shell UI reaches band 16,
+      so UIAccess is not a way around this either". That read band ids as
+      if they were ordered numerically, and they are not. The z-order of the
+      bands, lowest to highest, is DESKTOP(1), IMMERSIVE_BACKGROUND(12),
+      APPCHROME(5), MOGO(6), INACTIVEMOBODY(8), NOTIFICATION(4), EDGY(7),
+      SYSTEM_TOOLS(16), LOCK(17), ABOVELOCK_UX(18), IMMERSIVE_IHM(3),
+      GENUINE_WINDOWS(14), **UIACCESS(2)** -- i.e. UIAccess is the *top*
+      (ADeltaX, "Window z-order in Windows 10"). Whether that ordering
+      holds on Windows 11 is being tested; see #24.
 
     The flyout is also **completely invisible to UI Automation**: with it
     plainly on screen showing two thumbnails, a full `FindAll` under
@@ -360,59 +369,81 @@ gets a full pass in Phase 3; today it records what's already known.
     message-loop turn, where the release is swallowed too and the replay
     carries it.
 
-24. **The shield can be bypassed by the shell, and nothing a normal process
-    does reliably wins it back -- so it is a fallback, not the mechanism.**
-    Two separate causes were found; both end in the native flyout appearing
-    over Polish's own list, where it cannot be covered again (#22).
+24. **While Start (or Search) is open the shell puts the taskbar in a band
+    above the shield, so the native flyout returns -- and it can stay that
+    way after Start closes.** Measured on build 26200.9457 with
+    `user32!GetWindowBand` (undocumented, read-only) and `WindowFromPoint`.
 
-    **A. The taskbar raised above the shield.** With the Start menu open,
-    `WindowFromPoint` over an app button returns `Shell_TrayWnd` instead of
-    `PolishTaskbarShield`, while the shield itself looks healthy: right
-    rect, `WS_EX_TOPMOST`, not click-through, visible, same z-depth. The
-    taskbar stops appearing in the top-level z-order chain at all, which is
-    what a window in a higher band looks like from outside. Re-asserting
-    `HWND_TOPMOST` does not win it back, recreating the shield does not, and
-    `SetParent` into `Shell_TrayWnd` is refused with error 87. This is the
-    same wall #22 records for `SetWindowBand` (shell UI at band 16, every
-    band 1-18 refused, UIAccess reaching only band 2).
+    **What is measured**
 
-    Whether and when it clears is **not** something to lean on. It was seen
-    clearing the instant Start closed (twice, at half-second resolution) and
-    it was seen persisting with Start closed and across a Polish restart;
-    a user reported the flyout still covering Polish's list after restarting
-    explorer itself. An earlier version of this entry claimed the promotion
-    was permanent; a later one claimed it recovered immediately. Both were
-    over-generalised from a handful of samples, and at least the first was
-    measured with Start still open (the probe's Escape went to whatever had
-    focus). Treat the behaviour as unpredictable.
+    - Normally `Shell_TrayWnd` and the shield are both in band 1
+      (`ZBID_DESKTOP`), and the topmost shield wins the hit-test.
+    - With Start open, `Shell_TrayWnd` is in **band 6** (`ZBID_IMMERSIVE_MOGO`)
+      along with Start itself; the shield stays in band 1 and loses.
+      `WindowFromPoint` over an app button then returns `Shell_TrayWnd`
+      (or its `MSTaskSwWClass` child) instead of `PolishTaskbarShield`.
+    - Only Start (Win) and Search (Win+S) do this. Quick Settings (Win+A),
+      Notifications (Win+N) and Widgets (Win+W) leave the taskbar in band 1.
+    - Re-asserting `HWND_TOPMOST`, recreating the shield, restarting Polish
+      and `SetParent` into `Shell_TrayWnd` (error 87) do not win it back.
 
-    **B. Uncovering the strip on a failed read.** Polish re-reads the taskbar
-    through UI Automation, and used to hide the shield and clear every target
-    on any unusable or empty read, retrying only on the 3 second timer. That
-    is about ten flyout dwells (250-450 ms) of exposure, and explorer
-    restarting is exactly when reads fail. `TaskbarCreated` also uncovered
-    the strip, and a refresh requested while one was in flight was dropped.
-    Now a bad read keeps the last-known-good shield and retries in 250 ms,
-    only degrading after three in a row (`TaskbarReadPolicy.h`), the
-    `TaskbarCreated` handler leaves the shield in place, a request that
-    arrives mid-read is remembered rather than dropped, and a secondary
-    taskbar's shield is only hidden after it has been absent for three
-    updates. A stale shield over a taskbar that has gone is harmless; an
-    absent one over a taskbar that has come back is the bug.
+    **What makes it stick.** The taskbar drops back to band 1 when Start
+    closes **only if the pointer is not on the taskbar at that moment**.
+    Win-key open/close cycles, no clicks anywhere, varying only the pointer:
 
-    **What does work reliably is what other tools do: act inside
-    explorer.exe.** Windhawk's "Disable Taskbar Thumbnails" mod hooks
-    `HoverFlyoutController::ShowTaskListButtonHoverFlyout` (with
-    `HoverFlyoutModel::TransitionToFlyoutVisibleStickyState` and
-    `FlyoutFrame::CanFitAndUpdateScaleFactor`) in `Taskbar.View.dll` /
-    `ExplorerExtensions.dll`, resolving symbols from PDBs and selecting by
-    explorer's file version; ExplorerPatcher and StartAllBack patch the
-    taskbar in-process as well. Nothing out-of-process was found that does.
-    The trade-off is fragility across Windows updates -- the upstream mod's
-    own "not working anymore" report on build 26200.8313 is exactly that --
-    which is why the shield stays as the fallback. See PLAN.md.
+    | pointer during the cycle | band after Start closes |
+    |---|---|
+    | away from the taskbar | 1 (and it cleared a stuck state) |
+    | on the Start button | 6, stuck |
+    | on an app button | 6, stuck |
+    | on empty taskbar | 6, stuck |
 
-    Polish detects the bypass by hit-test (`TaskbarShield::CoversPoint`;
-    nothing about the shield's own state reveals it) and stands its own
-    window list down while it holds, so the user does not see two stacked
-    lists. That does not stop the native flyout appearing.
+    Moving the pointer away *afterwards* does not clear it (12 s watched, and
+    25 s with no input), so the demotion is decided at close time. It clears
+    on the next Start cycle that closes with the pointer elsewhere. This is
+    what users see as the flyout "popping up all the time": use Start with
+    the pointer resting on the taskbar and the shield is bypassed until the
+    next clean cycle.
+
+    **What does not help.** Clicking the Start button *looks* like the cause,
+    because it necessarily puts the pointer on the taskbar. It is not.
+    Polish once swallowed Start-button clicks and sent a Win-key tap instead
+    (the Start button is UIA `ToggleButton`, AutomationId `StartButton`,
+    outside the app strip and the shield); 12 intercepted clicks over six
+    cycles all left the taskbar stuck at band 6, because the pointer was
+    still on it. That code was removed. Opening Start any other way (Win key,
+    COM activation, the launcher) hits the same shell path and cannot help.
+
+    **Read this before trusting any test of it.** Two earlier versions of
+    this entry were wrong. One said the promotion was permanent (measured
+    with Start still open -- the probe's Escape went to whatever had focus);
+    the next said it recovered the instant Start closed (a handful of
+    samples, all with the pointer away). A "verified closed" check must
+    compare the foreground *window handle* with the one from before anything
+    was opened: checking a list of known flyout classes accepted
+    `ControlCenterWindow` and `WindowsDashboard` as closed while still open,
+    and produced a bogus "Quick Settings raises the taskbar" row.
+
+    **Polish's mitigations** (none of which stop the flyout appearing):
+    a bad taskbar read keeps the last-known-good shield and retries in 250 ms
+    (`TaskbarReadPolicy.h`); `TaskbarCreated` leaves the shield in place; a
+    hit-test (`TaskbarShield::CoversPoint`) detects the bypass and Polish
+    stands its own window list down so two lists are not stacked.
+
+    **The fix: a shield in the UIACCESS band (proven).** `polish_uia.exe`
+    (manifest `uiAccess="true"`, signed, installed under `%ProgramFiles%`;
+    see docs/UIACCESS.md) puts the shield in band 2, the top of the order
+    above. Measured on build 26200.9457 with the real build: with Start open
+    the taskbar is band 6 and `WindowFromPoint` over an app button still
+    returns `PolishTaskbarShield`, no bypass is logged, and the hit-test is
+    unchanged after Start closes. A UIAccess process's windows land in the
+    band automatically (no `CreateWindowInBand` needed). Not yet checked:
+    behaviour after an explorer restart, and right/middle-click pass-through
+    across the band boundary. Plain `polish.exe` still has the limitation
+    and relies on the mitigations above.
+
+    **Other tools** avoid the whole question by acting inside `explorer.exe`
+    (Windhawk's "Disable Taskbar Thumbnails" hooks
+    `HoverFlyoutController::ShowTaskListButtonHoverFlyout` and two more,
+    all confirmed present in this build's `Taskbar.View.dll` 2607.28001 via
+    its PDB). Polish does not inject into or patch explorer.

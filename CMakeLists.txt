@@ -118,6 +118,18 @@ endif()
 
 set_target_properties(polish PROPERTIES OUTPUT_NAME "polish")
 
+# Identical sources, manifest asks for uiAccess. Must be signed and installed
+# under Program Files to launch: see tools/uiaccess/ and docs/UIACCESS.md.
+add_executable(polish_uia WIN32
+    src/main.cpp
+    resources/app_uiaccess.rc
+)
+target_link_libraries(polish_uia PRIVATE polish_core)
+if(MSVC)
+    target_compile_options(polish_uia PRIVATE /W4 /permissive- /utf-8)
+    target_link_options(polish_uia PRIVATE /MANIFEST:NO)
+endif()
+
 enable_testing()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     add_subdirectory(tests)

@@ -1,0 +1,11 @@
+#include <windows.h>
+
+#include "resource.h"
+
+// Same resources as app.rc, but the manifest asks for uiAccess="true" so the
+// shield window lands in the UIACCESS z-band above the raised taskbar
+// (docs/UIACCESS.md). Windows only honours it for a signed exe in a secure
+// location, so this is a second target rather than the default build.
+CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "../app_uiaccess.manifest"
+
+IDI_POLISH_TRAY ICON "polish.ico"

@@ -5418,6 +5418,18 @@ HWND CreateMessageWindow(HINSTANCE instance) {
 
 }  // namespace
 
+void LogUiAccessMode() {
+    HANDLE token = nullptr;
+    DWORD uiAccess = 0;
+    DWORD returned = 0;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        GetTokenInformation(token, TokenUIAccess, &uiAccess, sizeof(uiAccess), &returned);
+        CloseHandle(token);
+    }
+    polish::LogDebug(std::format(L"[Polish] UIAccess token: {} (the taskbar shield {} the raised taskbar while Start is open)",
+                                 uiAccess != 0 ? L"yes" : L"no", uiAccess != 0 ? L"beats" : L"loses to"));
+}
+
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     HANDLE singleInstanceMutex = CreateMutexW(nullptr, TRUE, kSingleInstanceMutexName);
     if (singleInstanceMutex == nullptr) {
@@ -5430,6 +5442,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     polish::LogStartupBanner();
     LogDpiAwareness();
+    LogUiAccessMode();
 
     // COINIT_APARTMENTTHREADED -- this app has exactly one thread that
     // ever touches a window or COM object, the classic STA shape.
