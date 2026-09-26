@@ -255,6 +255,12 @@ bool TaskbarHook::HandleMouseEvent(WPARAM message, POINT screenPt, DWORD mouseDa
         swallowedLeftDown_ = false;
         return true;
     }
+    // Same pairing rule for the swallowed empty-space right-press: an
+    // unpaired button-up would open the context menu the press avoided.
+    if (message == WM_RBUTTONUP && swallowedRightDown_) {
+        swallowedRightDown_ = false;
+        return true;
+    }
 
     const bool ctrlHeld = IsCtrlHeld();
     const int index = HitTest(screenPt);
@@ -304,17 +310,24 @@ bool TaskbarHook::HandleMouseEvent(WPARAM message, POINT screenPt, DWORD mouseDa
         return true;
     }
 
-    // A plain click on the taskbar that is not over an app button. Reported,
-    // never swallowed. Ctrl and Alt mean the user is doing something else;
-    // Shift is meaningful (it reverses, as it does for Tab).
-    if (message == WM_LBUTTONDOWN && index < 0 && !ctrlHeld &&
-        (GetKeyState(VK_MENU) & 0x8000) == 0) {
+    // A click on the taskbar that is not over an app button. Ctrl and Alt
+    // mean the user is doing something else; Shift is meaningful (it
+    // reverses, as it does for Tab). The left press is passed on, the
+    // right one swallowed -- see the class comment.
+    const bool emptyPress = (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN) && index < 0 && !ctrlHeld &&
+                            (GetKeyState(VK_MENU) & 0x8000) == 0;
+    if (emptyPress) {
         const HWND root = GetAncestor(WindowFromPoint(screenPt), GA_ROOT);
         wchar_t className[32] = L"";
         if (root != nullptr && GetClassNameW(root, className, 32) > 0 &&
             (wcscmp(className, L"Shell_TrayWnd") == 0 || wcscmp(className, L"Shell_SecondaryTrayWnd") == 0)) {
-            PostMessageW(messageWindow_, kEmptyClickMessage, IsShiftHeld() ? 1 : 0,
+            const bool right = message == WM_RBUTTONDOWN;
+            PostMessageW(messageWindow_, kEmptyClickMessage, (IsShiftHeld() ? 1u : 0u) | (right ? 2u : 0u),
                          MAKELPARAM(static_cast<short>(screenPt.x), static_cast<short>(screenPt.y)));
+            if (right) {
+                swallowedRightDown_ = true;
+                return true;
+            }
         }
     }
 
@@ -356,7 +369,8 @@ void TaskbarHook::HandleHookMessage(UINT message, WPARAM wParam, LPARAM lParam) 
     }
     if (message == kEmptyClickMessage) {
         if (onEmptyClick_) {
-            onEmptyClick_(POINT{static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam))}, wParam != 0);
+            onEmptyClick_(POINT{static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam))},
+                          (wParam & 1) != 0, (wParam & 2) != 0);
         }
         return;
     }

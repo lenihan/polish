@@ -48,13 +48,18 @@ namespace polish {
 //   - Never swallow WM_MOUSEMOVE. Returning non-zero for a move freezes
 //     the cursor, because the same input processing the hook gates is
 //     what moves the pointer. Swallowing mouse *buttons* is fine.
-//   - Never swallow anything but a left-click. Ctrl is still the escape
-//     hatch for every other gesture: with it down, hovering shows the
-//     native flyout and right/middle-click reach the taskbar untouched,
-//     which is why Ctrl turns pass-through on rather than merely
-//     suppressing Polish's own handling. A claimed left-click leaves that
-//     pass-through exactly as Ctrl set it, so swallowing the press does
-//     not flicker the shield shut underneath a held Ctrl.
+//   - Never swallow anything but a left-click *over a button*. Ctrl is
+//     still the escape hatch for every other gesture: with it down,
+//     hovering shows the native flyout and right/middle-click reach the
+//     taskbar untouched, which is why Ctrl turns pass-through on rather
+//     than merely suppressing Polish's own handling. A claimed left-click
+//     leaves that pass-through exactly as Ctrl set it, so swallowing the
+//     press does not flicker the shield shut underneath a held Ctrl.
+//
+//     The one exception is a right-click on *empty* taskbar, which opens
+//     Polish's tab switcher and is swallowed so the native taskbar
+//     context menu does not open on top of it. Ctrl+right-click is left
+//     alone and still reaches that menu.
 //
 // Both modifiers are claimed on a left-click, and both take over
 // something native:
@@ -158,12 +163,13 @@ public:
     // nothing that is working.
     bool EnsureInstalled();
 
-    // onEmptyClick(point, shift): a left-press on the taskbar that is over
-    // none of the app buttons -- which may still be a tray icon or the
-    // Start button, so the receiver has to check what is actually there.
-    // Shift is reported, Ctrl and Alt suppress the report. Never swallowed;
-    // the taskbar gets the click as usual.
-    void SetOnEmptyClick(std::function<void(POINT screenPoint, bool shift)> onEmptyClick) {
+    // onEmptyClick(point, shift, right): a left- or right-press on the
+    // taskbar that is over none of the app buttons -- which may still be a
+    // tray icon or the Start button, so the receiver has to check what is
+    // actually there. Shift is reported, Ctrl and Alt suppress the report.
+    // A left-press is never swallowed; a right-press is (see the class
+    // comment).
+    void SetOnEmptyClick(std::function<void(POINT screenPoint, bool shift, bool right)> onEmptyClick) {
         onEmptyClick_ = std::move(onEmptyClick);
     }
 
@@ -186,7 +192,8 @@ public:
     static constexpr UINT kToggleClickMessage = WM_APP + 15;
     // A press on the taskbar outside every app button. lParam is the
     // point, packed with MAKELPARAM (16-bit signed halves cover any
-    // desktop this app will meet); wParam is 1 when Shift was held.
+    // desktop this app will meet); wParam carries bit 0 for Shift and
+    // bit 1 for the right button.
     static constexpr UINT kEmptyClickMessage = WM_APP + 17;
 
     // A press the shield swallowed on the taskbar's behalf, to be sent
@@ -211,7 +218,7 @@ private:
     bool Install();
     void Uninstall();
     int HitTest(POINT screenPt) const;
-    std::function<void(POINT, bool)> onEmptyClick_;
+    std::function<void(POINT, bool, bool)> onEmptyClick_;
     void ApplyPassThrough(bool on);
 
     HWND messageWindow_;
@@ -249,6 +256,7 @@ private:
     // re-hit-tested on the up so a press that starts on a button and ends
     // somewhere else is still balanced.
     bool swallowedLeftDown_ = false;
+    bool swallowedRightDown_ = false;
 
     // GetTickCount64() at the last event this hook saw, for
     // EnsureInstalled's liveness inference.

@@ -280,6 +280,10 @@ ULONGLONG g_altTabStickyEndedTick = 0;
 ULONGLONG g_stickyOutsideSince = 0;
 uint64_t g_pendingEmptyCheck = 0;
 bool g_pendingEmptyShift = false;
+bool g_pendingEmptyRight = false;
+// As g_altTabSticky, for the Alt+` tab switcher opened by right-clicking
+// empty taskbar.
+bool g_tabSticky = false;
 std::vector<HWND> g_altTabCandidates;
 size_t g_altTabHighlightIndex = 0;
 // Minimized candidate windows -- a separate list from g_altTabCandidates
@@ -2144,6 +2148,14 @@ void EndTabSession() {
     g_tabOrder.clear();
     g_tabHighlightIndex = 0;
     g_tabSessionWindow = nullptr;
+    if (g_tabSticky) {
+        g_tabSticky = false;
+        g_altTabStickyEndedTick = GetTickCount64();
+        KillTimer(g_messageWindow, kStickyAltTabPollTimerId);
+        if (g_altTabHook) {
+            g_altTabHook->SetExternalSessionActive(false);
+        }
+    }
     UpdateActiveWindowHalo(GetForegroundWindow());
 }
 
@@ -3470,7 +3482,7 @@ constexpr ULONGLONG kStickyLeaveCommitMs = 250;
 // the switcher) and commits the highlighted window when it leaves -- the
 // mouse's version of releasing Alt. Clicking away is the same thing, sooner.
 void PollStickyAltTab() {
-    if (!g_altTabSticky) {
+    if (!g_altTabSticky && !g_tabSticky) {
         KillTimer(g_messageWindow, kStickyAltTabPollTimerId);
         return;
     }
@@ -3489,7 +3501,11 @@ void PollStickyAltTab() {
         if (pressed && polish::HitTestTaskbarButton(g_taskbarButtons, cursor).has_value()) {
             // An app button has its own meaning; do not fight it.
             polish::LogDebug(L"[Polish] Taskbar: app button pressed, closing the switcher");
-            EndAltTabSession();
+            if (g_tabSticky) {
+                EndTabSession();
+            } else {
+                EndAltTabSession();
+            }
         }
         // Empty taskbar: OnTaskbarEmptyCheckReady turns the press into Tab.
         return;
@@ -3501,22 +3517,83 @@ void PollStickyAltTab() {
     if (pressed || now - g_stickyOutsideSince >= kStickyLeaveCommitMs) {
         polish::LogDebug(L"[Polish] Taskbar: pointer left the taskbar, committing the switcher");
         g_stickyOutsideSince = 0;
-        OnAltTabCommit();
+        if (g_tabSticky) {
+            // The window itself may have lost the foreground to the
+            // taskbar when the session was opened; the chosen tab is only
+            // reachable if its window comes back with it.
+            const HWND window = g_tabSessionWindow;
+            CommitTabSession();
+            if (window != nullptr && IsWindow(window)) {
+                InjectForegroundUnlockKeystroke();
+                SetForegroundWindow(window);
+            }
+        } else {
+            OnAltTabCommit();
+        }
     }
 }
 
-// The hook saw a plain left-press on the taskbar outside every app button.
-void OnTaskbarEmptyClick(POINT pt, bool shift) {
-    if (!g_settings.altTabEnabled || !g_settings.taskbarEnabled || g_uiaWorker == nullptr || g_tabSessionOpen) {
+// The window the user was last actually working in. Clicking the taskbar
+// takes the foreground away from it, so GetForegroundWindow() answers
+// "the shell" by the time a click is acted on -- but a tab switcher is
+// about the app that was in front, which is what this finds.
+HWND MostRecentAppWindow() {
+    for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+        if (IsWindow(hwnd) && IsWindowVisible(hwnd) && !IsIconic(hwnd) && polish::IsCandidateWindow(hwnd)) {
+            return hwnd;
+        }
+    }
+    return nullptr;
+}
+
+// Right-click's counterpart to StartStickyAltTab: the Alt+` tab switcher,
+// opened with no keys held and cycled by further right-clicks.
+void StartStickyTabs(bool backward) {
+    if (g_tabSessionOpen || g_uiaWorker == nullptr || !g_settings.altTabEnabled) {
         return;
     }
-    if (g_altTabSessionOpen && !g_altTabSticky) {
+    const HWND window = MostRecentAppWindow();
+    if (window == nullptr) {
+        return;
+    }
+    const std::optional<std::wstring> executable = polish::GetWindowProcessImagePath(window);
+    if (!executable.has_value()) {
+        return;  // typically elevated -- see docs/LIMITATIONS.md #1
+    }
+    const std::optional<polish::TabRule> rule = polish::FindTabRule(*executable);
+    if (!rule.has_value()) {
+        polish::LogDebug(std::format(L"[Polish] Taskbar: right-click ignored -- {} has no tab rule",
+                                     *executable));
+        return;
+    }
+    g_pendingTabWindow = window;
+    g_pendingTabRule = *rule;
+    OnAltTabCycle(backward, polish::AltTabHook::SessionKind::Tabs);
+    if (!g_tabSessionOpen) {
+        return;
+    }
+    g_tabSticky = true;
+    g_stickyOutsideSince = 0;
+    if (g_altTabHook) {
+        g_altTabHook->SetExternalSessionActive(true);
+    }
+    SetTimer(g_messageWindow, kStickyAltTabPollTimerId, kStickyAltTabPollMs, nullptr);
+    polish::LogDebug(L"[Polish] Taskbar: empty-space right-click opened the tab switcher");
+}
+
+// The hook saw a press on the taskbar outside every app button.
+void OnTaskbarEmptyClick(POINT pt, bool shift, bool right) {
+    if (!g_settings.altTabEnabled || !g_settings.taskbarEnabled || g_uiaWorker == nullptr) {
+        return;
+    }
+    if ((g_altTabSessionOpen && !g_altTabSticky) || (g_tabSessionOpen && !g_tabSticky)) {
         return;  // a held-Alt session owns the list
     }
-    if (!g_altTabSticky && GetTickCount64() - g_altTabStickyEndedTick < 400) {
+    if (!g_altTabSticky && !g_tabSticky && GetTickCount64() - g_altTabStickyEndedTick < 400) {
         return;
     }
     g_pendingEmptyShift = shift;
+    g_pendingEmptyRight = right;
     g_pendingEmptyCheck = g_uiaWorker->RequestTaskbarEmptyCheck(pt);
 }
 
@@ -3532,7 +3609,19 @@ void OnTaskbarEmptyCheckReady(uint64_t generation) {
         // Start or a tray icon: not ours. It does dismiss the switcher.
         if (g_altTabSticky) {
             EndAltTabSession();
+        } else if (g_tabSticky) {
+            EndTabSession();
         }
+        return;
+    }
+    if (g_pendingEmptyRight) {
+        // Right-click: the tab switcher. Each further right-click is one
+        // Alt+` step, Shift making it a step back.
+        if (g_tabSticky) {
+            OnAltTabCycle(g_pendingEmptyShift, polish::AltTabHook::SessionKind::Tabs);
+            return;
+        }
+        StartStickyTabs(g_pendingEmptyShift);
         return;
     }
     if (g_altTabSticky) {
@@ -5724,6 +5813,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             CommitTaskbarPanel();
         } else if (g_altTabSticky) {
             OnAltTabCommit();
+        } else if (g_tabSticky) {
+            CommitTabSession();
         }
     });
     g_altTabHook->SetOnNewKey([] {
