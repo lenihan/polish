@@ -277,6 +277,7 @@ bool g_altTabSessionOpen = false;
 // outside the panel does.
 bool g_altTabSticky = false;
 ULONGLONG g_altTabStickyEndedTick = 0;
+ULONGLONG g_stickyOutsideSince = 0;
 uint64_t g_pendingEmptyCheck = 0;
 bool g_pendingEmptyShift = false;
 std::vector<HWND> g_altTabCandidates;
@@ -3442,6 +3443,7 @@ void StartStickyAltTab(bool backward) {
         return;
     }
     g_altTabSticky = true;
+    g_stickyOutsideSince = 0;
     if (g_altTabHook) {
         // Enter, Escape and the arrows -- see AltTabHook::SetExternalSessionActive.
         g_altTabHook->SetExternalSessionActive(true);
@@ -3450,28 +3452,56 @@ void StartStickyAltTab(bool backward) {
     polish::LogDebug(L"[Polish] Taskbar: empty-space click opened the window switcher");
 }
 
+// Whether `pt` is over a taskbar (or Polish's own shield on top of one).
+bool PointOverTaskbar(POINT pt) {
+    const HWND root = GetAncestor(WindowFromPoint(pt), GA_ROOT);
+    wchar_t className[32] = L"";
+    return root != nullptr && GetClassNameW(root, className, 32) > 0 &&
+           (wcscmp(className, L"Shell_TrayWnd") == 0 || wcscmp(className, L"Shell_SecondaryTrayWnd") == 0 ||
+            wcscmp(className, L"PolishTaskbarShield") == 0);
+}
+
+// How long the pointer may be away from the taskbar and the switcher before
+// the session commits. Long enough to cross the gap from the taskbar to the
+// panel, short enough that leaving feels like letting go of Alt.
+constexpr ULONGLONG kStickyLeaveCommitMs = 250;
+
+// A click-opened session lasts while the pointer stays on the taskbar (or
+// the switcher) and commits the highlighted window when it leaves -- the
+// mouse's version of releasing Alt. Clicking away is the same thing, sooner.
 void PollStickyAltTab() {
     if (!g_altTabSticky) {
         KillTimer(g_messageWindow, kStickyAltTabPollTimerId);
         return;
     }
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) {
+        return;
+    }
+    if (PointOverAltTabPanel(cursor)) {
+        g_stickyOutsideSince = 0;
+        return;
+    }
     const bool pressed = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
                          (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
-    POINT cursor{};
-    if (pressed && GetCursorPos(&cursor) && !PointOverAltTabPanel(cursor)) {
-        // A press on the taskbar that is not on an app button is Tab for
-        // this session; OnTaskbarEmptyCheckReady decides that (and ends the
-        // session itself for a tray icon or Start), so it is not "outside".
-        const HWND root = GetAncestor(WindowFromPoint(cursor), GA_ROOT);
-        wchar_t className[32] = L"";
-        const bool overTaskbar = root != nullptr && GetClassNameW(root, className, 32) > 0 &&
-                                 (wcscmp(className, L"Shell_TrayWnd") == 0 ||
-                                  wcscmp(className, L"Shell_SecondaryTrayWnd") == 0);
-        if (overTaskbar && !polish::HitTestTaskbarButton(g_taskbarButtons, cursor).has_value()) {
-            return;
+    if (PointOverTaskbar(cursor)) {
+        g_stickyOutsideSince = 0;
+        if (pressed && polish::HitTestTaskbarButton(g_taskbarButtons, cursor).has_value()) {
+            // An app button has its own meaning; do not fight it.
+            polish::LogDebug(L"[Polish] Taskbar: app button pressed, closing the switcher");
+            EndAltTabSession();
         }
-        polish::LogDebug(L"[Polish] Taskbar: press outside the switcher, closing it");
-        EndAltTabSession();
+        // Empty taskbar: OnTaskbarEmptyCheckReady turns the press into Tab.
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    if (g_stickyOutsideSince == 0) {
+        g_stickyOutsideSince = now;
+    }
+    if (pressed || now - g_stickyOutsideSince >= kStickyLeaveCommitMs) {
+        polish::LogDebug(L"[Polish] Taskbar: pointer left the taskbar, committing the switcher");
+        g_stickyOutsideSince = 0;
+        OnAltTabCommit();
     }
 }
 
