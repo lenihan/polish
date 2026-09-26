@@ -196,6 +196,10 @@ constexpr UINT_PTR kTaskbarPreviewTimerId = 12;
 constexpr UINT kTaskbarPreviewDwellMs = 160;
 
 constexpr UINT_PTR kTaskbarDirtyTimerId = 11;
+// While a click-opened Alt+Tab session is up: watches for a press outside
+// the panel, which dismisses it. See StartStickyAltTab.
+constexpr UINT_PTR kStickyAltTabPollTimerId = 13;
+constexpr UINT kStickyAltTabPollMs = 30;
 constexpr UINT kTaskbarDirtyDebounceMs = 120;
 
 // Windows seen going into the taskbar, so a later restore can be
@@ -268,6 +272,13 @@ std::unique_ptr<polish::AltTabHook> g_altTabHook;
 // window-creation cost more than once per "most windows ever open at once
 // this run."
 bool g_altTabSessionOpen = false;
+// The session was opened by clicking empty taskbar rather than by holding
+// Alt, so nothing ends it on Alt-up: Enter, Escape, a row click or a press
+// outside the panel does.
+bool g_altTabSticky = false;
+ULONGLONG g_altTabStickyEndedTick = 0;
+uint64_t g_pendingEmptyCheck = 0;
+bool g_pendingEmptyShift = false;
 std::vector<HWND> g_altTabCandidates;
 size_t g_altTabHighlightIndex = 0;
 // Minimized candidate windows -- a separate list from g_altTabCandidates
@@ -2009,6 +2020,14 @@ void EndAltTabSession() {
     g_altTabSelectionInMinimized = false;
     g_altTabMinimizedHighlightIndex = 0;
     g_altTabSessionOpen = false;
+    if (g_altTabSticky) {
+        g_altTabSticky = false;
+        g_altTabStickyEndedTick = GetTickCount64();
+        KillTimer(g_messageWindow, kStickyAltTabPollTimerId);
+        if (g_altTabHook) {
+            g_altTabHook->SetExternalSessionActive(false);
+        }
+    }
     // On Esc-cancel there's no foreground change to otherwise react to,
     // so the halo (hidden for the whole session -- see the
     // g_altTabSessionOpen check at the top of UpdateActiveWindowHalo)
@@ -3397,6 +3416,101 @@ void ApplyTaskbarRead(uint64_t generation) {
     // Rebuilt either way: the windows behind an unchanged set of buttons
     // still move, open and close, and that changes which buttons cycle.
     RebuildTaskbarTargets();
+}
+
+// Whether `pt` is over any Alt+Tab panel of the current session.
+bool PointOverAltTabPanel(POINT pt) {
+    for (const auto& panel : g_altTabPanels) {
+        if (panel.window && panel.window->IsVisible() && panel.window->ContainsPoint(pt)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Opens the window switcher with no Alt held, so it stays until the user
+// decides: click a row, Enter, Escape, or press anywhere outside it.
+// Clicking empty taskbar again is a Tab press, Shift+click a Shift+Tab --
+// see OnTaskbarEmptyCheckReady.
+void StartStickyAltTab(bool backward) {
+    if (g_altTabSessionOpen || g_tabSessionOpen ||
+        AltTabEligibility(polish::AltTabHook::SessionKind::Windows) != polish::AltTabHook::Eligibility::Ready) {
+        return;
+    }
+    OnAltTabCycle(backward, polish::AltTabHook::SessionKind::Windows);
+    if (!g_altTabSessionOpen) {
+        return;
+    }
+    g_altTabSticky = true;
+    if (g_altTabHook) {
+        // Enter, Escape and the arrows -- see AltTabHook::SetExternalSessionActive.
+        g_altTabHook->SetExternalSessionActive(true);
+    }
+    SetTimer(g_messageWindow, kStickyAltTabPollTimerId, kStickyAltTabPollMs, nullptr);
+    polish::LogDebug(L"[Polish] Taskbar: empty-space click opened the window switcher");
+}
+
+void PollStickyAltTab() {
+    if (!g_altTabSticky) {
+        KillTimer(g_messageWindow, kStickyAltTabPollTimerId);
+        return;
+    }
+    const bool pressed = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0 ||
+                         (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
+    POINT cursor{};
+    if (pressed && GetCursorPos(&cursor) && !PointOverAltTabPanel(cursor)) {
+        // A press on the taskbar that is not on an app button is Tab for
+        // this session; OnTaskbarEmptyCheckReady decides that (and ends the
+        // session itself for a tray icon or Start), so it is not "outside".
+        const HWND root = GetAncestor(WindowFromPoint(cursor), GA_ROOT);
+        wchar_t className[32] = L"";
+        const bool overTaskbar = root != nullptr && GetClassNameW(root, className, 32) > 0 &&
+                                 (wcscmp(className, L"Shell_TrayWnd") == 0 ||
+                                  wcscmp(className, L"Shell_SecondaryTrayWnd") == 0);
+        if (overTaskbar && !polish::HitTestTaskbarButton(g_taskbarButtons, cursor).has_value()) {
+            return;
+        }
+        polish::LogDebug(L"[Polish] Taskbar: press outside the switcher, closing it");
+        EndAltTabSession();
+    }
+}
+
+// The hook saw a plain left-press on the taskbar outside every app button.
+void OnTaskbarEmptyClick(POINT pt, bool shift) {
+    if (!g_settings.altTabEnabled || !g_settings.taskbarEnabled || g_uiaWorker == nullptr || g_tabSessionOpen) {
+        return;
+    }
+    if (g_altTabSessionOpen && !g_altTabSticky) {
+        return;  // a held-Alt session owns the list
+    }
+    if (!g_altTabSticky && GetTickCount64() - g_altTabStickyEndedTick < 400) {
+        return;
+    }
+    g_pendingEmptyShift = shift;
+    g_pendingEmptyCheck = g_uiaWorker->RequestTaskbarEmptyCheck(pt);
+}
+
+void OnTaskbarEmptyCheckReady(uint64_t generation) {
+    if (generation != g_pendingEmptyCheck || g_uiaWorker == nullptr) {
+        return;
+    }
+    const polish::UiaWorker::TaskbarEmptyResult result = g_uiaWorker->LatestTaskbarEmptyCheck();
+    if (result.generation != generation) {
+        return;
+    }
+    if (!result.empty) {
+        // Start or a tray icon: not ours. It does dismiss the switcher.
+        if (g_altTabSticky) {
+            EndAltTabSession();
+        }
+        return;
+    }
+    if (g_altTabSticky) {
+        // Each click is one Tab press; Shift makes it Shift+Tab.
+        OnAltTabCycle(g_pendingEmptyShift, polish::AltTabHook::SessionKind::Windows);
+        return;
+    }
+    StartStickyAltTab(g_pendingEmptyShift);
 }
 
 // A taskbar read has come back (kTaskbarButtonsReadyMessage).
@@ -5137,7 +5251,9 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 
     switch (message) {
         case WM_TIMER:
-            if (wParam == kSettleTimerId) {
+            if (wParam == kStickyAltTabPollTimerId) {
+                PollStickyAltTab();
+            } else if (wParam == kSettleTimerId) {
                 KillTimer(hwnd, kSettleTimerId);
                 CheckSettledRectAndRecord();
             } else if (wParam == kThumbnailRefreshTimerId) {
@@ -5259,11 +5375,16 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             OnTaskbarButtonsReady(static_cast<uint64_t>(wParam));
             return 0;
 
+        case polish::kTaskbarEmptyReadyMessage:
+            OnTaskbarEmptyCheckReady(static_cast<uint64_t>(wParam));
+            return 0;
+
         case polish::TaskbarHook::kHoverMessage:
         case polish::TaskbarHook::kCycleClickMessage:
         case polish::TaskbarHook::kCycleBackClickMessage:
         case polish::TaskbarHook::kToggleClickMessage:
         case polish::TaskbarHook::kReplayPressMessage:
+        case polish::TaskbarHook::kEmptyClickMessage:
             if (g_taskbarHook) {
                 g_taskbarHook->HandleHookMessage(message, wParam, lParam);
             }
@@ -5571,6 +5692,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_altTabHook->SetOnCommitKey([] {
         if (TaskbarPanelOwnsKeys()) {
             CommitTaskbarPanel();
+        } else if (g_altTabSticky) {
+            OnAltTabCommit();
         }
     });
     g_altTabHook->SetOnNewKey([] {
@@ -5702,6 +5825,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                     g_taskbarShield->SetPassThrough(on);
                 }
             });
+        g_taskbarHook->SetOnEmptyClick(OnTaskbarEmptyClick);
         if (!g_taskbarHook->IsInstalled()) {
             polish::LogDebug(std::format(L"[Polish] Taskbar: WARNING failed to install the mouse hook -- "
                                           L"click-to-cycle unavailable. GetLastError={}",

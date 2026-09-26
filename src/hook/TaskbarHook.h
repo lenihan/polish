@@ -158,6 +158,15 @@ public:
     // nothing that is working.
     bool EnsureInstalled();
 
+    // onEmptyClick(point, shift): a left-press on the taskbar that is over
+    // none of the app buttons -- which may still be a tray icon or the
+    // Start button, so the receiver has to check what is actually there.
+    // Shift is reported, Ctrl and Alt suppress the report. Never swallowed;
+    // the taskbar gets the click as usual.
+    void SetOnEmptyClick(std::function<void(POINT screenPoint, bool shift)> onEmptyClick) {
+        onEmptyClick_ = std::move(onEmptyClick);
+    }
+
     // Routes the hook's private messages. Callers must forward both of
     // the ids below from their WindowProc with wParam and lParam
     // unchanged.
@@ -175,6 +184,10 @@ public:
     // Ctrl+click: jump to the most recently used other window, which
     // makes repeated Ctrl+clicks toggle between the two most recent.
     static constexpr UINT kToggleClickMessage = WM_APP + 15;
+    // A press on the taskbar outside every app button. lParam is the
+    // point, packed with MAKELPARAM (16-bit signed halves cover any
+    // desktop this app will meet); wParam is 1 when Shift was held.
+    static constexpr UINT kEmptyClickMessage = WM_APP + 17;
 
     // A press the shield swallowed on the taskbar's behalf, to be sent
     // again now that the shield is open. wParam is the original mouse
@@ -198,6 +211,7 @@ private:
     bool Install();
     void Uninstall();
     int HitTest(POINT screenPt) const;
+    std::function<void(POINT, bool)> onEmptyClick_;
     void ApplyPassThrough(bool on);
 
     HWND messageWindow_;

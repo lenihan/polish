@@ -304,6 +304,20 @@ bool TaskbarHook::HandleMouseEvent(WPARAM message, POINT screenPt, DWORD mouseDa
         return true;
     }
 
+    // A plain click on the taskbar that is not over an app button. Reported,
+    // never swallowed. Ctrl and Alt mean the user is doing something else;
+    // Shift is meaningful (it reverses, as it does for Tab).
+    if (message == WM_LBUTTONDOWN && index < 0 && !ctrlHeld &&
+        (GetKeyState(VK_MENU) & 0x8000) == 0) {
+        const HWND root = GetAncestor(WindowFromPoint(screenPt), GA_ROOT);
+        wchar_t className[32] = L"";
+        if (root != nullptr && GetClassNameW(root, className, 32) > 0 &&
+            (wcscmp(className, L"Shell_TrayWnd") == 0 || wcscmp(className, L"Shell_SecondaryTrayWnd") == 0)) {
+            PostMessageW(messageWindow_, kEmptyClickMessage, IsShiftHeld() ? 1 : 0,
+                         MAKELPARAM(static_cast<short>(screenPt.x), static_cast<short>(screenPt.y)));
+        }
+    }
+
     // Only ever open over the strip. The shield covers nothing else, so
     // opening it while the pointer is elsewhere buys nothing -- and costs
     // a great deal: it stays open, and the moment the pointer returns to
@@ -338,6 +352,12 @@ void TaskbarHook::HandleHookMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         pendingReplayMessage_ = WM_NULL;
         pendingReplayNeedsRelease_ = false;
         ReplayButtonDown(wParam, static_cast<DWORD>(lParam), release);
+        return;
+    }
+    if (message == kEmptyClickMessage) {
+        if (onEmptyClick_) {
+            onEmptyClick_(POINT{static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam))}, wParam != 0);
+        }
         return;
     }
     const auto generation = static_cast<uint64_t>(wParam);

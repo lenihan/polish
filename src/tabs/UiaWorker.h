@@ -35,6 +35,10 @@ inline constexpr UINT kSelectionReadyMessage = WM_APP + 0x52;
 // disable itself rather than wait forever.
 inline constexpr UINT kTaskbarButtonsReadyMessage = WM_APP + 0x53;
 
+// Posted when a taskbar empty-space check finishes (see
+// RequestTaskbarEmptyCheck). WPARAM is that request's generation.
+inline constexpr UINT kTaskbarEmptyReadyMessage = WM_APP + 0x54;
+
 // Owns the process's single UI Automation client, and the thread every
 // UIA call runs on. Three unrelated jobs ride on it rather than paying
 // for a thread and a UIA client each: reading a window's document tabs
@@ -95,6 +99,15 @@ public:
     // actually changes (UIA structure/bounds events, WM_DISPLAYCHANGE,
     // explorer restarting), with a low-frequency timer as a safety net.
     uint64_t RequestTaskbarButtons();
+
+    // Queue "is `screenPoint` on empty taskbar, i.e. inside no button?".
+    // The answer arrives as kTaskbarEmptyReadyMessage and is readable via
+    // LatestTaskbarEmptyCheck(). Done with a full walk of the taskbar's
+    // tree at click time (~30ms) rather than kept cached: UIA's
+    // ElementFromPoint stops at the taskbar's top-level pane and never
+    // reaches the XAML buttons inside it, so the rects are the only
+    // reliable answer.
+    uint64_t RequestTaskbarEmptyCheck(POINT screenPoint);
 
     // Queue "make the tab at `index` in generation `generation` the
     // frontmost one". Ignored by the worker if its cached elements have
@@ -167,6 +180,15 @@ public:
         bool taskbarUsable = false;
     };
 
+    struct TaskbarEmptyResult {
+        POINT point{};
+        // True only when the taskbar was read successfully and the point
+        // lies inside none of its buttons. A failed read is never "empty".
+        bool empty = false;
+        uint64_t generation = 0;
+    };
+    TaskbarEmptyResult LatestTaskbarEmptyCheck() const;
+
     // The most recent completed taskbar enumeration. Cheap and
     // lock-guarded. NOT safe to call from a low-level hook callback --
     // it takes a lock the worker thread also holds, and a hook that
@@ -175,11 +197,12 @@ public:
 
 private:
     struct Request {
-        enum class Kind { Enumerate, Activate, SelectionRect, TaskbarButtons } kind = Kind::Enumerate;
+        enum class Kind { Enumerate, Activate, SelectionRect, TaskbarButtons, TaskbarEmpty } kind = Kind::Enumerate;
         HWND window = nullptr;
         TabRule rule;
         uint64_t generation = 0;
         size_t index = 0;
+        POINT point{};
     };
 
     void ThreadMain();
@@ -188,6 +211,7 @@ private:
     void Activate(const Request& request);
     void ResolveSelection(const Request& request);
     void EnumerateTaskbarButtons(const Request& request);
+    void CheckTaskbarEmpty(const Request& request);
 
     HWND notifyWindow_;
     std::thread thread_;
@@ -199,6 +223,7 @@ private:
     Snapshot snapshot_;                    // guarded by mutex_
     SelectionSnapshot selectionSnapshot_;  // guarded by mutex_
     TaskbarSnapshot taskbarSnapshot_;      // guarded by mutex_
+    TaskbarEmptyResult taskbarEmpty_;      // guarded by mutex_
 
     // Worker-thread-only state. Declared here rather than as locals so the
     // enumerated elements survive between an Enumerate and the Activate

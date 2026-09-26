@@ -323,6 +323,26 @@ UiaWorker::SelectionSnapshot UiaWorker::LatestSelection() const {
     return selectionSnapshot_;
 }
 
+uint64_t UiaWorker::RequestTaskbarEmptyCheck(POINT screenPoint) {
+    const uint64_t generation = nextGeneration_.fetch_add(1);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::erase_if(queue_, [](const Request& r) { return r.kind == Request::Kind::TaskbarEmpty; });
+        Request request;
+        request.kind = Request::Kind::TaskbarEmpty;
+        request.generation = generation;
+        request.point = screenPoint;
+        queue_.push_back(std::move(request));
+    }
+    wake_.notify_one();
+    return generation;
+}
+
+UiaWorker::TaskbarEmptyResult UiaWorker::LatestTaskbarEmptyCheck() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return taskbarEmpty_;
+}
+
 UiaWorker::TaskbarSnapshot UiaWorker::LatestTaskbarButtons() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return taskbarSnapshot_;
@@ -370,6 +390,9 @@ void UiaWorker::ThreadMain() {
                 break;
             case Request::Kind::TaskbarButtons:
                 EnumerateTaskbarButtons(request);
+                break;
+            case Request::Kind::TaskbarEmpty:
+                CheckTaskbarEmpty(request);
                 break;
         }
     }
@@ -716,6 +739,71 @@ void UiaWorker::EnumerateTaskbarButtons(const Request& request) {
                              GetTickCount64() - startTick));
     }
     PostMessageW(notifyWindow_, kTaskbarButtonsReadyMessage, static_cast<WPARAM>(request.generation), 0);
+}
+
+void UiaWorker::CheckTaskbarEmpty(const Request& request) {
+    bool readOk = false;
+    bool insideButton = false;
+
+    IUIAutomation* uia = state_->uia.Get();
+    // The taskbar window containing the point. Its own shield sits over the
+    // strip, so the shield is never what is wanted here -- walk from the
+    // taskbar windows themselves.
+    HWND taskbar = nullptr;
+    if (uia != nullptr) {
+        for (const wchar_t* cls : {L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd"}) {
+            HWND candidate = nullptr;
+            while ((candidate = FindWindowExW(nullptr, candidate, cls, nullptr)) != nullptr) {
+                RECT bounds{};
+                if (GetWindowRect(candidate, &bounds) && PtInRect(&bounds, request.point)) {
+                    taskbar = candidate;
+                    break;
+                }
+            }
+            if (taskbar != nullptr) {
+                break;
+            }
+        }
+    }
+
+    ComPtr<IUIAutomationElement> root;
+    if (taskbar != nullptr && SUCCEEDED(uia->ElementFromHandle(taskbar, &root)) && root) {
+        VARIANT type;
+        VariantInit(&type);
+        type.vt = VT_I4;
+        type.lVal = UIA_ButtonControlTypeId;
+        ComPtr<IUIAutomationCondition> isButton;
+        ComPtr<IUIAutomationCacheRequest> cache;
+        if (SUCCEEDED(uia->CreatePropertyCondition(UIA_ControlTypePropertyId, type, &isButton)) && isButton &&
+            SUCCEEDED(uia->CreateCacheRequest(&cache)) && cache) {
+            cache->AddProperty(UIA_BoundingRectanglePropertyId);
+            cache->put_TreeScope(TreeScope_Element);
+            ComPtr<IUIAutomationElementArray> found;
+            if (SUCCEEDED(root->FindAllBuildCache(TreeScope_Descendants, isButton.Get(), cache.Get(), &found)) &&
+                found) {
+                readOk = true;
+                int count = 0;
+                found->get_Length(&count);
+                for (int i = 0; i < count && !insideButton; ++i) {
+                    ComPtr<IUIAutomationElement> element;
+                    RECT rect{};
+                    if (SUCCEEDED(found->GetElement(i, &element)) && element &&
+                        SUCCEEDED(element->get_CachedBoundingRectangle(&rect)) && PtInRect(&rect, request.point)) {
+                        insideButton = true;
+                    }
+                }
+            }
+        }
+        VariantClear(&type);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        taskbarEmpty_.point = request.point;
+        taskbarEmpty_.empty = readOk && !insideButton;
+        taskbarEmpty_.generation = request.generation;
+    }
+    PostMessageW(notifyWindow_, kTaskbarEmptyReadyMessage, static_cast<WPARAM>(request.generation), 0);
 }
 
 }  // namespace polish
