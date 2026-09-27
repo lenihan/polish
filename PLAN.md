@@ -353,6 +353,19 @@ current todo list.
   alpha (those pixels sit behind the target, so only its own border ever
   samples them), giving that border a uniform backdrop. Wants a live
   look before this moves out of "needs verifying".
+- Taskbar: closing an app's last window from the hover panel closes the
+  panel, instead of leaving it on screen still listing the window that
+  was just closed. The open panel was tracked purely by its *index* into
+  the button list, and an index only means anything against the list it
+  came from: losing the app's button shifts every later button down one,
+  so the stored index then named a different app's button -- or pointed
+  past the end of a shorter list, where the refresh check silently did
+  nothing at all. It now also remembers which button that index *means*
+  (AppUserModelID plus the taskbar it is on) and re-locates it after every
+  read, closing the panel when the button is gone. A pinned app was always
+  the easy half of this and still is: its button survives with no windows
+  left, so the membership check finds the list empty and closes the panel
+  itself.
 - Halo: an elevated window gets a halo that is actually on top of the
   windows it covers. The halo pins itself directly beneath its target,
   which needs the target's HWND as `hWndInsertAfter` -- and UIPI refuses
@@ -409,6 +422,7 @@ current todo list.
   Ctrl+right-click still reaches it.
 
 ## Left to do
+- Remove Groups: Too hacky. Does not support UWP.
 - Halo: When an active app closes, it's halo stays
 - Taskbar: the shield tracks the strip via taskbar LOCATIONCHANGE events
   with a 120ms debounce, measured at 210ms from a window appearing to the

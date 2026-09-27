@@ -3057,6 +3057,12 @@ std::vector<std::vector<HWND>> g_taskbarButtonWindows;
 std::unique_ptr<polish::AltTabListWindow> g_taskbarPanel;
 // Which button the panel is currently open for, or -1.
 int g_taskbarPanelButton = -1;
+// Which button that index *means*. The index alone does not survive a
+// taskbar read: closing an app's last window removes its button and
+// shifts every later one down, so the stored index then names a
+// different app -- or none at all. See RemapOpenTaskbarPanelButton.
+std::wstring g_taskbarPanelAppId;
+HMONITOR g_taskbarPanelTaskbar = nullptr;
 // The panel's rows, in the order it is drawing them -- which is not the
 // order the windows came in, since minimized rows are partitioned to the
 // end. Kept so a click can highlight the row it just activated without
@@ -3372,6 +3378,38 @@ void RequestTaskbarRefresh() {
 }
 
 // Applies one finished read to the shield and the hook.
+// Follows the open panel's button through a taskbar read that added or
+// removed buttons, and closes the panel when that button is gone.
+//
+// The panel is addressed by index everywhere else, and an index is only
+// meaningful against the button list it came from. Closing an app's last
+// window from the panel removes its button, which shifts every later
+// button down one: the stored index then either names a different app's
+// button, or points past the end of a shorter list -- in which case the
+// refresh below was skipped entirely and the panel was left on screen,
+// still listing the window that had just been closed. That is the bug
+// this exists for, reported as "close every window in the hover panel and
+// the last one stays, and so does the panel".
+//
+// A pinned app is the other half of the same case and needs none of this:
+// its button survives with no windows left, so the membership check sees
+// the list empty and OpenTaskbarPanel closes the panel itself.
+void RemapOpenTaskbarPanelButton() {
+    if (g_taskbarPanelButton < 0) {
+        return;
+    }
+    for (size_t i = 0; i < g_taskbarButtons.size(); ++i) {
+        if (g_taskbarButtons[i].appId == g_taskbarPanelAppId &&
+            g_taskbarButtons[i].taskbar == g_taskbarPanelTaskbar) {
+            g_taskbarPanelButton = static_cast<int>(i);
+            return;
+        }
+    }
+    polish::LogDebug(L"[Polish] Taskbar: the panel's own button is gone (its app's last window closed), "
+                     L"closing the panel");
+    CloseTaskbarPanel();
+}
+
 void ApplyTaskbarRead(uint64_t generation) {
     if (!g_settings.taskbarEnabled || g_uiaWorker == nullptr || g_taskbarShield == nullptr ||
         g_taskbarHook == nullptr) {
@@ -3422,6 +3460,9 @@ void ApplyTaskbarRead(uint64_t generation) {
     if (!unchanged) {
         g_taskbarButtons = snapshot.buttons;
         g_taskbarGeneration = generation;
+        // Before RebuildTaskbarTargets, which checks the panel's window
+        // list *by index* against the list that has just been replaced.
+        RemapOpenTaskbarPanelButton();
         // A button appearing or disappearing can mean the app being
         // cycled has closed its last window, or has gained one that the
         // frozen order does not know about.
@@ -3673,6 +3714,8 @@ void CloseTaskbarPanel() {
         return;
     }
     g_taskbarPanelButton = -1;
+    g_taskbarPanelAppId.clear();
+    g_taskbarPanelTaskbar = nullptr;
     g_taskbarKeyIndex = -1;
     if (g_altTabHook) {
         g_altTabHook->SetExternalSessionActive(false);
@@ -3780,6 +3823,8 @@ void OpenTaskbarPanel(int index) {
     }
     g_taskbarPanel->Show(rows, selected, MonitorFromRect(&button.rect, MONITOR_DEFAULTTONEAREST));
     g_taskbarPanelButton = index;
+    g_taskbarPanelAppId = button.appId;
+    g_taskbarPanelTaskbar = button.taskbar;
     // From here the panel claims the navigation, row-action, Escape,
     // Enter and N keys -- see AltTabHook::SetExternalSessionActive.
     if (g_altTabHook) {
