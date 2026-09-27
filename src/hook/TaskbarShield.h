@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <optional>
 #include <vector>
 
 #include "windowtracking/TaskbarButtons.h"
@@ -33,7 +34,9 @@ namespace polish {
 //   - Alpha must be 1, not 0. A fully transparent layered window is
 //     excluded from hit-testing entirely, so at alpha 0 it would receive
 //     nothing and therefore block nothing. 1/255 of black over the
-//     taskbar is not perceptible.
+//     taskbar is not perceptible. That is per-pixel alpha
+//     (UpdateLayeredWindow), not a window-wide LWA_ALPHA, because the
+//     same surface also draws the hover highlight -- see SetHighlight.
 //   - The strip moves. Buttons shift when an app opens or closes, the
 //     taskbar auto-hides, monitors change, and explorer restarts. Update
 //     is expected to be called on every one of those.
@@ -94,6 +97,25 @@ public:
     // nothing about the shield's own state reveals it.
     bool CoversPoint(POINT screenPoint) const;
 
+    // Draws Polish's own hover highlight behind the button at
+    // `buttonRect` (screen coordinates), or clears it when empty.
+    //
+    // It exists because the shield took the native one away. The taskbar
+    // lights up the button under the pointer, and it does that by
+    // receiving the pointer -- which is exactly what this window stops.
+    // Nothing else can put it back: the highlight is drawn by explorer
+    // inside its own XAML tree and there is no API to ask for it.
+    //
+    // Drawn by the shield rather than by a window of its own because the
+    // shield is already exactly over the strip, already above the
+    // taskbar, and in the UIAccess build already in the band that wins
+    // while the Start menu is open (docs/UIACCESS.md). A second window
+    // would have to be kept in step with all three.
+    //
+    // Cheap to call repeatedly: a call naming the same button as the last
+    // one returns without repainting.
+    void SetHighlight(std::optional<RECT> buttonRect);
+
     // Uncovers every strip, leaving the native taskbar completely
     // untouched. The tray toggle's off switch, and what the destructor
     // does implicitly.
@@ -107,14 +129,23 @@ private:
         // Consecutive Updates in which this taskbar was absent from the
         // buttons. See Update: one absence is not evidence of anything.
         int missedUpdates = 0;
+        // The size the current layered surface was rendered at, so a
+        // reposition that does not resize the strip skips the repaint.
+        SIZE renderedSize{};
+        bool renderedHighlight = false;
+        RECT renderedHighlightRect{};
     };
 
     HWND CreateShieldWindow();
+    // Repaints one shield's layered surface: alpha 1 everywhere, plus the
+    // highlight if it falls on this taskbar.
+    void Render(Shield& shield);
 
     HINSTANCE instance_;
     std::vector<Shield> shields_;
     bool passThrough_ = false;
     unsigned passThroughOpens_ = 0;
+    std::optional<RECT> highlight_;
 };
 
 }  // namespace polish

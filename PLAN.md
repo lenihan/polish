@@ -188,14 +188,19 @@ current todo list.
   This was a real, ordinary cause of the native flyout reappearing --
   about ten flyout dwells of exposure per failed read, worst right after an
   explorer restart. See docs/LIMITATIONS.md #24.
-- Taskbar (next, gated on a spike): suppress the native hover flyout
-  *inside* explorer.exe via a Windhawk mod, keeping the shield as the
-  fallback. Step 0 is to install Windhawk and confirm the upstream
-  "Disable Taskbar Thumbnails" mod (mode Disabled) works on this build --
-  26200.9457, Taskbar.View.dll 2607.28001 -- before building anything. The
-  mod would no-op the hover flyout only while Polish's single-instance
-  mutex exists and Ctrl is not held, so quitting Polish restores native
-  behaviour with no cleanup.
+- Taskbar: the shield survives the Start menu, via a UIAccess build.
+  While Start or Search is open the shell raises the taskbar into the
+  MOGO z-band (6), above an ordinary topmost window, and the native
+  flyout came back on top of Polish's list. A process holding a UIAccess
+  token has its windows placed in the UIACCESS band (2), which outranks
+  it -- measured on 26200.9457: taskbar 6, shield 2, `WindowFromPoint`
+  over a button still the shield. So `polish_uia.exe` is a second target
+  built from the same sources with `uiAccess="true"`, signed and
+  installed under `%ProgramFiles%` (`tools/uiaccess/`, `docs/UIACCESS.md`);
+  `polish.exe` stays `asInvoker` for development. Verified live with a
+  real Start click, an explorer restart, right/middle-click and the Ctrl
+  escape hatch. This replaces the Windhawk plan that stood here --
+  nothing is injected into explorer.exe.
 - Taskbar: an open hover panel is a live view -- opening or closing a
   window of the app whose list is on screen adds or removes a row,
   rather than leaving a header that disagrees with its own rows. Its row
@@ -348,16 +353,46 @@ current todo list.
   alpha (those pixels sit behind the target, so only its own border ever
   samples them), giving that border a uniform backdrop. Wants a live
   look before this moves out of "needs verifying".
+- Taskbar: Polish draws the hover highlight the shield took away. The
+  taskbar lights the button under the pointer by *receiving* the pointer,
+  which is exactly what the shield stops, and there is no API to ask
+  explorer for it -- so the shield draws it: a faint rounded fill inset a
+  few pixels inside the button, light-on-dark or dark-on-light by the
+  taskbar's own theme (SystemUsesLightTheme, which is a different setting
+  from the app theme the rest of Polish follows). Drawn by the shield
+  rather than a window of its own because the shield is already exactly
+  over the strip, already above the taskbar, and already in the band that
+  wins while Start is open. That meant moving it from a window-wide
+  LWA_ALPHA to per-pixel alpha (UpdateLayeredWindow): every pixel stays at
+  alpha 1, invisible but still in the hit-test, with the highlight painted
+  over it. Nothing is drawn while the taskbar has the pointer back --
+  Ctrl held, or the shield bypassed -- since the taskbar lights the button
+  itself then and two highlights would stack.
+- Taskbar: clicking empty taskbar drives Alt+Tab with no keyboard. The
+  first click opens the window switcher, each further click is one Tab
+  press and Shift+click one Shift+Tab, and moving the pointer off the
+  taskbar commits the highlighted window -- the mouse's version of
+  releasing Alt. Because committing puts that window at the front of the
+  MRU order, leaving and clicking again lands back on the one you came
+  from, so two windows can be alternated by clicking the taskbar alone.
+  Escape cancels, Enter commits, a press on an app button stands the
+  session down. "Empty" is decided by a UIA read of the taskbar's own
+  button rects at click time (~30ms): `ElementFromPoint` stops at the
+  taskbar's top-level pane and never reaches the XAML buttons inside it,
+  so the rects are the only honest answer, and Start and the tray icons
+  keep their own behaviour.
+- Taskbar: right-clicking empty taskbar does the same for Alt+` -- the
+  tab switcher for the app that was last in front, cycled by further
+  right-clicks and reversed with Shift. The app is taken from the
+  activation history rather than `GetForegroundWindow`, which by then
+  answers "the shell": clicking the taskbar takes the foreground away.
+  Committing raises that window along with the chosen tab. This is the
+  one gesture that is swallowed rather than replayed, since the native
+  taskbar context menu would otherwise open on top of the list;
+  Ctrl+right-click still reaches it.
 
 ## Left to do
-- Remove Groups: Too hacky. Does not support UWP.
-- Taskbar: click on empty taskbar opens alttab. Click again to go to next. Shift+click to go backward
-- Taskbar: right click on empty taskbar opents `tab. Right click again to go to next. Shift+Right Click to go backward
 - Halo: When an active app closes, it's halo stays
-- Taskbar: the taskbar's own hover highlight is gone, since the shield
-  owns the pointer over the strip and the taskbar never sees it. Polish
-  should draw its own, or this should be a decision rather than a
-  leftover.
 - Taskbar: the shield tracks the strip via taskbar LOCATIONCHANGE events
   with a 120ms debounce, measured at 210ms from a window appearing to the
   shield being correct -- under the native flyout's 250-450ms dwell, so
@@ -375,7 +410,6 @@ current todo list.
   window that is minimized or fully covered shows nothing at all. The
   panel skips minimized rows for this reason; a covered one still shows
   nothing.
-- Alttab: Click empty taskbar to bring up
 - Screencapture: capture larger than screen
 - Move/resize windows: need mode that makes this easy
 - Fix halo: when you activate window from taskbar, it doesn't get halo
@@ -419,13 +453,6 @@ current todo list.
   move target (not just the title bar), and resizing snaps to screen/
   other-window edges. Resizing area should be finger friendly. 
   Slick ui that flips windows around with move/resize controls
-- Taskbar: clicking a taskbar app icon should cycle through that app's
-  windows in MRU order (native Windows does this by Z-order, not MRU) —
-  same MRU-ordering idea as the Alt+backtick item above.
-- Taskbar: hovering a taskbar app icon should show its windows with
-  thumbnails for active ones and plain text for minimized ones.
-- Taskbar: that hover preview should let you minimize/maximize/restore/
-  close each window directly, without switching to it first.
 - Virtual desktops: remember which apps were on a desktop and offer to
   reload them.
 - Virtual desktops: an app pinned to show on all desktops should keep
@@ -434,11 +461,21 @@ current todo list.
   on.
 - Virtual desktops: use visuals generally to make the whole concept
   easier to understand (exact treatment still unscoped).
-- Add mouse "sticky" to keep pointer on app rather than traveling to next
-  screen. Like for snapping and trying to access tools on the border.
-- Add mouse "sticky" for hidden taskbar to keep pointer on app rather than 
-  making taskbar unhide
 - Do a full `docs/LIMITATIONS.md` pass and manual test matrix.
 - Backlog, not yet scoped: paste history popup,
   Quick Access rename without renaming the file, radial start menu,
-  reorder windows within a taskbar group, consider a WinUI3 rewrite.
+  consider a WinUI3 rewrite.
+
+### Mouse sticky
+
+Resistance at the edges the pointer keeps crossing by accident. One
+mechanism -- the pointer slows or stops at a boundary until it is pushed
+through deliberately -- with several places that want it. Not a taskbar
+feature: the taskbar is only one of the edges.
+
+- The edge between monitors, so a pointer aimed at something near the
+  border does not shoot onto the next screen.
+- The screen border itself, when reaching for snap targets or tools that
+  live there.
+- An auto-hidden taskbar, so passing near the bottom of the screen does
+  not unhide it.

@@ -1,5 +1,11 @@
 #include "hook/TaskbarShield.h"
 
+// objidl.h before gdiplus.h: GDI+ headers use IStream and friends
+// without declaring them, and this project builds WIN32_LEAN_AND_MEAN.
+#include <objidl.h>
+
+#include <gdiplus.h>
+
 #include <algorithm>
 
 #include "windowtracking/TaskbarReadPolicy.h"
@@ -13,6 +19,78 @@ constexpr wchar_t kClassName[] = L"PolishTaskbarShield";
 // Out of 255, and it must not be 0 -- see the class comment. This is the
 // smallest value that still leaves the window in the hit-test.
 constexpr BYTE kShieldAlpha = 1;
+
+// The hover highlight, in logical pixels, scaled to the monitor's DPI at
+// paint time. Sized against a Windows 11 button (44x48 logical): the fill
+// sits a few pixels inside the button on every side, the way the native
+// one does, rather than filling the whole cell edge to edge.
+constexpr int kHighlightInsetXDip = 4;
+constexpr int kHighlightInsetYDip = 5;
+constexpr int kHighlightRadiusDip = 6;
+
+// How strongly the fill reads against the taskbar. Deliberately faint:
+// this is "the pointer is here", not a selection. Light-on-dark and
+// dark-on-light, matching whichever way the taskbar itself is painted.
+constexpr BYTE kHighlightAlphaDark = 30;
+constexpr BYTE kHighlightAlphaLight = 26;
+
+// GDI+ needs one-time process startup. Same function-local-static shape,
+// and for the same reason, as AltTabHighlightBorder's own copy: this app
+// is tray-resident for its whole lifetime and exits the process directly,
+// so there is no meaningful moment to call GdiplusShutdown.
+void EnsureGdiplusStarted() {
+    static const struct GdiplusInit {
+        ULONG_PTR token = 0;
+        GdiplusInit() {
+            Gdiplus::GdiplusStartupInput input;
+            Gdiplus::GdiplusStartup(&token, &input, nullptr);
+        }
+    } kInit;
+    (void)kInit;
+}
+
+// The taskbar follows "Windows mode" (SystemUsesLightTheme), which is a
+// different setting from the app theme every other window in this app
+// asks polish::IsDarkModeEnabled() about (AppsUseLightTheme). The two can
+// be set independently, and this paint lands on the taskbar.
+bool TaskbarIsDark() {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ,
+                      &key) != ERROR_SUCCESS) {
+        return true;  // dark is the default, and the safer guess on failure
+    }
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    DWORD type = REG_DWORD;
+    const bool ok = RegQueryValueExW(key, L"SystemUsesLightTheme", nullptr, &type,
+                                     reinterpret_cast<BYTE*>(&value), &size) == ERROR_SUCCESS &&
+                    type == REG_DWORD;
+    RegCloseKey(key);
+    return ok ? value == 0 : true;
+}
+
+// Premultiplies B/G/R by A in place -- required before UpdateLayeredWindow
+// with ULW_ALPHA, and not something GDI+ does when drawing into a buffer
+// we own.
+void PremultiplyAlpha(BYTE* pixels, int pixelCount) {
+    for (int i = 0; i < pixelCount; ++i) {
+        BYTE* p = pixels + i * 4;
+        const BYTE a = p[3];
+        p[0] = static_cast<BYTE>(p[0] * a / 255);
+        p[1] = static_cast<BYTE>(p[1] * a / 255);
+        p[2] = static_cast<BYTE>(p[2] * a / 255);
+    }
+}
+
+void AddRoundedRectPath(Gdiplus::GraphicsPath& path, float x, float y, float w, float h, float radius) {
+    const float d = radius * 2;
+    path.AddArc(x, y, d, d, 180.0f, 90.0f);
+    path.AddArc(x + w - d, y, d, d, 270.0f, 90.0f);
+    path.AddArc(x + w - d, y + h - d, d, d, 0.0f, 90.0f);
+    path.AddArc(x, y + h - d, d, d, 90.0f, 90.0f);
+    path.CloseFigure();
+}
 
 LRESULT CALLBACK ShieldProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_NCHITTEST) {
@@ -85,7 +163,9 @@ HWND TaskbarShield::CreateShieldWindow() {
     HWND window = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW, kClassName,
                                   L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr, instance_, nullptr);
     if (window != nullptr) {
-        SetLayeredWindowAttributes(window, 0, kShieldAlpha, LWA_ALPHA);
+        // No SetLayeredWindowAttributes: the surface is painted per-pixel
+        // by Render, and the two ways of making a layered window
+        // translucent are mutually exclusive.
         if (passThrough_) {
             // A taskbar that appeared mid-gesture (explorer restarting
             // under a held button) must match the shields that already
@@ -115,6 +195,100 @@ void TaskbarShield::SetPassThrough(bool passThrough) {
         // the low-level mouse hook where anything that could pump
         // messages is out of the question.
         SetWindowLongPtrW(shield.window, GWL_EXSTYLE, updated);
+    }
+}
+
+void TaskbarShield::Render(Shield& shield) {
+    const int width = shield.rect.right - shield.rect.left;
+    const int height = shield.rect.bottom - shield.rect.top;
+    if (shield.window == nullptr || width <= 0 || height <= 0) {
+        return;
+    }
+    RECT overlap{};
+    const bool showHighlight =
+        highlight_.has_value() && IntersectRect(&overlap, &shield.rect, &*highlight_) != FALSE;
+    const RECT wanted = showHighlight ? *highlight_ : RECT{};
+    if (shield.renderedSize.cx == width && shield.renderedSize.cy == height &&
+        shield.renderedHighlight == showHighlight && EqualRect(&shield.renderedHighlightRect, &wanted)) {
+        return;  // nothing about the surface would change
+    }
+
+    BITMAPINFO bmi{};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;  // negative = top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (dib == nullptr || bits == nullptr) {
+        return;
+    }
+
+    // The whole surface at alpha 1: invisible, but still in the hit-test,
+    // which is the shield's entire reason to exist.
+    BYTE* pixels = static_cast<BYTE*>(bits);
+    for (int i = 0; i < width * height; ++i) {
+        pixels[i * 4 + 0] = 0;
+        pixels[i * 4 + 1] = 0;
+        pixels[i * 4 + 2] = 0;
+        pixels[i * 4 + 3] = kShieldAlpha;
+    }
+
+    if (showHighlight) {
+        EnsureGdiplusStarted();
+        const UINT dpi = GetDpiForWindow(shield.window);
+        const auto scale = [dpi](int dip) { return MulDiv(dip, static_cast<int>(dpi), 96); };
+        const float insetX = static_cast<float>(scale(kHighlightInsetXDip));
+        const float insetY = static_cast<float>(scale(kHighlightInsetYDip));
+        const float radius = static_cast<float>(scale(kHighlightRadiusDip));
+        const float x = static_cast<float>(wanted.left - shield.rect.left) + insetX;
+        const float y = static_cast<float>(wanted.top - shield.rect.top) + insetY;
+        const float w = static_cast<float>(wanted.right - wanted.left) - insetX * 2;
+        const float h = static_cast<float>(wanted.bottom - wanted.top) - insetY * 2;
+        if (w > 0 && h > 0) {
+            const bool dark = TaskbarIsDark();
+            const Gdiplus::Color fill(dark ? kHighlightAlphaDark : kHighlightAlphaLight, dark ? 255 : 0,
+                                      dark ? 255 : 0, dark ? 255 : 0);
+            Gdiplus::Bitmap bitmap(width, height, width * 4, PixelFormat32bppARGB, pixels);
+            Gdiplus::Graphics graphics(&bitmap);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+            Gdiplus::GraphicsPath path;
+            AddRoundedRectPath(path, x, y, w, h, std::min(radius, std::min(w, h) / 2));
+            Gdiplus::SolidBrush brush(fill);
+            graphics.FillPath(&brush, &path);
+        }
+    }
+
+    PremultiplyAlpha(pixels, width * height);
+
+    HDC screenDC = GetDC(nullptr);
+    HDC memDC = CreateCompatibleDC(screenDC);
+    HBITMAP oldBitmap = static_cast<HBITMAP>(SelectObject(memDC, dib));
+    POINT source{0, 0};
+    SIZE size{width, height};
+    POINT destination{shield.rect.left, shield.rect.top};
+    BLENDFUNCTION blend{AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    UpdateLayeredWindow(shield.window, screenDC, &destination, &size, memDC, &source, 0, &blend, ULW_ALPHA);
+    SelectObject(memDC, oldBitmap);
+    DeleteDC(memDC);
+    ReleaseDC(nullptr, screenDC);
+    DeleteObject(dib);
+
+    shield.renderedSize = size;
+    shield.renderedHighlight = showHighlight;
+    shield.renderedHighlightRect = wanted;
+}
+
+void TaskbarShield::SetHighlight(std::optional<RECT> buttonRect) {
+    if (highlight_.has_value() == buttonRect.has_value() &&
+        (!highlight_.has_value() || EqualRect(&*highlight_, &*buttonRect))) {
+        return;
+    }
+    highlight_ = buttonRect;
+    for (Shield& shield : shields_) {
+        Render(shield);
     }
 }
 
@@ -158,6 +332,10 @@ void TaskbarShield::Update(const std::vector<TaskbarButton>& buttons) {
                      SWP_NOACTIVATE | SWP_SHOWWINDOW | (moved ? 0 : SWP_NOMOVE | SWP_NOSIZE));
         shield->rect = strip.rect;
         shield->missedUpdates = 0;
+        // After the move, so the surface is painted at the size the
+        // window now has. UpdateLayeredWindow also carries the position,
+        // which is why this cannot run before SetWindowPos.
+        Render(*shield);
     }
 
     // A taskbar that has gone away (monitor disconnected) or has no app
@@ -180,6 +358,7 @@ void TaskbarShield::Update(const std::vector<TaskbarButton>& buttons) {
         if (++shield.missedUpdates >= kBadReadsBeforeDegrade) {
             ShowWindow(shield.window, SW_HIDE);
             shield.rect = RECT{};
+            shield.renderedSize = SIZE{};
         }
     }
 }
@@ -195,10 +374,12 @@ bool TaskbarShield::CoversPoint(POINT screenPoint) const {
 }
 
 void TaskbarShield::Hide() {
+    highlight_.reset();
     for (Shield& shield : shields_) {
         if (shield.window != nullptr) {
             ShowWindow(shield.window, SW_HIDE);
             shield.rect = RECT{};
+            shield.renderedSize = SIZE{};
         }
     }
 }

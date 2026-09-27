@@ -491,6 +491,7 @@ bool TaskbarPreviewInProgress();
 // The taskbar hover panel's keyboard surface, needed by the Alt+Tab
 // hook's callbacks above -- both panels share those keys, and which one
 // is showing decides where they go.
+void UpdateTaskbarHoverHighlight();
 bool TaskbarPanelOpen();
 bool TaskbarPanelOwnsKeys();
 void CloseTaskbarPanel();
@@ -3636,6 +3637,9 @@ void OnTaskbarEmptyCheckReady(uint64_t generation) {
 void OnTaskbarButtonsReady(uint64_t generation) {
     g_taskbarRefreshInFlight = false;
     ApplyTaskbarRead(generation);
+    // The strip may have shifted under a resting pointer -- a button
+    // opening or closing re-centres every one of them.
+    UpdateTaskbarHoverHighlight();
     if (g_taskbarRefreshPending) {
         // Whatever asked while that read was out gets its own read now,
         // rather than being answered by one that predates it.
@@ -4263,6 +4267,31 @@ void UpdateTaskbarShieldBypassed() {
     }
 }
 
+// Polish's own hover highlight, since the shield took the taskbar's away
+// (TaskbarShield::SetHighlight). Driven from the cursor's real position
+// rather than the hook's last sighting, so a pointer resting still is
+// still lit -- and so the answer is recomputed by the same 100ms poll
+// that already watches for Ctrl and for the shield being bypassed.
+//
+// Nothing is drawn while the taskbar has the pointer back: with Ctrl
+// held, or the shield bypassed by the raised taskbar, the real taskbar
+// lights the button itself and two highlights would stack.
+void UpdateTaskbarHoverHighlight() {
+    if (!g_taskbarShield) {
+        return;
+    }
+    std::optional<RECT> highlight;
+    POINT cursor{};
+    if (g_settings.taskbarEnabled && !g_taskbarShieldBypassed && !g_taskbarShield->IsPassThrough() &&
+        GetCursorPos(&cursor)) {
+        if (const std::optional<polish::TaskbarButton> button =
+                polish::HitTestTaskbarButton(g_taskbarButtons, cursor)) {
+            highlight = button->rect;
+        }
+    }
+    g_taskbarShield->SetHighlight(highlight);
+}
+
 // The pointer moved onto a different app button, or off the strip
 // (index -1).
 void OnTaskbarHover(uint64_t generation, int index) {
@@ -4275,9 +4304,13 @@ void OnTaskbarHover(uint64_t generation, int index) {
         // The poll timer decides, since it can see both.
         KillTimer(g_messageWindow, kTaskbarDwellTimerId);
         g_taskbarDwellButton = -1;
+        UpdateTaskbarHoverHighlight();
         return;
     }
     SetTimer(g_messageWindow, kTaskbarHoverTimerId, kTaskbarHoverPollMs, nullptr);
+    // On the hover edge as well as in the poll: waiting up to 100ms to
+    // light a button the pointer is already on would read as lag.
+    UpdateTaskbarHoverHighlight();
     if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) {
         // The escape hatch: with Ctrl held the shield is already open and
         // the native flyout is on its way, so Polish shows nothing.
@@ -5415,6 +5448,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 // see, and waiting out the slower timer left the list
                 // standing down for seconds after Start had closed.
                 UpdateTaskbarShieldBypassed();
+                UpdateTaskbarHoverHighlight();
                 POINT cursor{};
                 GetCursorPos(&cursor);
                 // Asked of the cursor's real position rather than of the
@@ -5423,6 +5457,9 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 if (!CursorKeepsTaskbarPanelOpen(cursor)) {
                     CloseTaskbarPanel();
                     KillTimer(hwnd, kTaskbarHoverTimerId);
+                    // Last chance: with the poll stopped, nothing else
+                    // would take the highlight off the button behind.
+                    UpdateTaskbarHoverHighlight();
                 }
             } else if (wParam == kTaskbarRefreshTimerId) {
                 UpdateTaskbarShieldBypassed();
