@@ -56,12 +56,39 @@ namespace {
 // covers only the glow's own middle, which it would cover anyway, and
 // nothing that the target is in front of can ever come between the two.
 // HWND_TOP stays as the fallback for a target that has since died.
-bool PlaceHaloBehindTarget(HWND halo, HWND target, UINT extraFlags) {
+//
+// An elevated target cannot be referenced at all, which is the second
+// fallback. UIPI refuses a z-order reference from this process to a
+// window at a higher integrity level -- measured against Task Manager,
+// where SetWindowPos returns FALSE with GetLastError 5
+// (ERROR_ACCESS_DENIED). The halo was then left wherever it happened to
+// be, which is to say underneath the windows the target is covering:
+// reported as "I alt-tab to it and the halo is behind other windows".
+//
+// Topmost is the only placement left that holds. HWND_TOP does not
+// work, for the reason above, and there is no way to raise an elevated
+// window ourselves either. The cost is that the glow is then above the
+// target rather than beneath it, so the couple of pixels it deliberately
+// underlaps (kUnderlapDip) paint over that window's own border instead
+// of behind it. Only elevated targets pay it -- and it is much the
+// smaller of the two evils next to no halo at all.
+enum class HaloPlacement { BehindTarget, AboveEverything, Failed };
+
+HaloPlacement PlaceHaloBehindTarget(HWND halo, HWND target, UINT extraFlags) {
     const UINT flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | extraFlags;
-    if (target != nullptr && IsWindow(target)) {
-        return SetWindowPos(halo, target, 0, 0, 0, 0, flags) != FALSE;
+    if (target == nullptr || !IsWindow(target)) {
+        return SetWindowPos(halo, HWND_TOP, 0, 0, 0, 0, flags) != FALSE ? HaloPlacement::BehindTarget
+                                                                        : HaloPlacement::Failed;
     }
-    return SetWindowPos(halo, HWND_TOP, 0, 0, 0, 0, flags) != FALSE;
+    if (SetWindowPos(halo, target, 0, 0, 0, 0, flags) != FALSE) {
+        // Also the path back from topmost: a non-topmost hWndInsertAfter
+        // clears WS_EX_TOPMOST on the window being moved (documented), so
+        // switching from an elevated window to an ordinary one puts the
+        // halo back in the normal band without a separate call.
+        return HaloPlacement::BehindTarget;
+    }
+    return SetWindowPos(halo, HWND_TOPMOST, 0, 0, 0, 0, flags) != FALSE ? HaloPlacement::AboveEverything
+                                                                        : HaloPlacement::Failed;
 }
 
 }  // namespace
@@ -167,6 +194,25 @@ ActiveWindowHalo::~ActiveWindowHalo() {
     }
     if (virtualDesktopManager_ != nullptr) {
         virtualDesktopManager_->Release();
+    }
+}
+
+// Logged on change only: ShowAroundTarget runs on every move of the
+// target, and an elevated window being dragged would otherwise write a
+// line per frame.
+void ActiveWindowHalo::NotePlacement(int placement, HWND target) {
+    if (placement == placementLogged_) {
+        return;
+    }
+    placementLogged_ = placement;
+    if (placement == static_cast<int>(HaloPlacement::AboveEverything)) {
+        polish::LogDebug(std::format(
+            L"[Polish] Halo: hwnd={} refused a z-order reference (elevated window), so the halo goes topmost "
+            L"instead of behind it -- see PlaceHaloBehindTarget",
+            reinterpret_cast<void*>(target)));
+    } else if (placement == static_cast<int>(HaloPlacement::Failed)) {
+        polish::LogDebug(std::format(L"[Polish] Halo: WARNING could not place the halo at all for hwnd={}",
+                                     reinterpret_cast<void*>(target)));
     }
 }
 
@@ -294,7 +340,7 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
         // Z-order 60x/sec during a drag.
         UpdateLayeredWindow(window_, nullptr, &dstPoint, nullptr, nullptr, nullptr, 0, nullptr, 0);
         if (!visible_ || targetChanged) {
-            PlaceHaloBehindTarget(window_, target, SWP_SHOWWINDOW);
+            NotePlacement(static_cast<int>(PlaceHaloBehindTarget(window_, target, SWP_SHOWWINDOW)), target);
             visible_ = true;
         } else {
             SetWindowPos(window_, nullptr, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
@@ -327,7 +373,7 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
     // does, harmlessly, since it's session-scoped) would flash the previous
     // frame at the previous position for a persistent overlay that
     // repeatedly re-shows like this one.
-    PlaceHaloBehindTarget(window_, target, SWP_SHOWWINDOW);
+    NotePlacement(static_cast<int>(PlaceHaloBehindTarget(window_, target, SWP_SHOWWINDOW)), target);
     visible_ = true;
 
     polish::LogDebug(std::format(

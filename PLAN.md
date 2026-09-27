@@ -353,6 +353,23 @@ current todo list.
   alpha (those pixels sit behind the target, so only its own border ever
   samples them), giving that border a uniform backdrop. Wants a live
   look before this moves out of "needs verifying".
+- Halo: an elevated window gets a halo that is actually on top of the
+  windows it covers. The halo pins itself directly beneath its target,
+  which needs the target's HWND as `hWndInsertAfter` -- and UIPI refuses
+  that reference across integrity levels: against Task Manager,
+  `SetWindowPos` returned FALSE with `GetLastError` 5
+  (ERROR_ACCESS_DENIED), measured. Nothing handled the failure, so the
+  halo stayed wherever it last was, which is to say underneath the very
+  windows the target was covering -- reported as "I alt-tab to it and the
+  halo is behind other windows". It now falls back to HWND_TOPMOST, the
+  only placement left that holds (HWND_TOP silently does nothing against
+  the foreground window, and an elevated window cannot be raised by this
+  process either). The cost is that the glow then sits above its target,
+  so the couple of pixels it deliberately underlaps paint over that
+  window's own border; only elevated targets pay it. Switching back to an
+  ordinary window clears topmost on its own -- a non-topmost
+  `hWndInsertAfter` does that by definition -- which was verified live
+  along with the z-order in both states.
 - Taskbar: Polish draws the hover highlight the shield took away. The
   taskbar lights the button under the pointer by *receiving* the pointer,
   which is exactly what the shield stops, and there is no API to ask

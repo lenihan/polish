@@ -128,6 +128,8 @@ private:
     void EnsureDibCapacity(int width, int height);
     void ClearRect(const RECT& rect);
     void FollowTargetVirtualDesktop(HWND target);
+    // Takes a HaloPlacement (int, so the enum stays private to the .cpp).
+    void NotePlacement(int placement, HWND target);
 
     HWND window_ = nullptr;
 
@@ -192,6 +194,9 @@ private:
     // simply stop appearing after the user switches away from that
     // desktop.
     GUID lastKnownDesktopId_{};
+    // The last HaloPlacement reported, so NotePlacement logs a change
+    // rather than a line per frame. -1 is "nothing reported yet".
+    int placementLogged_ = -1;
 
     // Created once in the constructor (COM STA is already initialized by
     // then -- see wWinMain); nullptr if CoCreateInstance failed, in which
