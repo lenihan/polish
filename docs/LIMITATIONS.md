@@ -442,6 +442,13 @@ gets a full pass in Phase 3; today it records what's already known.
     across the band boundary. Plain `polish.exe` still has the limitation
     and relies on the mitigations above.
 
+    **Released builds keep the fix.** v1.0 ships through the Microsoft
+    Store's EXE/MSI route precisely so it can carry the UIAccess build:
+    MSIX cannot have UIAccess at all (`%ProgramFiles%\WindowsApps` is
+    excluded from the secure-directory list, and Windows refuses UIAccess
+    to packaged desktop processes), so an MSIX release would reintroduce
+    everything above for every user. See PLAN.md's v1.0 release section.
+
     **Other tools** avoid the whole question by acting inside `explorer.exe`
     (Windhawk's "Disable Taskbar Thumbnails" hooks
     `HoverFlyoutController::ShowTaskListButtonHoverFlyout` and two more,

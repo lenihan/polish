@@ -3,3 +3,5 @@ out/
 .vs/
 *.user
 *.suo
+build-x64/
+dist/

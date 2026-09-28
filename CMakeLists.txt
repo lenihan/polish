@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(polish LANGUAGES CXX)
+# 0.9.x until the Store submission, which takes 1.0.0 -- so the build people
+# can download today is never confused with the one the listing claims.
+project(polish VERSION 0.9.0 LANGUAGES CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Polish targets Windows 11 and only builds on Windows.")
@@ -101,9 +103,15 @@ if(MSVC)
     target_compile_options(polish_core PRIVATE /W4 /permissive- /utf-8)
 endif()
 
+# The VERSIONINFO resource, generated so the version lives only in
+# project(). Without it Explorer's Details tab is blank and the installer
+# has no ProductVersion to read.
+configure_file(resources/version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/version.rc" @ONLY)
+
 add_executable(polish WIN32
     src/main.cpp
     resources/app.rc
+    "${CMAKE_CURRENT_BINARY_DIR}/version.rc"
 )
 
 target_link_libraries(polish PRIVATE polish_core)
@@ -123,6 +131,7 @@ set_target_properties(polish PROPERTIES OUTPUT_NAME "polish")
 add_executable(polish_uia WIN32
     src/main.cpp
     resources/app_uiaccess.rc
+    "${CMAKE_CURRENT_BINARY_DIR}/version.rc"
 )
 target_link_libraries(polish_uia PRIVATE polish_core)
 if(MSVC)

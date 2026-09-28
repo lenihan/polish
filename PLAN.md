@@ -421,6 +421,104 @@ current todo list.
   taskbar context menu would otherwise open on top of the list;
   Ctrl+right-click still reaches it.
 
+## v1.0 release -- Microsoft Store
+
+The route is settled and should not be re-litigated: v1.0 ships through the
+Store's **EXE/MSI route** (Store Policy 10.2.9, available since June 2021),
+where the Store lists the app and launches an installer we host and sign
+ourselves. MSIX was rejected because **MSIX and UIAccess are mutually
+exclusive**, from three independent directions: `C:\Program Files\WindowsApps`
+was deliberately removed from the UIAccess secure-directory list as a
+security mitigation (Project Zero, Feb 2026); Windows refuses UIAccess to
+packaged desktop processes outright ("UI Access is not supported for Desktop
+AppX processes", microsoft/WindowsAppSDK#1669, open since 2021); and
+AutoHotkey's Store edition ships with UIAccess disabled for exactly this
+reason. Going MSIX would mean giving up `polish_uia.exe` and with it the
+Start-open case that #24 documents -- the shield would lose the z-band fight
+again whenever the Start menu or Search is open. The EXE route keeps every
+technique the app currently relies on.
+
+What that route demands, and what shapes most of the work below: `.exe` or
+`.msi` only, **every PE file signed** with a chain to a Microsoft Trusted
+Root, a **versioned HTTPS URL that may never change** once submitted,
+**silent install** (a UAC prompt is allowed), and a standalone offline
+installer rather than a downloader stub.
+
+Decisions taken: everything that works today ships, Groups included; free;
+individual Partner Center account; the Store is the only user-facing
+channel; GPL-3.0; **SignPath Foundation** for signing, which is free for
+open-source projects -- at the cost of the binary's publisher reading
+"SignPath Foundation" rather than a personal name, and manual approval per
+release.
+
+**Sequencing matters more than the individual steps.** Two external
+processes gate everything and have unknown or multi-day latency, so they
+start first: SignPath's approval, and Partner Center's identity
+verification. SignPath also requires the project to be *already publicly
+released in the form to be signed*, which means an unsigned v1.0.0 GitHub
+release has to exist before the signing application can even go in.
+
+- **Licence and repo hygiene.** A `LICENSE` file (GPL-3.0) -- there is none
+  today, and SignPath requires an OSI-approved one. MFA on the GitHub
+  account, also a SignPath requirement. `kAboutUrl` (main.cpp) points at a
+  personal LinkedIn profile and should point at the project's own page.
+  `out.png` and `HANDOFF.md` sit in the repo root, and README still says
+  "No installer", "isn't code-signed yet" and "both features" when there
+  are five.
+- **A version number.** There is none anywhere: `project(polish)` carries no
+  VERSION, and neither `.rc` has a VERSIONINFO block, so Explorer's Details
+  tab is blank and signing tooling has nothing to read. One source of truth
+  in CMake, feeding both resource scripts and the manifests'
+  `assemblyIdentity`.
+- **First-run consent, for Store Policy 10.2.8.** The policy requires user
+  consent before changing the Windows experience and names "undocumented or
+  unsupported APIs in unsupported ways" among unsupported methods --
+  replacing Alt+Tab, shielding the taskbar strip and installing global hooks
+  is squarely that, and this is the likeliest certification failure. A
+  first-run modal names what Polish changes and takes an explicit opt-in;
+  nothing hooks or shields until it is answered. `GroupHotkeyDialog` is the
+  pattern to copy, and the per-feature switches it needs already exist and
+  already restore native behaviour when off. The uxtheme ordinals 135/136 in
+  `DarkMode.cpp` are the only undocumented calls left in shipping code
+  (cosmetic, already null-checked) and are the clearest target to drop;
+  `GetWindowBand` is not actually called anywhere.
+- **Clean uninstall, for Store Policy 10.2.7.** Files, `HKCU\Software\Polish`,
+  the `Run` value, and `%TEMP%\polish.log`.
+  `tools/uiaccess/Uninstall-PolishUiAccess.ps1` already does the file half.
+- **An installer.** WiX/MSI rather than Inno Setup, because `msiexec /qn`
+  satisfies the silent-install requirement for free and MSI gives clean
+  uninstall and an Add-or-Remove-Programs entry without hand-rolling them.
+  It installs to `%ProgramFiles%\Polish` -- a UIAccess requirement, not a
+  preference -- and ships the UIAccess build only; `polish.exe` stays a
+  development target. It handles no certificates at all: a real signature
+  makes `Install-PolishUiAccess.ps1`'s self-signed root-certificate
+  injection unnecessary, which removes the most security-sensitive thing
+  this project currently asks of a machine. Start-at-login keeps working
+  unchanged, since an unpackaged app may still use the `Run` key -- the one
+  thing MSIX would also have broken.
+- **CI.** There is no `.github/` at all; releases are a manual
+  `cmake --build`. A workflow that builds Release, runs the tests, produces
+  the installer and submits it for signing is what makes a release
+  repeatable. The static CRT is already configured, so there is no
+  redistributable to carry.
+- **Partner Center and the listing.** Reserve the name early: "Polish" is a
+  common English word *and* a nationality, and Store naming rules forbid
+  descriptive keywords, so have alternatives ready rather than discovering
+  the problem at submission. A privacy policy URL is mandatory for Win32
+  products (policy 10.5.1) whatever the app collects -- GitHub Pages from
+  this repo, alongside a support page. IARC rating, screenshots, and a full
+  icon/tile asset set, where only a single `.ico` exists today. The listing
+  and submission notes should state the global hooks, the cross-process
+  `SetParent` behind Groups and the UIA read of the taskbar's own button
+  class plainly (policies 10.1.1/10.1.4) rather than leave a certification
+  tester to discover them.
+- **Verify on a clean machine, not this one.** The dev box has a dev
+  certificate in its root store, a stale `%ProgramFiles%\Polish` and an
+  existing `HKCU\Software\Polish`, every one of which would mask a real
+  installer bug. Windows Sandbox or a spare machine; check silent install,
+  first-run consent, the Start-open shield case, a run with every feature
+  switched off, and that uninstall leaves nothing behind.
+
 ## Left to do
 - Remove Groups: Too hacky. Does not support UWP.
 - Halo: When an active app closes, it's halo stays

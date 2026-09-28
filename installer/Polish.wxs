@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+
+<!--
+  The MSI people download and run.
+
+  Two things about it are deliberate and load-bearing:
+
+    - It installs per-machine into %ProgramFiles%\Polish, which costs a UAC
+      prompt. That is where a uiAccess executable *must* live (Windows
+      refuses to launch one from anywhere else - see docs/UIACCESS.md), so
+      choosing it now means the eventual switch to the signed UIAccess build
+      changes one variable and nothing else about this file.
+    - Which executable it lays down is the variable `ExeName`. Today that is
+      polish.exe, which needs no signature. Once a code-signing certificate
+      exists it becomes polish_uia.exe and users get the Start-menu-open
+      shield fix through an ordinary upgrade.
+
+  No UI beyond the progress bar. GPL-3.0 does not require click-through
+  acceptance - it governs copying and distribution, not use - so a licence
+  dialog would be theatre; the licence ships next to the executable instead.
+
+  Build:  see installer/build.ps1
+  Silent: msiexec /i Polish-<version>-x64.msi /qn
+-->
+
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="Polish"
+      Manufacturer="David Lenihan"
+      Version="$(var.Version)"
+      UpgradeCode="6E2C6F5A-3C4C-4B8E-9E4E-7C1F2A0B9D31"
+      Scope="perMachine"
+      Compressed="yes">
+
+    <!-- Every upgrade replaces the previous install rather than stacking a
+         second copy in Add or Remove Programs. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Polish is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- No OS version gate on purpose. MSI's VersionNT reports 603 on
+         Windows 10 and 11 alike (it reads the shimmed version), so the
+         obvious "VersionNT >= 1000" check rejects every machine Polish
+         actually targets - confirmed in Windows Sandbox, where it failed
+         the install with 1603 before this was removed. A version gate is
+         not worth having anyway: Polish degrades feature by feature on an
+         older OS rather than failing to start, so refusing to install
+         would be the worse outcome. The requirements are stated in the
+         README and the release notes instead. -->
+
+    <Icon Id="PolishIcon" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="PolishIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/lenihan/polish" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Polish" />
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+
+    <Feature Id="Main" Title="Polish" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+  </Package>
+
+  <Fragment>
+    <ComponentGroup Id="ProductComponents">
+
+      <Component Directory="INSTALLFOLDER" Guid="B4F8E1D2-9A77-4C3E-8B21-5D6E0F3A7C42">
+        <File Id="PolishExe" Name="Polish.exe" Source="$(var.ExePath)" KeyPath="yes" />
+        <Shortcut
+            Id="StartMenuShortcut"
+            Directory="ProgramMenuFolder"
+            Name="Polish"
+            Description="Fit and finish for Windows"
+            Icon="PolishIcon"
+            Advertise="yes" />
+      </Component>
+
+      <!-- Shipped beside the executable because Polish is distributed under
+           the GPL: a binary handed to someone has to carry its licence. -->
+      <Component Directory="INSTALLFOLDER" Guid="C71A2B93-6E84-4F15-A0D9-2B8C4E7F1A66">
+        <File Id="LicenseTxt" Name="LICENSE.txt" Source="$(var.LicensePath)" KeyPath="yes" />
+      </Component>
+
+      <!-- Uninstall has to remove what the *application* leaves behind, not
+           just what the installer put there. Polish writes its settings to
+           HKCU\Software\Polish, its autostart entry to the Run key, and a
+           log to %TEMP% (Settings.cpp, Logging.h). None of that is tracked
+           by MSI, so each is removed explicitly.
+
+           These are HKCU under a per-machine install, which resolves to the
+           hive of whoever is running the uninstall - correct for the
+           ordinary case of the same person installing and removing it. A
+           different administrator uninstalling on someone else's behalf
+           would leave that person's settings, which is the harmless half of
+           getting this wrong. -->
+      <Component Directory="INSTALLFOLDER" Guid="D8E3F0A1-5C26-4B97-9E48-3F1D6A2B8C57">
+        <RegistryValue
+            Root="HKCU" Key="Software\Polish" Name="Installed"
+            Type="integer" Value="1" KeyPath="yes" />
+        <RemoveRegistryKey Root="HKCU" Key="Software\Polish" Action="removeOnUninstall" />
+        <RemoveRegistryValue
+            Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\Run" Name="Polish" />
+        <RemoveFile Id="RemoveLog" Directory="TempFolder" Name="polish.log" On="uninstall" />
+      </Component>
+
+    </ComponentGroup>
+  </Fragment>
+</Wix>

@@ -104,26 +104,41 @@ and silent during an Alt+Tab session or a full-screen game.
   trick that keeps a mouse cursor visible everywhere. A single-coloured
   ring disappeared against a white document.
 
-All four features can be turned off independently from the tray icon's
+Every feature can be turned off independently from the tray icon's
 right-click menu, which also has a **Start with Windows** option and
 Exit.
 
 ## Install and run
 
-No installer — Polish is a single `.exe`.
+Download **`Polish-0.9.0-x64.msi`** from the
+[Releases page](https://github.com/lenihan/polish/releases) and run it.
 
-1. Download the latest `polish.exe` from the
-   [Releases page](https://github.com/lenihan/polish/releases).
-2. Run it. Windows SmartScreen will likely warn that it's from an
-   unrecognized publisher (Polish isn't code-signed yet) — click
-   **More info**, then **Run anyway**.
-3. Look for its icon in the system tray (including the "^" overflow area
-   — Windows 11 hides newly-added tray icons there by default).
-   Right-click it for the settings menu, including **Start with
-   Windows** if you want it running every login.
+1. Your browser may warn that the file isn't commonly downloaded, and
+   Windows will show a blue **"Windows protected your PC"** screen. Polish
+   isn't code-signed yet, so Windows has nothing to identify the publisher
+   by. Click **More info**, then **Run anyway**. (This goes away once the
+   signed build lands -- see [`PLAN.md`](PLAN.md).)
+2. Accept the admin prompt. Polish installs to
+   `C:\Program Files\Polish`, which is where the signed build will need
+   to live later.
+3. Look for its icon in the system tray -- including the "^" overflow
+   area, since Windows 11 hides newly-added tray icons there by default.
+   Right-click it for the settings menu, including **Start with Windows**.
 
-That's it — both features work automatically from there. Right-click the
-tray icon → Exit to quit.
+Every feature can be switched off independently from that menu, and
+switching one off restores Windows' own behaviour completely.
+
+To remove it: **Settings → Apps → Installed apps → Polish → Uninstall**,
+which also takes its settings and startup entry with it.
+
+**Requirements.** Windows 11 on x64. The taskbar features read the Windows
+11 taskbar specifically; on Windows 10 those stand down and the rest still
+works. An ARM64 machine runs the x64 build under emulation.
+
+**Known gap in this build.** While the Start menu or Search is open,
+Windows lifts the taskbar above Polish's overlay and its native thumbnail
+flyout reappears over Polish's own window list. The fix needs a code-signed
+build, which is the next milestone.
 
 See [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) for known, permanent
 gaps (e.g. elevated windows) and [`PLAN.md`](PLAN.md) for build progress
