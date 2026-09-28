@@ -1,11 +1,15 @@
 # Changelog
 
-## 0.9.0 — first public build
+## 0.2.0 — first installer build
 
-The first version of Polish packaged for other people to install. Feature
-work to date is in [`PLAN.md`](PLAN.md); this file starts here.
+The first version of Polish packaged for other people to install: an x64
+MSI rather than a bare executable. Feature work to date is in
+[`PLAN.md`](PLAN.md); this file starts here.
 
-**Download:** `Polish-0.9.0-x64.msi`
+The previous release, `v0.1.0`, shipped an ARM64 `polish.exe` that will not
+run on an ordinary Intel or AMD PC. This build is x64 and runs everywhere.
+
+**Download:** `Polish-0.2.0-x64.msi`
 
 ### What Polish does
 
