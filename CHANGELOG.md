@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.0 — Alt+Tab follows the monitor you are on
+
+**Download:** `Polish-0.3.0-x64.msi`
+
+- **Alt+Tab is scoped to the active monitor.** The list used to hold every
+  window on every display, ordered so the current monitor came first, which
+  meant tabbing off the end of one monitor's windows walked onto the next
+  monitor's. It now holds only the windows on the monitor you are working
+  on, so reaching the end wraps back to that monitor's first window. Each
+  display still gets its own list panel, but only the active one appears.
+
+  The tradeoff: a window on another monitor is not reachable from Alt+Tab.
+  Move focus to that monitor first.
+
+Everything from 0.2.0 is unchanged. On a single-monitor PC this release
+behaves exactly like 0.2.0.
+
 ## 0.2.0 — first installer build
 
 The first version of Polish packaged for other people to install: an x64

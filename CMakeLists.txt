@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.28)
 # Stays below 1.0 until the Store submission, which takes 1.0.0 -- so the
 # build people can download today is never confused with the one the Store
 # listing later claims.
-project(polish VERSION 0.2.0 LANGUAGES CXX)
+project(polish VERSION 0.3.0 LANGUAGES CXX)
 
 if(NOT WIN32)
     message(FATAL_ERROR "Polish targets Windows 11 and only builds on Windows.")
