@@ -260,12 +260,11 @@ std::unique_ptr<polish::AltTabHook> g_altTabHook;
 // time Tab is pressed -- order-preserving once a session is already open
 // (UpdateAltTabCandidatesPreservingOrder), so Tab walks down a list that
 // holds still, not one that reshuffles survivors around on every press.
-// On a multi-monitor setup, grouped by monitor (see
-// GetMonitorsCurrentFirst) -- current monitor's windows first, then each
-// other monitor's in turn -- per explicit user request: every window
-// stays reachable, but Tab finishes the current monitor before
-// continuing onto the next one, and each monitor gets its own list
-// panel (g_altTabPanels) showing only its own windows.
+// On a multi-monitor setup the list holds only the *active* monitor's
+// windows (g_altTabMonitor), so Tab wraps around that monitor instead of
+// walking onto the next one. Each monitor still has its own list panel
+// (g_altTabPanels), but only the active monitor's has any rows, so only
+// it appears.
 // The overlay pool only ever grows (indices beyond the current
 // candidate count just stay hidden, and are explicitly hidden again if the
 // count shrinks -- see OnAltTabCycle), so repeated sessions don't pay
@@ -284,6 +283,11 @@ bool g_pendingEmptyRight = false;
 // As g_altTabSticky, for the Alt+` tab switcher opened by right-clicking
 // empty taskbar.
 bool g_tabSticky = false;
+// The monitor this session is scoped to: whichever one the foreground
+// window was on when the list was last built from scratch. Held for the
+// session rather than recomputed per cycle, so that promoting a
+// highlighted window mid-cycle can never move the goalposts.
+HMONITOR g_altTabMonitor = nullptr;
 std::vector<HWND> g_altTabCandidates;
 size_t g_altTabHighlightIndex = 0;
 // Minimized candidate windows -- a separate list from g_altTabCandidates
@@ -1379,16 +1383,19 @@ BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
 // ordered by true MRU first; anything else falls back to EnumWindows'
 // own Z-order (topmost first), appended after.
 //
-// On a multi-monitor setup, the resulting MRU-then-Z-order list is then
-// *grouped* by monitor -- current monitor's windows first (in their
-// relative order from that list), then each other monitor's windows in
-// turn (see GetMonitorsCurrentFirst) -- per explicit user request: every
-// window should still be reachable via Alt+Tab (nothing is excluded),
-// but Tab should finish cycling through the current monitor before
-// continuing onto the next one, rather than interleaving monitors
-// arbitrarily. (An earlier version of this excluded other monitors'
-// windows entirely -- reversed after the user clarified they want
-// everything reachable, just ordered by monitor.)
+// On a multi-monitor setup the resulting MRU-then-Z-order list is then
+// restricted to the active monitor -- the one the foreground window is
+// on -- so that reaching the end of it wraps back to that monitor's
+// first window rather than continuing onto the next monitor.
+//
+// This has now been all three ways, at the user's direction: monitor
+// ignored, then monitor-grouped-but-everything-reachable, now scoped.
+// The tradeoff it accepts, stated plainly because it is the reason the
+// grouped version existed: a window on another monitor is not reachable
+// from here at all. Switching monitors is done by focusing something
+// there first. If that proves annoying in practice, the middle option is
+// to keep this scoping for Tab and give Left/Right a monitor jump --
+// which is a change to OnAltTabNavigate, not to this function.
 void RebuildAltTabCandidates() {
     std::vector<HWND> allCandidates;
     EnumWindows(EnumCandidateWindowsProc, reinterpret_cast<LPARAM>(&allCandidates));
@@ -1406,12 +1413,15 @@ void RebuildAltTabCandidates() {
         }
     }
 
+    // Sampled here rather than read live everywhere below: this is the
+    // one place a session's list is built from scratch, so it is also
+    // where "which monitor is this session about" is decided.
+    g_altTabMonitor = GetForegroundMonitor();
+
     g_altTabCandidates.clear();
-    for (HMONITOR monitor : GetMonitorsCurrentFirst()) {
-        for (HWND hwnd : globalOrdered) {
-            if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) == monitor) {
-                g_altTabCandidates.push_back(hwnd);
-            }
+    for (HWND hwnd : globalOrdered) {
+        if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) == g_altTabMonitor) {
+            g_altTabCandidates.push_back(hwnd);
         }
     }
 }
@@ -1421,16 +1431,6 @@ BOOL CALLBACK EnumMinimizedCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
         reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
     }
     return TRUE;
-}
-
-// The minimized-section counterpart of RebuildAltTabCandidates/
-// UpdateAltTabCandidatesPreservingOrder -- a single function covers both
-// session-start and mid-session refreshes since, unlike the active list,
-// there's no order-preservation concern here to justify two separate
-// paths (see g_altTabMinimized's own comment).
-void RebuildAltTabMinimizedCandidates() {
-    g_altTabMinimized.clear();
-    EnumWindows(EnumMinimizedCandidateWindowsProc, reinterpret_cast<LPARAM>(&g_altTabMinimized));
 }
 
 // The cheap "is a session worth opening at all?" pass, for the one
@@ -1499,6 +1499,25 @@ HMONITOR MonitorForMinimizedCandidate(HWND hwnd) {
     return MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
 }
 
+// The minimized-section counterpart of RebuildAltTabCandidates/
+// UpdateAltTabCandidatesPreservingOrder -- a single function covers both
+// session-start and mid-session refreshes since, unlike the active list,
+// there's no order-preservation concern here to justify two separate
+// paths (see g_altTabMinimized's own comment).
+void RebuildAltTabMinimizedCandidates() {
+    std::vector<HWND> all;
+    EnumWindows(EnumMinimizedCandidateWindowsProc, reinterpret_cast<LPARAM>(&all));
+    // Scoped to the same monitor as the active list, or the minimized
+    // section would quietly reintroduce the other monitors this session
+    // is meant to leave alone.
+    g_altTabMinimized.clear();
+    for (HWND hwnd : all) {
+        if (MonitorForMinimizedCandidate(hwnd) == g_altTabMonitor) {
+            g_altTabMinimized.push_back(hwnd);
+        }
+    }
+}
+
 // Used mid-session instead of RebuildAltTabCandidates (which recomputes
 // order from scratch every time -- appropriate at session start, but not
 // mid-session): keeps every still-open candidate in its *existing*
@@ -1534,15 +1553,19 @@ void UpdateAltTabCandidatesPreservingOrder() {
     // Newly-appeared candidates (opened since the last cycle) -- MRU
     // order first, then Z-order, same append rule RebuildAltTabCandidates
     // itself uses, just restricted to windows `updated` doesn't already
-    // have.
+    // have, and to this session's monitor: a window opening on another
+    // monitor mid-Alt-hold must not appear in a list scoped to this one.
+    const auto onThisMonitor = [](HWND hwnd) {
+        return MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) == g_altTabMonitor;
+    };
     for (HWND hwnd : g_activationHistory.OrderedWindows()) {
         if (std::find(allCandidates.begin(), allCandidates.end(), hwnd) != allCandidates.end() &&
-            std::find(updated.begin(), updated.end(), hwnd) == updated.end()) {
+            std::find(updated.begin(), updated.end(), hwnd) == updated.end() && onThisMonitor(hwnd)) {
             updated.push_back(hwnd);
         }
     }
     for (HWND hwnd : allCandidates) {
-        if (std::find(updated.begin(), updated.end(), hwnd) == updated.end()) {
+        if (std::find(updated.begin(), updated.end(), hwnd) == updated.end() && onThisMonitor(hwnd)) {
             updated.push_back(hwnd);
         }
     }
