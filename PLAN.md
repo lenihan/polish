@@ -52,6 +52,11 @@ current todo list.
 
 ## Left to do
 
+- Virtual Monitor: From a single monitor, split it into 2+ monitors with custom scaling.
+  Mouse should "stick" inside a monitor. Alt+tab only shows apps running on that monitor.
+  Can have different resolutions for each monitor. OS should think it is actually multiple
+  monitors. Allows you to use ultra wide as two normal monitors. Maximize app fills virtual
+  monitor, not entire wide monitor.
 - Add Alt+` to cycle a single app's own windows by most-recently-used
   order (native Windows does this by Z-order, not MRU).
 - Groups: handle a member window closing while backgrounded or tiled.
