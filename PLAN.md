@@ -70,8 +70,7 @@ current todo list.
 - Add a "Restart as Administrator" tray item so elevated windows become
   manageable.
 - Do a full `docs/LIMITATIONS.md` pass and manual test matrix.
-- Backlog, not yet scoped: clipboard copy flash, paste history popup,
-  Quick Access rename without renaming the file, radial start menu,
-  taskbar icon click-to-cycle, reorder windows within a taskbar group,
+- Backlog, not yet scoped: paste history popup,
+  Quick Access rename without renaming the file, radial start menu, 
   consider a WinUI3 rewrite, improve virtual desktops (persist layout,
   pin an app to all desktops, show current desktop indicator).
