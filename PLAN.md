@@ -421,6 +421,51 @@ current todo list.
   taskbar context menu would otherwise open on top of the list;
   Ctrl+right-click still reaches it.
 
+- Easy move/resize mode: hold Win and the whole window becomes a move
+  target, with the right button resizing by whichever corner quadrant it
+  grabbed -- no title bar to find and no 7px border to hit. Space latches
+  a keyboard session that outlives the hold (arrows move, Shift+arrows
+  resize the active corner, Tab cycles the corner, Ctrl+arrows jump flush
+  to the next snap target, Enter commits, Escape puts the window back
+  exactly). What the design turns on:
+  - The dim waits 250ms and any other key hands the whole hold back to
+    Windows untouched, because Win is the busiest modifier on the
+    keyboard. Win+L/D/E/arrow/digit never flash it.
+  - The Win-up can never be swallowed (that bug is in AltTabHook's
+    history: the OS is left believing the key is held, system-wide,
+    surviving process exit), so the Start menu is stopped the other way
+    -- an invisible Ctrl tap once per hold, the moment the mode first
+    does anything visible.
+  - Snapping is magnetic and never blocking: recomputed each frame from
+    the raw pointer rect, so it attracts within the threshold and simply
+    stops past it. Windows still overlap freely with no modifier.
+  - The monitor edge is a hard clamp, so a window slammed at a shared
+    edge parks flush instead of spilling over. Pushing >40px past it
+    releases to the next monitor -- but only if the *pointer* has
+    actually reached another monitor. Without that second condition a
+    hard shove pushed the window off the side of the desktop, which a
+    probe caught at x=-150 on a single-monitor machine.
+  - Snapping works in visible-rect space, because two windows flush in
+    raw `GetWindowRect` coordinates show a ~14px gap between the edges
+    you can see. The inset is sampled once per grab and consumed inside
+    that one drag, never stored -- which is what keeps it clear of
+    `RectUtils.h`'s standing warning. Escape's rect is a raw
+    `GetWindowRect` value replayed verbatim, exactly as that warning asks.
+  - A Polish-driven drag fires an `EVENT_OBJECT_LOCATIONCHANGE` flood
+    with no `MOVESIZESTART/END` around it, so `g_inMoveSizeLoop` cannot
+    gate it; `g_moveModeMovingWindow` does, and the drop hands the final
+    rect to restore-position sync by the front door.
+  - Geometry is `windowtracking/MoveSnap.h`, Win32-free and unit-tested
+    (18 cases): quadrants, snap at threshold +/-1, butting vs alignment,
+    the clamp and its oversized-window case, min-size per corner. The
+    visuals are `AltTabDimOverlay` and `AltTabHighlightBorder` reused
+    as-is -- no new rendering code.
+  - Two bugs the probes found and the tests could not: a debounce flag
+    that stuck because Space's key-up took the session branch its
+    key-down had not, killing every later Win+Space; and `SetCursorPos`
+    not feeding a `WH_MOUSE_LL` hook at all, which made the first probe
+    pass while exercising nothing.
+
 ## v1.0 release -- Microsoft Store
 
 The route is settled and should not be re-litigated: v1.0 ships through the
@@ -520,6 +565,12 @@ release has to exist before the signing application can even go in.
   switched off, and that uninstall leaves nothing behind.
 
 ## Left to do
+- Halo should still be visible on a light background for darkmode, and dark background for light mode
+- Virtual Monitor: From a single monitor, split it into 2+ monitors with custom scaling.
+  Mouse should "stick" inside a monitor. Alt+tab only shows apps running on that monitor.
+  Can have different resolutions for each monitor. OS should think it is actually multiple
+  monitors. Allows you to use ultra wide as two normal monitors. Maximize app fills virtual
+  monitor, not entire wide monitor.
 - Remove Groups: Too hacky. Does not support UWP.
 - Halo: When an active app closes, it's halo stays
 - Taskbar: the shield tracks the strip via taskbar LOCATIONCHANGE events
@@ -540,7 +591,6 @@ release has to exist before the signing application can even go in.
   panel skips minimized rows for this reason; a covered one still shows
   nothing.
 - Screencapture: capture larger than screen
-- Move/resize windows: need mode that makes this easy
 - Fix halo: when you activate window from taskbar, it doesn't get halo
 - Fix halo: halo goes under explorer windows even when active app is in front (not always)
 - Groups: Active window title should look very different than inactive
@@ -578,10 +628,15 @@ release has to exist before the signing application can even go in.
   and `&` mnemonics on the items).
 - Add a "Restart as Administrator" tray item so elevated windows become
   manageable.
-- Add an "easy move/resize" mode: while active, the whole window is a
-  move target (not just the title bar), and resizing snaps to screen/
-  other-window edges. Resizing area should be finger friendly. 
-  Slick ui that flips windows around with move/resize controls
+- Move/resize mode: the "slick UI that flips windows around with
+  move/resize controls" half of the original idea is not built -- today
+  the affordance is the dim plus an outline on the window under the
+  pointer, and nothing is drawn on the window itself.
+- Move/resize mode: no snap-target preview. The window itself moving is
+  the only feedback that a snap is about to take.
+- Move/resize mode: never tried on a real multi-monitor or mixed-DPI
+  desktop. The clamp release and the snap-edge resample on crossing are
+  both written but only exercised single-monitor.
 - Virtual desktops: remember which apps were on a desktop and offer to
   reload them.
 - Virtual desktops: an app pinned to show on all desktops should keep

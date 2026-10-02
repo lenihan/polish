@@ -1,8 +1,11 @@
 # Polish
 
 Add fit and finish to Windows 11 — a native, tray-resident utility that
-fixes two long-standing rough edges in window management, with no new
-gestures to learn.
+smooths over a set of long-standing rough edges in window management.
+Most of it improves a gesture you already use; the one genuinely new
+gesture, holding Win to move or resize a window from anywhere on it,
+exists because the thing it replaces — grabbing a title bar — is the
+affordance modern apps took away.
 
 ## What it does
 
@@ -84,6 +87,44 @@ obvious at a glance which window you're typing into. It doesn't appear
 on a maximized or full-screen window (there's no room outside their
 edges, and it's already unambiguous which one is focused) or during an
 Alt+Tab session.
+
+**Hold Win to move or resize any window, from anywhere on it.** Apps
+increasingly draw their own UI into the title bar, or have no title bar
+at all, so the strip you can grab to move a window has quietly shrunk to
+nothing -- and the resize border is about seven pixels wide. Hold the Win
+key: after a moment every window dims, and the one under the pointer gets
+an accent outline. Now drag with the **left button anywhere on a window**
+to move it, or the **right button anywhere on it** to resize. Release Win
+to leave. There is nothing to aim at in either gesture.
+
+- **Resize grabs the nearest corner.** The window is split into four
+  quadrants, and the corner of the quadrant you grabbed follows the
+  pointer -- so the smallest target is a quarter of the window.
+- **Windows snap, but are never blocked.** Edges are drawn magnetically
+  to the monitor's work area and to the visible edges of other windows,
+  so you can butt two windows flush or line them up without aiming. Push
+  a little further and the window slides straight past: overlapping
+  needs no modifier, no override, nothing held down.
+- **The monitor edge is a wall.** Slam a window at the boundary between
+  two screens and it parks flush against it instead of spilling onto the
+  next one. Keep pushing well past the edge and it crosses -- no modifier
+  for that either. On a single monitor it simply cannot leave the screen.
+- **Without the mouse: Win+Space.** That latches onto the window under
+  the pointer (or the active one) and keeps the session open after you
+  let go of Win. Arrows move it, snapping as they go; **Shift+Arrow**
+  resizes the active corner and **Tab** cycles which corner that is;
+  **Ctrl+Arrow** jumps the window flush to the next snap target in that
+  direction. **Enter** keeps it, **Escape** puts it back exactly where it
+  started, and a click anywhere keeps it and ends the session.
+- **Normal Win shortcuts are untouched.** Pressing any other key during
+  the hold hands the whole thing back to Windows, and the dim waits a
+  quarter-second before appearing, so Win+L, Win+D, Win+E, Win+Arrow and
+  Win+<digit> behave exactly as they always did and never flash anything.
+  Tapping Win on its own still opens the Start menu; holding it and then
+  letting go without doing anything does not.
+- **Dragging a maximized window restores it under your cursor**, at the
+  same relative spot you grabbed, rather than jumping to wherever it last
+  floated.
 
 **A bullseye for copy and paste.** Windows gives no feedback that a copy
 took, or where a paste landed. Now a large, soft ring plays on top of

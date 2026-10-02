@@ -25,6 +25,19 @@ struct Settings {
     // completely -- see main.cpp's ApplyTaskbarSetting.
     bool taskbarEnabled = true;
 
+    // Easy move/resize mode: hold Win and the whole window becomes a
+    // move target, with the right button resizing by the grabbed corner
+    // quadrant (see hook/MoveModeHook.h). Off makes the Win hold
+    // indistinguishable from the hook not existing, because this one
+    // claims a key Windows itself uses heavily.
+    bool moveModeEnabled = true;
+    // How close an edge has to come to a snap target before it is pulled
+    // in, in physical pixels. Stored rather than fixed because the right
+    // value depends on pointer speed and monitor DPI, and the default
+    // (windowtracking/MoveSnap.h's kDefaultSnapThresholdPx) is a guess
+    // tuned on one machine. No UI for it yet -- registry only.
+    UINT moveModeSnapThresholdPx = 12;
+
     // The "New Group" global hotkey -- RegisterHotKey's own modifier
     // flags (MOD_ALT/MOD_CONTROL/MOD_SHIFT/MOD_WIN, OR'd together) and
     // a single virtual-key code. Default Win+Alt+G. User-configurable

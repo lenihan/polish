@@ -9,6 +9,7 @@ FetchContent_MakeAvailable(doctest)
 add_executable(polish_tests
     TestMain.cpp
     RectUtilsTests.cpp
+    MoveSnapTests.cpp
     ActivationHistoryTests.cpp
     TabSwitchingTests.cpp
     GroupStateTests.cpp

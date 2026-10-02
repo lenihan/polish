@@ -37,6 +37,8 @@ Settings LoadSettings() {
         settings.haloEnabled = ReadDword(key, L"HaloEnabled", 1) != 0;
         settings.bullseyeEnabled = ReadDword(key, L"BullseyeEnabled", 1) != 0;
         settings.taskbarEnabled = ReadDword(key, L"TaskbarEnabled", 1) != 0;
+        settings.moveModeEnabled = ReadDword(key, L"MoveModeEnabled", 1) != 0;
+        settings.moveModeSnapThresholdPx = ReadDword(key, L"MoveModeSnapThresholdPx", 12);
         settings.groupHotkeyModifiers = ReadDword(key, L"GroupHotkeyModifiers", MOD_WIN | MOD_ALT);
         settings.groupHotkeyVirtualKey = ReadDword(key, L"GroupHotkeyVirtualKey", 'G');
         RegCloseKey(key);
@@ -57,6 +59,8 @@ void SaveSettings(const Settings& settings) {
     WriteDword(key, L"HaloEnabled", settings.haloEnabled ? 1 : 0);
     WriteDword(key, L"BullseyeEnabled", settings.bullseyeEnabled ? 1 : 0);
     WriteDword(key, L"TaskbarEnabled", settings.taskbarEnabled ? 1 : 0);
+    WriteDword(key, L"MoveModeEnabled", settings.moveModeEnabled ? 1 : 0);
+    WriteDword(key, L"MoveModeSnapThresholdPx", settings.moveModeSnapThresholdPx);
     WriteDword(key, L"GroupHotkeyModifiers", settings.groupHotkeyModifiers);
     WriteDword(key, L"GroupHotkeyVirtualKey", settings.groupHotkeyVirtualKey);
     RegCloseKey(key);

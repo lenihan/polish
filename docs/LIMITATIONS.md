@@ -454,3 +454,34 @@ gets a full pass in Phase 3; today it records what's already known.
     `HoverFlyoutController::ShowTaskListButtonHoverFlyout` and two more,
     all confirmed present in this build's `Taskbar.View.dll` 2607.28001 via
     its PDB). Polish does not inject into or patch explorer.
+
+25. **Move/resize mode cannot touch an elevated window, and refuses it
+    rather than failing at it.** UIPI makes `SetWindowPos` a silent no-op
+    against a higher-integrity process (#1), so a window run as
+    Administrator is left out of the dim entirely and a Win+click on it
+    is not swallowed at all -- the click reaches the window normally,
+    exactly as if the feature were switched off. That is deliberate: a
+    swallowed click that then did nothing would read as the mode being
+    broken. The cost is that the one set of windows hardest to reach is
+    the one this feature cannot help with, until the planned "Restart as
+    Administrator" tray item exists.
+
+26. **A resize leaves the two anchored edges alone even when they are off
+    the monitor.** The clamp only applies to the edges the gesture is
+    actually dragging. A window already hanging off a screen edge when
+    the resize starts keeps hanging off by the same amount -- preferred
+    to a resize quietly shoving the window on screen, which is not what
+    was asked for.
+
+27. **Move/resize mode has never run on a real multi-monitor or
+    mixed-DPI desktop.** The monitor clamp, the push-past-the-edge
+    release and the snap-edge resample on crossing a boundary are all
+    written and unit-tested as geometry, but only ever exercised live on
+    one monitor -- the single-monitor case is the one that caught a real
+    bug (a hard shove pushed a window off the side of the desktop), and
+    the multi-monitor paths have had no equivalent scrutiny.
+
+28. **The snap threshold is registry-only.** `MoveModeSnapThresholdPx`
+    under `HKCU\Software\Polish` (default 12) has no UI, because the
+    right value depends on pointer speed and monitor DPI and the default
+    is a guess tuned on one machine.

@@ -25,6 +25,7 @@
 #include "hook/GroupHotkeyDialog.h"
 #include "hook/GroupPickerWindow.h"
 #include "hook/GroupTabThumbnail.h"
+#include "hook/MoveModeHook.h"
 #include "hook/TaskbarHook.h"
 #include "hook/TaskbarShield.h"
 #include "settings/Settings.h"
@@ -39,6 +40,7 @@
 #include "util/WindowIcon.h"
 #include "windowtracking/ActivationHistory.h"
 #include "windowtracking/GroupManager.h"
+#include "windowtracking/MoveSnap.h"
 #include "windowtracking/RectUtils.h"
 #include "windowtracking/TaskbarButtons.h"
 #include "windowtracking/TaskbarReadPolicy.h"
@@ -271,6 +273,26 @@ std::unique_ptr<polish::AltTabHook> g_altTabHook;
 // window-creation cost more than once per "most windows ever open at once
 // this run."
 bool g_altTabSessionOpen = false;
+
+// Easy move/resize mode's two cross-cutting flags. Declared up here
+// rather than with the rest of its state (far below, next to its own
+// handlers) because three things that run earlier in this file have to
+// know about the mode, and all three for the same reason: Polish is the
+// one moving the window, so everything that normally reacts to a window
+// moving has to stand down.
+//
+//   - restore-position sync, which would otherwise record mid-drag rects
+//     as the window's restore position. Its usual guard, g_inMoveSizeLoop,
+//     cannot help: that is set from EVENT_SYSTEM_MOVESIZESTART/END, and a
+//     Polish-driven drag produces an EVENT_OBJECT_LOCATIONCHANGE flood
+//     with no MOVESIZESTART/END around it at all.
+//   - the halo, which follows LOCATIONCHANGE and would try to re-render
+//     at pointer rate behind a dim overlay that already covers it.
+bool g_moveModeMovingWindow = false;
+// Whether the dim is on screen. Separate from the above: the mode can be
+// visible with nothing moving yet (the hold has dimmed, the user has not
+// grabbed anything), and a drag can outlive its own Win hold.
+bool g_moveModeDimmed = false;
 // The session was opened by clicking empty taskbar rather than by holding
 // Alt, so nothing ends it on Alt-up: Enter, Escape, a row click or a press
 // outside the panel does.
@@ -779,6 +801,13 @@ void UpdateActiveWindowHalo(HWND hwnd) {
     if (g_altTabSessionOpen) {
         return;
     }
+    // Same bargain for move/resize mode: the dim overlay already covers
+    // the window the halo would be drawn around, so a halo there is at
+    // best invisible and at worst re-rendered at pointer rate during a
+    // drag. EndMoveModeSession re-runs this once the dim comes down.
+    if (g_moveModeDimmed) {
+        return;
+    }
     if (!g_settings.haloEnabled || g_haloMinimizeSuppressed) {
         g_activeWindowHalo->Hide();
         g_haloTarget = nullptr;
@@ -1152,9 +1181,11 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 KeepGroupMemberInPlace(hwnd);
             }
             if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF && hwnd == g_trackedWindow &&
-                !g_inMoveSizeLoop) {
+                !g_inMoveSizeLoop && !g_moveModeMovingWindow) {
                 // Only debounce outside an active drag -- see
-                // g_inMoveSizeLoop's comment for why.
+                // g_inMoveSizeLoop's comment for why, and
+                // g_moveModeMovingWindow's for why that one needs a flag
+                // of its own rather than riding on g_inMoveSizeLoop.
                 if (!IsWindowInNormalState(hwnd)) {
                     // Maximizing/minimizing also fires LOCATIONCHANGE --
                     // don't treat that transition as a position to
@@ -1177,7 +1208,7 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 }
             }
             if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF && hwnd == g_haloWatched &&
-                !g_haloMinimizeSuppressed && !g_altTabSessionOpen) {
+                !g_haloMinimizeSuppressed && !g_altTabSessionOpen && !g_moveModeDimmed) {
                 // Same size as the halo's own last render -> the cheap
                 // move-only path, safe to call inline on every event, no
                 // matter how often they arrive. A different size (an
@@ -4591,6 +4622,606 @@ void ApplyTaskbarSetting() {
     polish::LogDebug(L"[Polish] Taskbar: enabled");
 }
 
+// ========================= Easy move/resize mode =========================
+//
+// Hold Win and every window becomes draggable and resizable from anywhere
+// inside it, instead of from a title bar many apps no longer have and a
+// resize border ~7px wide. The input half is hook/MoveModeHook.h, the
+// geometry is windowtracking/MoveSnap.h, and this part owns the real
+// windows: which one is in hand, where it started, what it may snap to,
+// and the visuals that say the mode is on.
+//
+// The visuals are reused rather than new, and neither class needed a
+// change to serve this: AltTabDimOverlay (one per window, each inserted
+// just above its own target, so a window stacked in front of a target is
+// never wrongly dimmed) and AltTabHighlightBorder for the ring on
+// whichever window the mode is pointed at. ActiveWindowHalo.h and
+// BullseyeOverlay.h both argue at length against generalizing these
+// classes; reusing two of them as-is is the version of that advice that
+// adds no code at all.
+
+constexpr UINT_PTR kMoveModeDimTimerId = 14;
+
+// How long Win has to be held before the screen dims. Whether this mode
+// is tolerable at all lives in this number: Win is the busiest modifier
+// on the keyboard (Win+L, Win+D, Win+E, Win+Arrow, Win+<digit>), and
+// flashing a dim on the way to any of those would be worse than having
+// no feature. Any other key during the hold cancels before this fires
+// (MoveModeHook's nativeHandoffActive_), so in practice this only has to
+// outlast the gap between the two keys of a chord.
+constexpr UINT kMoveModeDimDelayMs = 250;
+
+std::unique_ptr<polish::MoveModeHook> g_moveModeHook;
+
+// Pooled grow-only, exactly like g_altTabOverlays and for the same
+// reason: creating a window per candidate on every Win hold would make
+// the dim's first frame its slowest, which is the one frame that has to
+// be fast.
+std::vector<std::unique_ptr<polish::AltTabDimOverlay>> g_moveModeOverlays;
+std::vector<HWND> g_moveModeDimTargets;
+std::unique_ptr<polish::AltTabHighlightBorder> g_moveModeBorder;
+
+// The window in hand, or the one a click would grab while only hovering.
+// Null the rest of the time.
+HWND g_moveModeTarget = nullptr;
+// A latched keyboard session (Win+Space), which outlives the hold that
+// started it. See MoveModeHook's keyboardSession_.
+bool g_moveModeKeyboardSession = false;
+// Which corner Shift+Arrow and the resize keys act on in a keyboard
+// session, cycled by Tab. Bottom-right first because it is the corner a
+// mouse would reach for.
+polish::Grip g_moveModeKeyboardGrip = polish::Grip::BottomRight;
+
+// Sampled at grab time and not touched again until the next grab.
+polish::Grip g_moveModeGrip = polish::Grip::Move;
+POINT g_moveModeGrabPoint{};
+RECT g_moveModeGrabVisible{};
+
+// Per-edge difference between GetWindowRect and GetVisibleWindowRect,
+// sampled when a grab starts.
+//
+// This is the visual-bounds conversion RectUtils.h warns against, and it
+// is safe here for the exact reason that warning gives. The bug it
+// describes is a *stored* inset: sampled at one moment, applied to a
+// rect recorded at another, across a change in whether the window was
+// snapped flush -- which Windows computes the inset differently for.
+// Here it is sampled and consumed inside a single drag of a single
+// window that stays floating from grab to drop, and is never persisted
+// or replayed. Some conversion is unavoidable, because snapping has to
+// happen in visible-rect space: two windows flush in raw GetWindowRect
+// coordinates show a ~14px gap between the edges a user can actually
+// see. This is the narrowest conversion available. Note that the one
+// rect this feature does replay later -- the original, for Escape -- is
+// a raw GetWindowRect value put back verbatim, with no conversion at
+// all, which is what that same warning recommends.
+RECT g_moveModeInset{};
+
+// Where the window was before any of this, as a raw GetWindowRect value
+// replayed verbatim by Escape.
+RECT g_moveModeOriginalRect{};
+bool g_moveModeHaveOriginal = false;
+
+polish::SnapCandidates g_moveModeSnapEdges;
+HMONITOR g_moveModeMonitor = nullptr;
+RECT g_moveModeMonitorRect{};
+RECT g_moveModeWorkArea{};
+// Scratch for the neighbour enumeration, kept at file scope so a drag
+// does not allocate a fresh vector per grab.
+std::vector<RECT> g_moveModeNeighbourRects;
+
+void EnsureMoveModeOverlayPoolSize(size_t count) {
+    while (g_moveModeOverlays.size() < count) {
+        g_moveModeOverlays.push_back(std::make_unique<polish::AltTabDimOverlay>(GetModuleHandleW(nullptr)));
+    }
+}
+
+// The window at a screen point that this mode may actually move, or null.
+//
+// No logging and no UI work anywhere in here, deliberately: this runs
+// synchronously inside the mouse hook (MoveModeHook's canGrab), where
+// LogDebug's file I/O would risk the LowLevelHooksTimeout that silently
+// and undetectably unhooks the whole thing.
+HWND MoveModeCandidateAt(POINT screenPt) {
+    HWND hwnd = WindowFromPoint(screenPt);
+    if (hwnd == nullptr) {
+        return nullptr;
+    }
+    // WindowFromPoint lands on whatever child is under the pointer; a
+    // move acts on the top-level window that owns it. Polish's own
+    // overlays are WS_EX_TRANSPARENT and so are skipped by
+    // WindowFromPoint already, but the panels are not, hence the
+    // own-process check as well.
+    hwnd = GetAncestor(hwnd, GA_ROOT);
+    if (hwnd == nullptr || IsOwnProcessWindow(hwnd) || !polish::IsCandidateWindow(hwnd)) {
+        return nullptr;
+    }
+    // Elevated windows are refused here rather than grabbed and then
+    // found unmovable: UIPI makes SetWindowPos a silent no-op on them
+    // (docs/LIMITATIONS.md #1). Refusing at this point is what keeps the
+    // click unswallowed, so Win+click on an admin window behaves exactly
+    // as it always did instead of vanishing into a mode that could not
+    // have done anything with it.
+    if (polish::IsElevatedWindow(hwnd)) {
+        return nullptr;
+    }
+    return hwnd;
+}
+
+// hwnd's visible rect, and the inset needed to convert back -- see
+// g_moveModeInset for why both.
+RECT MoveModeVisibleRectFor(HWND hwnd, RECT& insetOut) {
+    RECT windowRect{};
+    GetWindowRect(hwnd, &windowRect);
+    RECT visible{};
+    if (!polish::GetVisibleWindowRect(hwnd, visible)) {
+        visible = windowRect;
+    }
+    insetOut = {windowRect.left - visible.left, windowRect.top - visible.top,
+                windowRect.right - visible.right, windowRect.bottom - visible.bottom};
+    return visible;
+}
+
+BOOL CALLBACK EnumMoveModeNeighbourProc(HWND hwnd, LPARAM) {
+    if (hwnd == g_moveModeTarget || IsOwnProcessWindow(hwnd) || !polish::IsCandidateWindow(hwnd)) {
+        return TRUE;
+    }
+    if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != g_moveModeMonitor) {
+        return TRUE;
+    }
+    RECT rect;
+    if (polish::GetVisibleWindowRect(hwnd, rect)) {
+        g_moveModeNeighbourRects.push_back(rect);
+    }
+    return TRUE;
+}
+
+// Monitor geometry plus the snap targets on it. rcMonitor is the hard
+// clamp and rcWork is what snaps -- see MoveSnap.h for why they differ.
+//
+// Computed once per grab rather than per frame: the other windows are not
+// moving while one of them is being dragged, and an EnumWindows plus a
+// DWM call per window at pointer rate would be the most expensive thing
+// in the drag by a wide margin.
+void SampleMoveModeGeometry(HWND hwnd) {
+    g_moveModeMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (g_moveModeMonitor != nullptr && GetMonitorInfoW(g_moveModeMonitor, &info)) {
+        g_moveModeMonitorRect = info.rcMonitor;
+        g_moveModeWorkArea = info.rcWork;
+    }
+    g_moveModeNeighbourRects.clear();
+    EnumWindows(EnumMoveModeNeighbourProc, 0);
+    g_moveModeSnapEdges = polish::CollectSnapEdges(g_moveModeWorkArea, g_moveModeNeighbourRects);
+}
+
+void UpdateMoveModeOutline() {
+    if (g_moveModeBorder && g_moveModeTarget != nullptr && IsWindow(g_moveModeTarget)) {
+        // ShowAroundTarget already skips its own DIB/GDI+/premultiply
+        // work when the target's size is unchanged and just moves the
+        // existing content, which is exactly the cheap path a drag needs
+        // (see AltTabHighlightBorder::lastRenderedSize_).
+        g_moveModeBorder->ShowAroundTarget(g_moveModeTarget);
+    }
+}
+
+// The dim overlay belonging to one window, by identity rather than by a
+// cached index -- the pool is index-parallel to g_moveModeDimTargets, and
+// a stale index after a rebuild would dim the wrong window.
+polish::AltTabDimOverlay* MoveModeOverlayFor(HWND hwnd) {
+    for (size_t i = 0; i < g_moveModeDimTargets.size() && i < g_moveModeOverlays.size(); ++i) {
+        if (g_moveModeDimTargets[i] == hwnd) {
+            return g_moveModeOverlays[i].get();
+        }
+    }
+    return nullptr;
+}
+
+BOOL CALLBACK EnumMoveModeDimProc(HWND hwnd, LPARAM) {
+    if (!IsOwnProcessWindow(hwnd) && polish::IsCandidateWindow(hwnd)) {
+        g_moveModeDimTargets.push_back(hwnd);
+    }
+    return TRUE;
+}
+
+void ShowMoveModeDim() {
+    if (g_moveModeDimmed) {
+        return;
+    }
+    g_moveModeDimTargets.clear();
+    EnumWindows(EnumMoveModeDimProc, 0);
+    EnsureMoveModeOverlayPoolSize(g_moveModeDimTargets.size());
+    for (size_t i = 0; i < g_moveModeDimTargets.size(); ++i) {
+        g_moveModeOverlays[i]->ShowOverTarget(g_moveModeDimTargets[i]);
+    }
+    // Overlays past the current target count belong to a previous, larger
+    // session; left alone they would sit stuck over whatever window used
+    // to occupy that slot. Same hazard ApplyAltTabDimming handles.
+    for (size_t i = g_moveModeDimTargets.size(); i < g_moveModeOverlays.size(); ++i) {
+        g_moveModeOverlays[i]->Hide();
+    }
+    g_moveModeDimmed = true;
+    if (g_activeWindowHalo) {
+        // Stands down for the session -- see g_moveModeDimmed. The halo
+        // would be drawn under the dim that now covers its window, and
+        // would try to re-render at pointer rate during a drag.
+        g_activeWindowHalo->Hide();
+    }
+    if (g_moveModeHook) {
+        // A hold long enough to dim must not also open the Start menu on
+        // its way out, and the Win-up can never be swallowed to prevent
+        // that -- see MoveModeHook.h's rules 2 and 3.
+        g_moveModeHook->SuppressStartMenuForThisHold();
+    }
+    polish::LogDebug(std::format(L"[Polish] MoveMode: armed, dimmed {} window(s)", g_moveModeDimTargets.size()));
+}
+
+// The single teardown path, so the overlays, the timer, the halo handback
+// and every flag cannot drift apart between the four ways this ends (Win
+// released, handed back to Windows, Enter, Escape). Idempotent: an End
+// arrives for holds that never dimmed at all.
+void EndMoveModeSession() {
+    KillTimer(g_messageWindow, kMoveModeDimTimerId);
+    for (auto& overlay : g_moveModeOverlays) {
+        overlay->Hide();
+    }
+    g_moveModeDimTargets.clear();
+    if (g_moveModeBorder) {
+        g_moveModeBorder->Hide();
+    }
+    const HWND target = g_moveModeTarget;
+    const bool wasDimmed = g_moveModeDimmed;
+    g_moveModeTarget = nullptr;
+    g_moveModeKeyboardSession = false;
+    g_moveModeMovingWindow = false;
+    g_moveModeHaveOriginal = false;
+    g_moveModeDimmed = false;
+    if (target != nullptr && IsWindow(target)) {
+        // Hand the final position to restore-position sync by the front
+        // door. The whole session suppressed the settle debounce (see
+        // g_moveModeMovingWindow), so without this a window moved by
+        // Polish would be the one window whose restore target never
+        // learned where it ended up -- the exact gap this app exists to
+        // close, reintroduced by its own feature.
+        SyncRestorePlacementNow(target);
+    }
+    if (wasDimmed) {
+        polish::LogDebug(L"[Polish] MoveMode: session ended");
+        // The halo was standing down; give it its window back.
+        UpdateActiveWindowHalo(GetForegroundWindow());
+    }
+}
+
+// Takes `hwnd` in hand: records where it started, what it may snap to,
+// and the inset needed to put a visible-space rect back onto it.
+void BeginMoveModeTarget(HWND hwnd, POINT screenPt, polish::Grip grip) {
+    g_moveModeTarget = hwnd;
+    g_moveModeGrip = grip;
+    g_moveModeGrabPoint = screenPt;
+    g_moveModeGrabVisible = MoveModeVisibleRectFor(hwnd, g_moveModeInset);
+    GetWindowRect(hwnd, &g_moveModeOriginalRect);
+    g_moveModeHaveOriginal = true;
+    SampleMoveModeGeometry(hwnd);
+}
+
+// Puts a visible-space rect onto the target, converting back through the
+// inset sampled at grab time.
+//
+// SWP_ASYNCWINDOWPOS matters here specifically: this runs on the thread
+// that owns the message loop *and* the low-level hooks, so a target whose
+// own message pump has stalled must not be able to block it -- a
+// synchronous SetWindowPos into a hung window would stall the hook too,
+// and a hook that does not return promptly is silently unhooked.
+void ApplyMoveModeRect(const RECT& visible) {
+    if (g_moveModeTarget == nullptr || !IsWindow(g_moveModeTarget)) {
+        return;
+    }
+    const RECT windowRect{visible.left + g_moveModeInset.left, visible.top + g_moveModeInset.top,
+                          visible.right + g_moveModeInset.right, visible.bottom + g_moveModeInset.bottom};
+    SetWindowPos(g_moveModeTarget, nullptr, windowRect.left, windowRect.top,
+                 windowRect.right - windowRect.left, windowRect.bottom - windowRect.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+    UpdateMoveModeOutline();
+}
+
+int MoveModeSnapThreshold() {
+    return static_cast<int>(g_settings.moveModeSnapThresholdPx);
+}
+
+void OnMoveModeArm() {
+    // Deliberately only a timer: nothing is on screen yet. See
+    // kMoveModeDimDelayMs.
+    SetTimer(g_messageWindow, kMoveModeDimTimerId, kMoveModeDimDelayMs, nullptr);
+}
+
+void OnMoveModeDimTimer() {
+    KillTimer(g_messageWindow, kMoveModeDimTimerId);
+    ShowMoveModeDim();
+    POINT cursor{};
+    if (GetCursorPos(&cursor)) {
+        g_moveModeTarget = MoveModeCandidateAt(cursor);
+        UpdateMoveModeOutline();
+    }
+}
+
+void OnMoveModeGrab(polish::MoveModeHook::Grab grab, POINT screenPt) {
+    HWND target = MoveModeCandidateAt(screenPt);
+    if (target == nullptr) {
+        // canGrab already said yes from inside the hook; the window can
+        // still have gone away in the message-queue gap.
+        return;
+    }
+    // The dim may not have appeared yet -- a fast hold-and-drag beats the
+    // delay timer, and the mode still has to look like it is on.
+    ShowMoveModeDim();
+
+    if (IsZoomed(target)) {
+        // A maximized window cannot be moved or resized at all:
+        // SetWindowPos silently no-ops on its size and position (see
+        // GroupManager.h's own note on this). Restore it first, then put
+        // the restored rect under the cursor at the same relative
+        // position, so the window arrives where the hand already is
+        // rather than jumping to wherever it last floated.
+        RECT ignored{};
+        const RECT maximized = MoveModeVisibleRectFor(target, ignored);
+        ShowWindow(target, SW_RESTORE);
+        RECT inset{};
+        const RECT restored = MoveModeVisibleRectFor(target, inset);
+        const LONG maximizedWidth = std::max<LONG>(1, maximized.right - maximized.left);
+        const LONG maximizedHeight = std::max<LONG>(1, maximized.bottom - maximized.top);
+        const LONG restoredWidth = restored.right - restored.left;
+        const LONG restoredHeight = restored.bottom - restored.top;
+        const LONG left = screenPt.x - (screenPt.x - maximized.left) * restoredWidth / maximizedWidth;
+        const LONG top = screenPt.y - (screenPt.y - maximized.top) * restoredHeight / maximizedHeight;
+        g_moveModeTarget = target;
+        g_moveModeInset = inset;
+        ApplyMoveModeRect(RECT{left, top, left + restoredWidth, top + restoredHeight});
+    }
+
+    RECT visible{};
+    RECT inset{};
+    visible = MoveModeVisibleRectFor(target, inset);
+    const polish::Grip grip = grab == polish::MoveModeHook::Grab::Move
+                                  ? polish::Grip::Move
+                                  : polish::GripForPoint(visible, screenPt);
+    BeginMoveModeTarget(target, screenPt, grip);
+    g_moveModeMovingWindow = true;
+    if (auto* overlay = MoveModeOverlayFor(target)) {
+        // The window in hand stops being dimmed for the duration. Partly
+        // because an undimmed window reads as "this is the one you have
+        // got", and partly for cost: the alternative is a second window
+        // to reposition on every frame of the drag, where the outline
+        // already has a move-only path and the dim does not.
+        overlay->Hide();
+    }
+    UpdateMoveModeOutline();
+    polish::LogDebug(std::format(L"[Polish] MoveMode: grabbed hwnd={} as {}", reinterpret_cast<void*>(target),
+                                  grip == polish::Grip::Move ? L"move" : L"resize"));
+}
+
+void OnMoveModeDrag(POINT screenPt) {
+    if (!g_moveModeMovingWindow) {
+        // Only hovering: say which window a click would grab. Cheap
+        // enough to do per coalesced move -- WindowFromPoint plus the
+        // ring's own move-only path.
+        if (!g_moveModeDimmed) {
+            return;
+        }
+        const HWND hovered = MoveModeCandidateAt(screenPt);
+        if (hovered == g_moveModeTarget) {
+            return;
+        }
+        g_moveModeTarget = hovered;
+        if (hovered == nullptr) {
+            if (g_moveModeBorder) {
+                g_moveModeBorder->Hide();
+            }
+        } else {
+            UpdateMoveModeOutline();
+        }
+        return;
+    }
+    if (g_moveModeTarget == nullptr || !IsWindow(g_moveModeTarget)) {
+        return;
+    }
+
+    const int dx = static_cast<int>(screenPt.x - g_moveModeGrabPoint.x);
+    const int dy = static_cast<int>(screenPt.y - g_moveModeGrabPoint.y);
+    RECT desired = polish::DragGrip(g_moveModeGrabVisible, g_moveModeGrip, dx, dy);
+    desired = polish::EnforceMinimumSize(desired, g_moveModeGrip, polish::kMinWindowWidthPx,
+                                         polish::kMinWindowHeightPx);
+
+    const RECT clamped = polish::ClampToMonitor(desired, g_moveModeMonitorRect, g_moveModeGrip);
+    // How far past the monitor the pointer is currently asking for. A
+    // live measure, not a running total, so easing off re-engages the
+    // clamp instead of leaving the window primed to escape.
+    const int pushedPast = static_cast<int>(std::max(
+        std::max(std::abs(clamped.left - desired.left), std::abs(clamped.top - desired.top)),
+        std::max(std::abs(clamped.right - desired.right), std::abs(clamped.bottom - desired.bottom))));
+    // Distance alone must not release the clamp: there has to be
+    // somewhere for the window to go. The test is that the *pointer* has
+    // reached a different monitor, which is impossible when there is no
+    // adjacent monitor on that side -- so the only monitor's edges become
+    // a hard wall, which is the point of the clamp. Without this second
+    // condition a hard shove simply pushed the window off the side of the
+    // desktop; confirmed by a probe that drove it to x=-150 on a
+    // single-monitor machine.
+    const HMONITOR pointerMonitor = MonitorFromPoint(screenPt, MONITOR_DEFAULTTONULL);
+    const bool somewhereToGo = pointerMonitor != nullptr && pointerMonitor != g_moveModeMonitor;
+    RECT result = (somewhereToGo && polish::ShouldReleaseClamp(pushedPast)) ? desired : clamped;
+
+    // Released and now genuinely on another monitor: that monitor's
+    // edges and windows are what it can snap to from here on.
+    const HMONITOR nowOn = MonitorFromRect(&result, MONITOR_DEFAULTTONEAREST);
+    if (nowOn != g_moveModeMonitor && nowOn != nullptr) {
+        g_moveModeMonitor = nowOn;
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (GetMonitorInfoW(nowOn, &info)) {
+            g_moveModeMonitorRect = info.rcMonitor;
+            g_moveModeWorkArea = info.rcWork;
+        }
+        g_moveModeNeighbourRects.clear();
+        EnumWindows(EnumMoveModeNeighbourProc, 0);
+        g_moveModeSnapEdges = polish::CollectSnapEdges(g_moveModeWorkArea, g_moveModeNeighbourRects);
+    }
+
+    // Snap last, and after the clamp: every candidate edge is inside
+    // rcMonitor, so a snap can only ever pull the window further on
+    // screen, never back off it.
+    result = polish::ApplySnap(result, g_moveModeSnapEdges, MoveModeSnapThreshold(), g_moveModeGrip);
+    ApplyMoveModeRect(result);
+}
+
+void OnMoveModeDrop() {
+    g_moveModeMovingWindow = false;
+    if (g_moveModeTarget != nullptr && IsWindow(g_moveModeTarget)) {
+        SyncRestorePlacementNow(g_moveModeTarget);
+        if (g_moveModeDimmed) {
+            if (auto* overlay = MoveModeOverlayFor(g_moveModeTarget)) {
+                // Dimmed again now it has stopped moving -- the session
+                // may well continue onto another window.
+                overlay->ShowOverTarget(g_moveModeTarget);
+            }
+        }
+        RECT dropped{};
+        GetWindowRect(g_moveModeTarget, &dropped);
+        polish::LogDebug(std::format(L"[Polish] MoveMode: dropped hwnd={} at ({},{})-({},{})",
+                                      reinterpret_cast<void*>(g_moveModeTarget), dropped.left, dropped.top,
+                                      dropped.right, dropped.bottom));
+    }
+    g_moveModeHaveOriginal = false;
+}
+
+void OnMoveModeKeyboardLatch(POINT screenPt) {
+    HWND target = MoveModeCandidateAt(screenPt);
+    if (target == nullptr) {
+        // Nothing under the pointer -- the foreground window is what the
+        // user means, and is the only sensible answer for a gesture that
+        // may not involve the mouse at all.
+        const HWND foreground = GetForegroundWindow();
+        if (foreground != nullptr && !IsOwnProcessWindow(foreground) &&
+            polish::IsCandidateWindow(foreground) && !polish::IsElevatedWindow(foreground)) {
+            target = foreground;
+        }
+    }
+    if (target == nullptr) {
+        polish::LogDebug(L"[Polish] MoveMode: keyboard latch found no movable window");
+        EndMoveModeSession();
+        return;
+    }
+    ShowMoveModeDim();
+    if (IsZoomed(target)) {
+        ShowWindow(target, SW_RESTORE);
+    }
+    BeginMoveModeTarget(target, screenPt, polish::Grip::Move);
+    g_moveModeKeyboardSession = true;
+    g_moveModeKeyboardGrip = polish::Grip::BottomRight;
+    // Not a mouse drag, but still Polish moving a window -- the settle
+    // debounce has to stay suppressed for the whole session.
+    g_moveModeMovingWindow = true;
+    if (auto* overlay = MoveModeOverlayFor(target)) {
+        overlay->Hide();
+    }
+    UpdateMoveModeOutline();
+    polish::LogDebug(std::format(L"[Polish] MoveMode: keyboard session on hwnd={}",
+                                  reinterpret_cast<void*>(target)));
+}
+
+polish::Grip NextMoveModeGrip(polish::Grip grip) {
+    switch (grip) {
+        case polish::Grip::TopLeft:
+            return polish::Grip::TopRight;
+        case polish::Grip::TopRight:
+            return polish::Grip::BottomRight;
+        case polish::Grip::BottomRight:
+            return polish::Grip::BottomLeft;
+        case polish::Grip::BottomLeft:
+        case polish::Grip::Move:
+        default:
+            return polish::Grip::TopLeft;
+    }
+}
+
+void OnMoveModeKeyCommand(polish::MoveModeHook::KeyCommand command) {
+    if (!g_moveModeKeyboardSession || g_moveModeTarget == nullptr || !IsWindow(g_moveModeTarget)) {
+        return;
+    }
+    if (command.kind == polish::MoveModeHook::KeyCommand::Kind::CycleGrip) {
+        g_moveModeKeyboardGrip = NextMoveModeGrip(g_moveModeKeyboardGrip);
+        polish::LogDebug(std::format(L"[Polish] MoveMode: resize corner now {}",
+                                      static_cast<int>(g_moveModeKeyboardGrip)));
+        return;
+    }
+
+    // Resampled every command rather than tracked, so an app that
+    // resizes itself between keystrokes cannot leave this working from a
+    // rect the window no longer has.
+    RECT inset{};
+    const RECT visible = MoveModeVisibleRectFor(g_moveModeTarget, inset);
+    g_moveModeInset = inset;
+
+    const int step = polish::kKeyboardStepPx;
+    polish::Grip grip = polish::Grip::Move;
+    RECT desired = visible;
+    switch (command.kind) {
+        case polish::MoveModeHook::KeyCommand::Kind::Move:
+            desired = polish::DragGrip(visible, polish::Grip::Move, command.dx * step, command.dy * step);
+            break;
+        case polish::MoveModeHook::KeyCommand::Kind::Resize:
+            grip = g_moveModeKeyboardGrip;
+            desired = polish::DragGrip(visible, grip, command.dx * step, command.dy * step);
+            break;
+        case polish::MoveModeHook::KeyCommand::Kind::Jump:
+            desired = polish::NextSnapInDirection(visible, g_moveModeSnapEdges, command.dx, command.dy);
+            break;
+        case polish::MoveModeHook::KeyCommand::Kind::CycleGrip:
+            return;  // handled above
+    }
+
+    desired = polish::EnforceMinimumSize(desired, grip, polish::kMinWindowWidthPx, polish::kMinWindowHeightPx);
+    if (grip != polish::Grip::Move) {
+        // A resize is clamped to the monitor; a move deliberately is not.
+        // The clamp exists so a *pointer* slammed at a shared edge parks
+        // flush instead of spilling over, and that problem does not exist
+        // for arrow keys -- clamping them would instead make it
+        // impossible to walk a window onto the next monitor at all.
+        desired = polish::ClampToMonitor(desired, g_moveModeMonitorRect, grip);
+    }
+    desired = polish::ApplySnap(desired, g_moveModeSnapEdges, MoveModeSnapThreshold(), grip);
+    ApplyMoveModeRect(desired);
+
+    // A keyboard move can walk the window onto another monitor, which
+    // changes what it should be snapping to.
+    RECT moved{};
+    if (polish::GetVisibleWindowRect(g_moveModeTarget, moved)) {
+        const HMONITOR nowOn = MonitorFromRect(&moved, MONITOR_DEFAULTTONEAREST);
+        if (nowOn != nullptr && nowOn != g_moveModeMonitor) {
+            SampleMoveModeGeometry(g_moveModeTarget);
+        }
+    }
+}
+
+void OnMoveModeCancel() {
+    if (g_moveModeHaveOriginal && g_moveModeTarget != nullptr && IsWindow(g_moveModeTarget)) {
+        // The original is a raw GetWindowRect value put back verbatim --
+        // no inset conversion anywhere on this path, which is exactly
+        // what RectUtils.h's warning asks for: a rect this window
+        // reported for itself is by construction what SetWindowPos needs
+        // to reproduce that state.
+        const RECT& original = g_moveModeOriginalRect;
+        SetWindowPos(g_moveModeTarget, nullptr, original.left, original.top, original.right - original.left,
+                     original.bottom - original.top, SWP_NOZORDER | SWP_NOACTIVATE);
+        polish::LogDebug(std::format(L"[Polish] MoveMode: cancelled, hwnd={} put back",
+                                      reinterpret_cast<void*>(g_moveModeTarget)));
+    }
+    EndMoveModeSession();
+}
+
+void OnMoveModeCommit() {
+    EndMoveModeSession();
+}
+
 constexpr UINT kMenuIdRestoreSync = 1;
 constexpr UINT kMenuIdAltTab = 2;
 constexpr UINT kMenuIdNewGroup = 3;
@@ -4601,6 +5232,7 @@ constexpr UINT kMenuIdExit = 7;
 constexpr UINT kMenuIdHalo = 8;
 constexpr UINT kMenuIdBullseye = 9;
 constexpr UINT kMenuIdTaskbar = 10;
+constexpr UINT kMenuIdMoveMode = 11;
 
 constexpr wchar_t kAboutUrl[] = L"https://www.linkedin.com/in/davidlenihan/";
 
@@ -5370,6 +6002,8 @@ void PopulateTrayMenu(HMENU menu) {
                 L"Bullseye (copy/paste flash)");
     AppendMenuW(menu, MF_STRING | (g_settings.taskbarEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdTaskbar,
                 L"Taskbar hover list and click-to-cycle");
+    AppendMenuW(menu, MF_STRING | (g_settings.moveModeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdMoveMode,
+                L"Hold Win to move/resize any window");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuIdNewGroup,
                 (L"New Group...\t" + FormatHotkey(g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey))
@@ -5413,6 +6047,17 @@ void HandleTrayCommand(UINT commandId) {
                 // after the ring finishes; the frame timer's next tick
                 // sees an inactive overlay and kills itself.
                 g_bullseye->Hide();
+            }
+            break;
+        case kMenuIdMoveMode:
+            g_settings.moveModeEnabled = !g_settings.moveModeEnabled;
+            polish::SaveSettings(g_settings);
+            polish::LogDebug(
+                std::format(L"[Polish] MoveMode {}", g_settings.moveModeEnabled ? L"enabled" : L"disabled"));
+            if (!g_settings.moveModeEnabled) {
+                // Toggled off mid-hold: the dim must come down now, not
+                // whenever the key happens to be released.
+                EndMoveModeSession();
             }
             break;
         case kMenuIdTaskbar:
@@ -5481,6 +6126,8 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 RefreshAllHiddenThumbnails();
             } else if (wParam == kThumbnailStabilizeTimerId) {
                 StabilizeHoveredThumbnail();
+            } else if (wParam == kMoveModeDimTimerId) {
+                OnMoveModeDimTimer();
             } else if (wParam == kHaloRenderTimerId) {
                 KillTimer(hwnd, kHaloRenderTimerId);
                 if (g_haloWatched != nullptr) {
@@ -5585,6 +6232,12 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             }
             return 0;
 
+        case polish::MoveModeHook::kMoveModeMessage:
+            if (g_moveModeHook) {
+                g_moveModeHook->HandleHookMessage(wParam, lParam);
+            }
+            return 0;
+
         case polish::kTabsReadyMessage:
             OnTabsReady(static_cast<uint64_t>(wParam));
             return 0;
@@ -5678,6 +6331,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         case WM_DESTROY:
             RemoveClipboardFormatListener(hwnd);
             KillTimer(hwnd, kBullseyeFrameTimerId);
+            KillTimer(hwnd, kMoveModeDimTimerId);
             UnregisterHotKey(hwnd, kNewGroupHotkeyId);
             if (g_foregroundHook != nullptr) {
                 UnhookWinEvent(g_foregroundHook);
@@ -5811,9 +6465,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_settings = polish::LoadSettings();
     polish::LogDebug(std::format(
         L"[Polish] settings loaded: restoreSyncEnabled={} altTabEnabled={} haloEnabled={} bullseyeEnabled={} "
-        L"taskbarEnabled={}",
+        L"taskbarEnabled={} moveModeEnabled={} moveModeSnapThresholdPx={}",
         g_settings.restoreSyncEnabled, g_settings.altTabEnabled, g_settings.haloEnabled,
-        g_settings.bullseyeEnabled, g_settings.taskbarEnabled));
+        g_settings.bullseyeEnabled, g_settings.taskbarEnabled, g_settings.moveModeEnabled,
+        g_settings.moveModeSnapThresholdPx));
 
     g_messageWindow = CreateMessageWindow(instance);
     if (g_messageWindow == nullptr) {
@@ -6059,6 +6714,37 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
     }
     ApplyTaskbarSetting();
+
+    // Pre-warmed rather than created on first use. The first frame of a
+    // Win hold is the latency-sensitive one, and creating a layered
+    // window inside it is exactly what caused a real first-show flash
+    // bug once before (see AltTabListWindow.h).
+    g_moveModeBorder = std::make_unique<polish::AltTabHighlightBorder>(GetModuleHandleW(nullptr));
+    g_moveModeHook = std::make_unique<polish::MoveModeHook>(
+        g_messageWindow, []() { return g_settings.moveModeEnabled; },
+        [](POINT screenPt) {
+            // Synchronous, from inside the mouse hook -- the answer
+            // decides whether the button is swallowed, so it cannot be
+            // posted. Bounded and silent by construction; see
+            // MoveModeCandidateAt.
+            return MoveModeCandidateAt(screenPt) != nullptr;
+        });
+    if (!g_moveModeHook->IsInstalled()) {
+        polish::LogDebug(std::format(L"[Polish] MoveMode: WARNING failed to install the keyboard hook -- "
+                                      L"hold-Win move/resize unavailable. GetLastError={}",
+                                      GetLastError()));
+    } else {
+        polish::LogDebug(L"[Polish] MoveMode: keyboard hook installed successfully");
+    }
+    g_moveModeHook->SetOnArm(OnMoveModeArm);
+    g_moveModeHook->SetOnEnd(EndMoveModeSession);
+    g_moveModeHook->SetOnGrab(OnMoveModeGrab);
+    g_moveModeHook->SetOnDrag(OnMoveModeDrag);
+    g_moveModeHook->SetOnDrop(OnMoveModeDrop);
+    g_moveModeHook->SetOnKeyboardLatch(OnMoveModeKeyboardLatch);
+    g_moveModeHook->SetOnKeyCommand(OnMoveModeKeyCommand);
+    g_moveModeHook->SetOnCancel(OnMoveModeCancel);
+    g_moveModeHook->SetOnCommit(OnMoveModeCommit);
 
     OnForegroundChanged(GetForegroundWindow());
 

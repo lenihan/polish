@@ -32,6 +32,7 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 # (main.cpp's WinMain doesn't belong in a test binary).
 add_library(polish_core STATIC
     src/windowtracking/RectUtils.cpp
+    src/windowtracking/MoveSnap.cpp
     src/windowtracking/ActivationHistory.cpp
     src/windowtracking/GroupState.cpp
     src/windowtracking/GroupManager.cpp
@@ -44,6 +45,7 @@ add_library(polish_core STATIC
     src/hook/ActiveWindowHalo.cpp
     src/hook/BullseyeOverlay.cpp
     src/hook/AltTabHook.cpp
+    src/hook/MoveModeHook.cpp
     src/hook/AltTabDimOverlay.cpp
     src/hook/AltTabHighlightBorder.cpp
     src/hook/AltTabListWindow.cpp
