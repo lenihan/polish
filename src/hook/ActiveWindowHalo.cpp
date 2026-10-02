@@ -37,6 +37,17 @@ int DistanceToAlpha(float d, int halo, int peak) {
     return static_cast<int>(static_cast<float>(peak) * falloff + 0.5f);
 }
 
+int OutlineAlpha(float d, int thickness, int alpha) {
+    if (thickness <= 0 || d < 0.0f || d >= static_cast<float>(thickness)) {
+        return 0;
+    }
+    // Antialiased over the last pixel of the outer edge only. The inner
+    // edge needs none: it abuts the target, which covers everything
+    // behind it.
+    const float coverage = std::clamp(static_cast<float>(thickness) - d, 0.0f, 1.0f);
+    return static_cast<int>(static_cast<float>(alpha) * coverage + 0.5f);
+}
+
 }  // namespace halo_math
 
 namespace {
@@ -135,6 +146,22 @@ constexpr int kPeakAlphaLight = 100;
 // GetVisibleWindowRect reports), which is the other way this seam opens
 // up.
 constexpr int kUnderlapDip = 2;
+
+// The contrasting outline ring: thickness in DIPs, and its alpha per
+// theme. See the class comment for why it exists -- a one-toned glow
+// disappears against a background of its own tone, in both themes.
+//
+// Scaled by DPI like every other dimension here, so it stays a visible
+// hairline rather than a sub-pixel suggestion on a high-DPI display.
+constexpr int kOutlineDip = 1;
+
+// Strong, because this is the half that has to carry on an unfavourable
+// background, and it is one DIP wide with nothing else to help it. Both
+// tuned by eye and worth re-checking live against a light wallpaper and
+// a dark one (see PLAN.md's verification walkthrough) -- they are the
+// kind of value only looking at it can settle.
+constexpr int kOutlineAlphaDark = 210;
+constexpr int kOutlineAlphaLight = 210;
 
 void EnsureClassRegistered(HINSTANCE instance) {
     static bool registered = false;
@@ -480,9 +507,24 @@ void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, U
     // on its own) and on the inside at d = -underlap, past which the glow
     // sits far enough under its own target that not even the target's
     // semi-transparent border samples it.
+    // The outline ring, in the opposite tone to the glow. Clamped to the
+    // halo's own extent so a target with almost no room around it cannot
+    // end up as a bare ring with no glow behind it.
+    const int outlineThickness = std::min(std::max(1, MulDiv(kOutlineDip, static_cast<int>(dpi), 96)), halo);
+    const int outlineAlpha = isDark ? kOutlineAlphaDark : kOutlineAlphaLight;
+
     const auto colorForDistance = [&](float d) -> uint32_t {
         if (d >= static_cast<float>(halo) || d < -static_cast<float>(underlap)) {
             return 0;
+        }
+        // Checked before the glow: on the ring, the opposite tone wins
+        // outright rather than being blended with the glow underneath.
+        // A blend of pure white and pure black is grey, which reads as a
+        // smudge at the window's edge instead of the crisp line this is
+        // for -- and the ring is one DIP wide, so there is no room for a
+        // gradient to say anything useful anyway.
+        if (const int ring = halo_math::OutlineAlpha(d, outlineThickness, outlineAlpha); ring > 0) {
+            return PremultipliedPixel(ring, !isDark);
         }
         return PremultipliedPixel(halo_math::DistanceToAlpha(d, halo, peak), isDark);
     };

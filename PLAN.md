@@ -486,6 +486,58 @@ current todo list.
     not feeding a `WH_MOUSE_LL` hook at all, which made the first probe
     pass while exercising nothing.
 
+- Halo: a hairline ring of the opposite tone, drawn hard against the
+  target's edge underneath the glow, so the halo reads on any background.
+  The glow alone only showed against a background it contrasted with --
+  white vanished over a light document or wallpaper, black over a dark
+  desktop, reported for both themes. Dark ring under the white glow in
+  dark mode, light ring under the black glow in light mode; whichever the
+  background is, one of the two shows. Same two-tone reasoning as
+  BullseyeOverlay's ring.
+  - The ring sits strictly *outside* the target's edge (d >= 0). Inside
+    is the underlap (`kUnderlapDip`), which exists to give the target's
+    semi-transparent frame border a uniform backdrop -- putting the
+    opposite tone there would reopen the uneven-edge bug that constant
+    was added to close.
+  - It wins outright over the glow rather than blending with it: a blend
+    of pure white and pure black is grey, which reads as a smudge at the
+    edge instead of a line, and one DIP has no room for a gradient to say
+    anything. Antialiased on its outer pixel only; the inner edge abuts
+    the target, which covers everything behind it.
+  - `halo_math::OutlineAlpha` is the pure piece, unit-tested alongside
+    the falloff (4 cases: full across the ring, nothing inside the
+    target, outer-pixel antialiasing, zero thickness).
+  - Measured rather than eyeballed, since the eyeball was not available:
+    screen-captured a scanline across the edge with the halo off and on.
+    Over a white backdrop the glow is invisible and the ring reads at
+    luminance 35 against 235 (control: 200, i.e. nothing but DWM's own
+    shadow); over a dark backdrop the glow ramps to 161 against 26. Light
+    mode is symmetric in code and covered by the unit tests but has not
+    been looked at live.
+
+- Move/resize mode: moving a window no longer raises it. The whole point
+  of dragging a background window from anywhere on it is to tidy it
+  without disturbing what is in front, and several things along the way
+  raised it anyway -- `ShowWindow(SW_RESTORE)` on a maximized target does
+  by documentation, and a raise was measured during the grab handler on a
+  window with five others above it. Rather than chase each one, the real
+  window the target sat beneath is recorded at grab time and its place
+  re-asserted after the restore, at the drop, and at session end. Insert
+  relative to a named window, never `HWND_TOP`, which silently no-ops for
+  a background process (the trap `PlaceHaloBehindTarget` already
+  documents). Recorded by skipping Polish's own windows, since a dimmed
+  target has its own dim overlay directly above it.
+  - Three measurement traps cost most of the time here, all worth
+    knowing. `msinfo32` re-orders itself while it loads, so it is useless
+    as a z-order reference and produced two confident false "RAISED"
+    verdicts. A WinForms window made from PowerShell does not pass
+    `IsCandidateWindowShape` (logged `candidate=false`), so Polish
+    ignores it entirely -- the probe silently grabbed VS Code instead and
+    measured nothing, and the same thing makes such a window useless as a
+    halo target. And counting *all* visible windows above the target
+    wobbles with Polish's own dim overlays appearing and disappearing;
+    counting only real candidate windows is the stable measure.
+
 ## v1.0 release -- Microsoft Store
 
 The route is settled and should not be re-litigated: v1.0 ships through the
@@ -585,7 +637,6 @@ release has to exist before the signing application can even go in.
   switched off, and that uninstall leaves nothing behind.
 
 ## Left to do
-- Halo should still be visible on a light background for darkmode, and dark background for light mode
 - Virtual Monitor: From a single monitor, split it into 2+ monitors with custom scaling.
   Mouse should "stick" inside a monitor. Alt+tab only shows apps running on that monitor.
   Can have different resolutions for each monitor. OS should think it is actually multiple

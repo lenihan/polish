@@ -84,3 +84,32 @@ TEST_CASE("RoundedRectDistance: boundary point on the flat edge is exactly zero"
     const float d = RoundedRectDistance(0.0f, halfHeight, halfWidth, halfHeight, radius);
     CHECK(d == doctest::Approx(0.0f));
 }
+
+TEST_CASE("OutlineAlpha: full across the ring, nothing beyond it") {
+    CHECK(OutlineAlpha(0.0f, /*thickness=*/1, /*alpha=*/210) == 210);
+    CHECK(OutlineAlpha(0.5f, /*thickness=*/1, /*alpha=*/210) == 105);
+    CHECK(OutlineAlpha(1.0f, /*thickness=*/1, /*alpha=*/210) == 0);
+    CHECK(OutlineAlpha(8.0f, /*thickness=*/1, /*alpha=*/210) == 0);
+}
+
+TEST_CASE("OutlineAlpha: nothing inside the target, where the underlap lives") {
+    // Negative d is behind the target's own edge. Putting the opposite
+    // tone there would reopen the uneven-edge bug kUnderlapDip closed.
+    CHECK(OutlineAlpha(-0.1f, /*thickness=*/2, /*alpha=*/210) == 0);
+    CHECK(OutlineAlpha(-4.0f, /*thickness=*/2, /*alpha=*/210) == 0);
+}
+
+TEST_CASE("OutlineAlpha: a thicker ring is only antialiased on its outer pixel") {
+    constexpr int thickness = 3;
+    constexpr int alpha = 210;
+    CHECK(OutlineAlpha(0.0f, thickness, alpha) == alpha);
+    CHECK(OutlineAlpha(1.0f, thickness, alpha) == alpha);
+    CHECK(OutlineAlpha(2.0f, thickness, alpha) == alpha);  // last full pixel
+    CHECK(OutlineAlpha(2.5f, thickness, alpha) == 105);    // half covered
+    CHECK(OutlineAlpha(3.0f, thickness, alpha) == 0);
+}
+
+TEST_CASE("OutlineAlpha: a zero or negative thickness draws no ring at all") {
+    CHECK(OutlineAlpha(0.0f, /*thickness=*/0, /*alpha=*/210) == 0);
+    CHECK(OutlineAlpha(0.0f, /*thickness=*/-2, /*alpha=*/210) == 0);
+}

@@ -34,6 +34,19 @@ float RoundedRectDistance(float px, float py, float halfWidth, float halfHeight,
 // part of the glow's shape, which is why it lives there and not here.
 int DistanceToAlpha(float d, int halo, int peak);
 
+// The contrasting outline ring's alpha at signed distance `d`: `alpha`
+// across the ring, antialiased over the final pixel of its outer edge,
+// and 0 everywhere the ring isn't (inside the target, or past
+// `thickness`). A 0 return means "not on the ring" and is what the
+// renderer keys off to fall through to the glow.
+//
+// The ring sits just *outside* the target's own edge -- d >= 0 only --
+// deliberately. Inside that edge is the underlap (see kUnderlapDip in
+// the .cpp), which exists to give the target's semi-transparent frame
+// border a uniform backdrop; putting the opposite tone there would
+// reopen the uneven-edge bug that constant was added to close.
+int OutlineAlpha(float d, int thickness, int alpha);
+
 }  // namespace halo_math
 
 // A soft glow drawn just outside the currently active (foreground)
@@ -44,6 +57,16 @@ int DistanceToAlpha(float d, int halo, int peak);
 // much harder-to-miss third cue. White in dark mode, black in light mode
 // -- IsDarkModeEnabled() is read fresh on every render, never cached, the
 // same codebase-wide convention DarkMode.h's other functions document.
+//
+// The glow alone only reads against a background it contrasts with: a
+// white glow vanishes on a light wallpaper or a light document behind the
+// window, and a black one vanishes on a dark desktop -- reported for both
+// themes. So a one-DIP ring of the *opposite* tone is drawn hard against
+// the target's edge, inside the glow: in dark mode a dark ring under a
+// white glow, in light mode a light ring under a black glow. Whichever
+// the background is, one of the two shows. Same two-tone trick
+// BullseyeOverlay already uses on its ring, and the same reason -- a
+// single-toned mark disappears against some part of a real desktop.
 // No halo on a maximized or full-screen window (see CoversWholeMonitor
 // in main.cpp) -- there's no room outside such a window's edges to draw
 // into, and it's already unambiguously the focused one.

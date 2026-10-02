@@ -88,6 +88,15 @@ on a maximized or full-screen window (there's no room outside their
 edges, and it's already unambiguous which one is focused) or during an
 Alt+Tab session.
 
+- **It stays visible on any background.** The glow on its own only shows
+  against a background it contrasts with — a white glow disappears over
+  a light document or wallpaper, and a black one over a dark desktop. So
+  a hairline ring of the opposite tone is drawn hard against the window's
+  edge, underneath the glow: a dark ring under the white glow in dark
+  mode, a light ring under the black glow in light mode. Whichever the
+  background turns out to be, one of the two reads. Same two-tone trick
+  as the copy/paste bullseye, for the same reason.
+
 **Hold Win to move or resize any window, from anywhere on it.** Apps
 increasingly draw their own UI into the title bar, or have no title bar
 at all, so the strip you can grab to move a window has quietly shrunk to

@@ -4701,6 +4701,23 @@ RECT g_moveModeInset{};
 RECT g_moveModeOriginalRect{};
 bool g_moveModeHaveOriginal = false;
 
+// The real window the target sat directly beneath when it was grabbed,
+// so its place in the stack can be put back afterwards. Null when it was
+// already the topmost real window, which needs no restoring.
+//
+// Moving a window must not raise it: the whole point of being able to
+// drag a background window from anywhere on it is to tidy it without
+// disturbing what is in front. Several things along the way raise it
+// anyway -- ShowWindow(SW_RESTORE) on a maximized target does by
+// documentation, and a raise was measured during the grab handler on a
+// window that had five others above it -- so rather than chase each one,
+// the position is recorded once and re-asserted at the end.
+//
+// Recorded by skipping Polish's own windows: a dimmed target has its own
+// dim overlay sitting directly above it, so the naive GW_HWNDPREV answer
+// is an overlay, and inserting beneath that would be meaningless.
+HWND g_moveModeInsertAfter = nullptr;
+
 polish::SnapCandidates g_moveModeSnapEdges;
 HMONITOR g_moveModeMonitor = nullptr;
 RECT g_moveModeMonitorRect{};
@@ -4759,6 +4776,38 @@ RECT MoveModeVisibleRectFor(HWND hwnd, RECT& insetOut) {
     insetOut = {windowRect.left - visible.left, windowRect.top - visible.top,
                 windowRect.right - visible.right, windowRect.bottom - visible.bottom};
     return visible;
+}
+
+// The first window above hwnd that is not one of Polish's own.
+HWND RealWindowAbove(HWND hwnd) {
+    for (HWND w = GetWindow(hwnd, GW_HWNDPREV); w != nullptr; w = GetWindow(w, GW_HWNDPREV)) {
+        if (!IsOwnProcessWindow(w) && IsWindowVisible(w)) {
+            return w;
+        }
+    }
+    return nullptr;
+}
+
+// Puts the target back where it was in the stack. A no-op when it was
+// already topmost, or when the window it sat under has since closed.
+//
+// Deliberately inserts after a specific window rather than using
+// HWND_TOP/HWND_BOTTOM: HWND_TOP silently no-ops for a background process
+// (see ActiveWindowHalo.cpp's PlaceHaloBehindTarget, which hit exactly
+// that), while inserting relative to a named window is the form that
+// works.
+void RestoreMoveModeZOrder() {
+    if (g_moveModeTarget == nullptr || !IsWindow(g_moveModeTarget) || g_moveModeInsertAfter == nullptr) {
+        return;
+    }
+    if (!IsWindow(g_moveModeInsertAfter)) {
+        return;
+    }
+    if (RealWindowAbove(g_moveModeTarget) == g_moveModeInsertAfter) {
+        return;  // already there
+    }
+    SetWindowPos(g_moveModeTarget, g_moveModeInsertAfter, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 BOOL CALLBACK EnumMoveModeNeighbourProc(HWND hwnd, LPARAM) {
@@ -4869,9 +4918,11 @@ void EndMoveModeSession() {
     if (g_moveModeBorder) {
         g_moveModeBorder->Hide();
     }
+    RestoreMoveModeZOrder();
     const HWND target = g_moveModeTarget;
     const bool wasDimmed = g_moveModeDimmed;
     g_moveModeTarget = nullptr;
+    g_moveModeInsertAfter = nullptr;
     g_moveModeKeyboardSession = false;
     g_moveModeMovingWindow = false;
     g_moveModeHaveOriginal = false;
@@ -4895,6 +4946,7 @@ void EndMoveModeSession() {
 // Takes `hwnd` in hand: records where it started, what it may snap to,
 // and the inset needed to put a visible-space rect back onto it.
 void BeginMoveModeTarget(HWND hwnd, POINT screenPt, polish::Grip grip) {
+    g_moveModeInsertAfter = RealWindowAbove(hwnd);
     g_moveModeTarget = hwnd;
     g_moveModeGrip = grip;
     g_moveModeGrabPoint = screenPt;
@@ -4964,6 +5016,7 @@ void OnMoveModeGrab(polish::MoveModeHook::Grab grab, POINT screenPt) {
         // rather than jumping to wherever it last floated.
         RECT ignored{};
         const RECT maximized = MoveModeVisibleRectFor(target, ignored);
+        const HWND insertAfterBeforeRestore = RealWindowAbove(target);
         ShowWindow(target, SW_RESTORE);
         RECT inset{};
         const RECT restored = MoveModeVisibleRectFor(target, inset);
@@ -4976,6 +5029,12 @@ void OnMoveModeGrab(polish::MoveModeHook::Grab grab, POINT screenPt) {
         g_moveModeTarget = target;
         g_moveModeInset = inset;
         ApplyMoveModeRect(RECT{left, top, left + restoredWidth, top + restoredHeight});
+        // SW_RESTORE above activates and raises by documentation, so the
+        // place in the stack is restored here too, not only at the end --
+        // otherwise the window visibly jumps to the front for the whole
+        // duration of the drag.
+        g_moveModeInsertAfter = insertAfterBeforeRestore;
+        RestoreMoveModeZOrder();
     }
 
     RECT visible{};
@@ -5077,6 +5136,7 @@ void OnMoveModeDrop() {
     g_moveModeMovingWindow = false;
     if (g_moveModeTarget != nullptr && IsWindow(g_moveModeTarget)) {
         SyncRestorePlacementNow(g_moveModeTarget);
+        RestoreMoveModeZOrder();
         if (g_moveModeDimmed) {
             if (auto* overlay = MoveModeOverlayFor(g_moveModeTarget)) {
                 // Dimmed again now it has stopped moving -- the session
