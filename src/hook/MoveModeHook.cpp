@@ -203,7 +203,35 @@ bool MoveModeHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
     if (IsWinKey(vk)) {
         if (down) {
             if (winHeld_) {
-                return false;  // OS auto-repeat of the held Win key
+                // OS auto-repeat of the held Win key, and it has to be
+                // swallowed once this mode has committed to the hold.
+                //
+                // The reason is not obvious and cost a user-reported bug:
+                // every repeat key-down re-arms the shell's
+                // "standalone Win press" condition, which throws away the
+                // Ctrl tap SuppressStartMenuForThisHold already injected.
+                // So after a real hold -- a physical key repeating at
+                // ~30/s for the whole drag -- the Win-up at the end still
+                // opened the Start menu, on top of the window just moved.
+                // Measured against the bare OS with Polish stopped:
+                // Win-down, Ctrl tap, Win-up leaves Start shut; the same
+                // sequence with a dozen repeat downs inserted before the
+                // up opens it every time.
+                //
+                // Synthetic input never showed this, because keybd_event
+                // sends one down and no repeats. That is also why the
+                // repeats are swallowed rather than answered with another
+                // Ctrl tap per repeat: injecting ~30 keystrokes a second
+                // into whatever app is under the cursor to work around a
+                // keystroke we are already injecting is the worse trade.
+                //
+                // Safe to swallow, unlike the key-up: the OS took the key
+                // as held from the first down, which is passed through
+                // untouched, and nothing meaningful counts Win repeats.
+                // Gated on having actually suppressed Start, so a hold
+                // handed back to Windows (or one that has not done
+                // anything yet) still delivers every repeat.
+                return startMenuSuppressedThisHold_ && !nativeHandoffActive_;
             }
             winHeld_ = true;
             nativeHandoffActive_ = false;

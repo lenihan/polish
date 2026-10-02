@@ -436,6 +436,26 @@ current todo list.
     surviving process exit), so the Start menu is stopped the other way
     -- an invisible Ctrl tap once per hold, the moment the mode first
     does anything visible.
+  - That tap alone is not enough, and the gap was user-reported: the Win
+    key *repeats* while held, at ~30/s, and every repeat key-down
+    re-arms the shell's "standalone Win press" condition and discards the
+    tap. So releasing Win after moving a window opened the Start menu on
+    top of the window just moved. Measured against the bare OS with
+    Polish stopped: Win-down, Ctrl tap, Win-up leaves Start shut, and the
+    same sequence with a dozen repeat downs inserted before the up opens
+    it every time. The repeats are now swallowed once the mode has
+    committed to the hold -- safe, unlike the key-up, because the OS took
+    the key as held from the first down (which is passed through) and
+    nothing counts Win repeats. Answering each repeat with another Ctrl
+    tap was the alternative and is the worse trade: ~30 injected
+    keystrokes a second into whatever app is under the cursor.
+  - Why no probe caught it: `keybd_event` sends one key-down and no
+    repeats, so synthetic input cannot produce the condition at all. The
+    first probe also closed the Start menu unconditionally as cleanup,
+    which would have hidden it, and checked only for
+    `StartMenuExperienceHost` as the foreground window when opening Start
+    actually surfaces `SearchHost`. Three separate reasons a green probe
+    meant nothing here.
   - Snapping is magnetic and never blocking: recomputed each frame from
     the raw pointer rect, so it attracts within the threshold and simply
     stops past it. Windows still overlap freely with no modifier.
