@@ -78,24 +78,27 @@ list panel), and the panel heading shows the app's name instead of
   to fall back on.
 - The tray menu's Alt+Tab checkbox controls both.
 
-**A soft halo around the active window.** A quick, theme-aware glow —
-white in dark mode, black in light mode — around whichever window
-currently has focus, fading out over about a quarter inch on all four
-sides. Windows 11's own focus cues (a subtly different title bar, the
+**A soft halo around the active window.** A quick glow in your Windows
+accent colour around whichever window currently has focus, fading out
+over about a quarter inch on all four sides. Windows 11's own focus cues (a subtly different title bar, the
 DWM shadow) are easy to miss on a busy desktop; the halo makes it
 obvious at a glance which window you're typing into. It doesn't appear
 on a maximized or full-screen window (there's no room outside their
 edges, and it's already unambiguous which one is focused) or during an
 Alt+Tab session.
 
-- **It stays visible on any background.** The glow on its own only shows
-  against a background it contrasts with — a white glow disappears over
-  a light document or wallpaper, and a black one over a dark desktop. So
-  a hairline ring of the opposite tone is drawn hard against the window's
-  edge, underneath the glow: a dark ring under the white glow in dark
-  mode, a light ring under the black glow in light mode. Whichever the
-  background turns out to be, one of the two reads. Same two-tone trick
-  as the copy/paste bullseye, for the same reason.
+- **It stays visible on any background.** The accent colour is the point:
+  what the glow has to stand out against is whatever window happens to be
+  *behind* the focused one, which has nothing to do with whether you run
+  Windows in dark or light mode. A white glow disappears over a white
+  page even on a dark-mode desktop — which is exactly where a
+  theme-coloured glow failed. A saturated accent reads against a white
+  page and a black terminal alike. Underneath it, hard against the
+  window's edge, sits a hairline of the opposite brightness to your
+  accent, which covers the one case the accent can't: a background that
+  happens to be the accent's own colour. Same two-tone trick as the
+  copy/paste bullseye, for the same reason. Change your accent colour in
+  Settings and the halo follows immediately.
 
 **Hold Win to move or resize any window, from anywhere on it.** Apps
 increasingly draw their own UI into the title bar, or have no title bar

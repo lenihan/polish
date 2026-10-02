@@ -486,34 +486,50 @@ current todo list.
     not feeding a `WH_MOUSE_LL` hook at all, which made the first probe
     pass while exercising nothing.
 
-- Halo: a hairline ring of the opposite tone, drawn hard against the
-  target's edge underneath the glow, so the halo reads on any background.
-  The glow alone only showed against a background it contrasted with --
-  white vanished over a light document or wallpaper, black over a dark
-  desktop, reported for both themes. Dark ring under the white glow in
-  dark mode, light ring under the black glow in light mode; whichever the
-  background is, one of the two shows. Same two-tone reasoning as
-  BullseyeOverlay's ring.
-  - The ring sits strictly *outside* the target's edge (d >= 0). Inside
-    is the underlap (`kUnderlapDip`), which exists to give the target's
-    semi-transparent frame border a uniform backdrop -- putting the
-    opposite tone there would reopen the uneven-edge bug that constant
-    was added to close.
-  - It wins outright over the glow rather than blending with it: a blend
-    of pure white and pure black is grey, which reads as a smudge at the
-    edge instead of a line, and one DIP has no room for a gradient to say
-    anything. Antialiased on its outer pixel only; the inner edge abuts
-    the target, which covers everything behind it.
-  - `halo_math::OutlineAlpha` is the pure piece, unit-tested alongside
-    the falloff (4 cases: full across the ring, nothing inside the
-    target, outer-pixel antialiasing, zero thickness).
-  - Measured rather than eyeballed, since the eyeball was not available:
-    screen-captured a scanline across the edge with the halo off and on.
-    Over a white backdrop the glow is invisible and the ring reads at
-    luminance 35 against 235 (control: 200, i.e. nothing but DWM's own
-    shadow); over a dark backdrop the glow ramps to 161 against 26. Light
-    mode is symmetric in code and covered by the unit tests but has not
-    been looked at live.
+- Halo: drawn in the user's accent colour rather than a tone picked from
+  the theme, with a hairline of the opposite brightness underneath it.
+  The original design was white in dark mode and black in light mode,
+  which sounds right and is not: what the glow must contrast with is
+  whatever window sits *behind* the focused one, and that has nothing to
+  do with the system theme. Reported with a screenshot -- an active black
+  terminal on top of a white page, on a dark-mode desktop -- where the
+  white glow was invisible against the white page, the one place it was
+  needed. A first attempt added a one-DIP ring of the opposite tone,
+  which was measurable but, at one DIP against a white page, read as an
+  ordinary window border rather than a focus cue.
+  - A saturated mid-luminance hue reads against both extremes where white
+    and black each fail against one of them, and it matches what Alt+Tab
+    already does, so the two focus cues finally agree.
+  - The accent is pulled into a luminance band (60-185) before use, hue
+    preserved by scaling all three channels, because an accent is allowed
+    to be nearly white or nearly black -- which would put the glow
+    straight back into the state this change exists to escape.
+  - The hairline's tone comes from the accent's own luminance, not the
+    theme: white under a dark accent, black under a light one. It gives
+    the glow a crisp inner boundary and is the fallback for the one case
+    the accent cannot cover alone, a backdrop of the accent's own colour.
+    It sits strictly outside the target's edge; inside is the underlap
+    (`kUnderlapDip`), and putting the opposite tone there would reopen
+    the uneven-edge bug that constant was added to close.
+  - `PremultipliedPixel` loses its pure-white/black shortcut and does a
+    real multiply. Effectively free: the bands are the overwhelming
+    majority of the pixels and compute one value per row or column before
+    a fill_n/memcpy, so it runs per line, not per pixel.
+  - The theme is no longer an input at all, so `isDark` is gone from the
+    renderer and from the cache key, replaced by the accent colour --
+    which means changing the accent in Settings takes effect without a
+    restart.
+  - `halo_math` gains `Luminance` and `ClampGlowLuminance`, unit-tested
+    alongside the falloff and the outline (COLORREF's 0x00BBGGRR channel
+    order, in-band passthrough, near-white pulled down, near-black pushed
+    up, pure black becoming a grey, and hue survival).
+  - Measured rather than eyeballed, since the eyeball was not available.
+    Screen-captured a scanline across the edge against each extreme. Over
+    a white backdrop the glow now reads at luminance 118 against 235
+    across ~20px, where the old white glow was invisible and the old
+    hairline was 2px; over a dark backdrop the hairline reads 179 against
+    25. Both backgrounds now carry a strong cue, from opposite halves of
+    the pair.
 
 - Move/resize mode: moving a window no longer raises it. The whole point
   of dragging a background window from anywhere on it is to tidy it

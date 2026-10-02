@@ -47,6 +47,23 @@ int DistanceToAlpha(float d, int halo, int peak);
 // reopen the uneven-edge bug that constant was added to close.
 int OutlineAlpha(float d, int thickness, int alpha);
 
+// Perceived luminance, 0-255, of a colour in COLORREF's own 0x00BBGGRR
+// layout (what GetAccentColor returns). The usual 0.299/0.587/0.114
+// weighting.
+int Luminance(uint32_t colorref);
+
+// `colorref` with its luminance pulled into [minLum, maxLum], hue kept by
+// scaling all three channels together.
+//
+// The glow is drawn in the user's accent colour, and an accent is allowed
+// to be nearly white or nearly black -- at which point it is back to
+// being invisible against exactly the backdrop this change exists to
+// handle. Pulling it into a middle band guarantees it differs from both a
+// white page and a black terminal. Scaling can clip a channel and shift
+// the hue a little at the extremes; that is accepted, since a slightly
+// off hue that can be seen beats a faithful one that cannot.
+uint32_t ClampGlowLuminance(uint32_t colorref, int minLum, int maxLum);
+
 }  // namespace halo_math
 
 // A soft glow drawn just outside the currently active (foreground)
@@ -54,19 +71,30 @@ int OutlineAlpha(float d, int thickness, int alpha);
 // so the focused window visibly lifts off the desktop. Windows 11's own
 // focus cues -- a subtly different title bar shade, the DWM drop shadow
 // -- are both easy to miss on a busy multi-window desktop; this is a
-// much harder-to-miss third cue. White in dark mode, black in light mode
-// -- IsDarkModeEnabled() is read fresh on every render, never cached, the
-// same codebase-wide convention DarkMode.h's other functions document.
+// much harder-to-miss third cue.
 //
-// The glow alone only reads against a background it contrasts with: a
-// white glow vanishes on a light wallpaper or a light document behind the
-// window, and a black one vanishes on a dark desktop -- reported for both
-// themes. So a one-DIP ring of the *opposite* tone is drawn hard against
-// the target's edge, inside the glow: in dark mode a dark ring under a
-// white glow, in light mode a light ring under a black glow. Whichever
-// the background is, one of the two shows. Same two-tone trick
-// BullseyeOverlay already uses on its ring, and the same reason -- a
-// single-toned mark disappears against some part of a real desktop.
+// Drawn in the user's accent colour, not in a tone picked from the
+// theme, and that distinction is the whole point. An earlier version was
+// white in dark mode and black in light mode, which sounds right and is
+// not: the thing the glow has to contrast with is whatever window happens
+// to be *behind* this one, and that has nothing to do with the system
+// theme. Reported with a screenshot -- a black terminal, active, on top
+// of a white page, on a dark-mode desktop: the white glow was invisible
+// against the white page, the one place it was needed. A saturated
+// mid-luminance hue reads against both a white page and a black
+// terminal, where white and black each fail against one of them. It also
+// matches what Alt+Tab already does, so the two focus cues finally agree.
+// GetAccentColor() is read fresh on every render and never cached, the
+// convention DarkMode.h's other functions document, so changing the
+// accent in Settings takes effect without a restart.
+//
+// Underneath it, hard against the target's edge, a one-DIP ring of the
+// opposite luminance to the glow -- dark under a light accent, light
+// under a dark one. It gives the glow a crisp inner boundary and is the
+// fallback for the case the accent cannot cover on its own: a backdrop
+// that happens to be the accent's own colour. Same two-tone trick
+// BullseyeOverlay uses on its ring, and the same reason -- a single-toned
+// mark disappears against some part of a real desktop.
 // No halo on a maximized or full-screen window (see CoversWholeMonitor
 // in main.cpp) -- there's no room outside such a window's edges to draw
 // into, and it's already unambiguously the focused one.
@@ -83,7 +111,7 @@ int OutlineAlpha(float d, int thickness, int alpha);
 // which is exactly why the earlier gradient version of
 // AltTabHighlightBorder itself was tuned into a solid ring instead) and
 // its own caching/perf regime (a grow-only DIB reused across renders,
-// cache-keyed on (width, height, dpi, isDark), not a fresh
+// cache-keyed on (width, height, dpi, accent colour), not a fresh
 // CreateDIBSection per call). Really generalizing the two would mean
 // parameterizing over all of: inside vs. outside the target, solid vs.
 // gradient fill, session-scoped vs. permanently alive, GDI+ vs. a raw
@@ -143,11 +171,11 @@ private:
     // Repaints the buffer's content for a target of `targetWidth` x
     // `targetHeight`, inflated outward by `inflate` on each side (0 on a
     // side flush against its monitor's own edge -- see ShowAroundTarget),
-    // at `dpi`/`isDark`. Updates width_/height_/dpi_/isDark_ and the
+    // at `dpi`, in `glow`. Updates width_/height_/dpi_/glow_ and the
     // prevXBand_ rects to match when done; does not touch the window's
     // position or visibility -- ShowAroundTarget does that once, after
     // this returns, atomically together via UpdateLayeredWindow.
-    void Render(int targetWidth, int targetHeight, RECT inflate, UINT dpi, bool isDark);
+    void Render(int targetWidth, int targetHeight, RECT inflate, UINT dpi, COLORREF glow);
     void EnsureDibCapacity(int width, int height);
     void ClearRect(const RECT& rect);
     void FollowTargetVirtualDesktop(HWND target);
@@ -174,7 +202,7 @@ private:
     // distinct from capWidth_/capHeight_ (the buffer's allocated
     // capacity, which only ever grows) and from cachedTargetSize_ (the
     // target's own size, exposed to callers). Doubles as most of the
-    // full-render cache key, alongside dpi_/isDark_ below --
+    // full-render cache key, alongside dpi_/glow_ below --
     // ShowAroundTarget takes the cheap move-only path whenever a fresh
     // render would produce identical pixels to what's already in the
     // buffer. -1 before the first render (never a real size), so the
@@ -182,7 +210,10 @@ private:
     int width_ = -1;
     int height_ = -1;
     UINT dpi_ = 0;
-    bool isDark_ = false;
+    // The accent colour the cached content was rendered in, part of the
+    // full-render cache key: the user can change it in Settings at any
+    // time and the glow has to follow without a restart.
+    COLORREF glow_ = 0;
 
     // The *target's* own size as of the last full render -- what
     // CachedTargetSize() reports. Deliberately separate from width_/

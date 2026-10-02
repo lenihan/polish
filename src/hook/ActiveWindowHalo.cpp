@@ -48,6 +48,36 @@ int OutlineAlpha(float d, int thickness, int alpha) {
     return static_cast<int>(static_cast<float>(alpha) * coverage + 0.5f);
 }
 
+int Luminance(uint32_t colorref) {
+    const uint32_t r = colorref & 0xFFu;
+    const uint32_t g = (colorref >> 8) & 0xFFu;
+    const uint32_t b = (colorref >> 16) & 0xFFu;
+    return static_cast<int>((299u * r + 587u * g + 114u * b) / 1000u);
+}
+
+uint32_t ClampGlowLuminance(uint32_t colorref, int minLum, int maxLum) {
+    if (minLum > maxLum) {
+        return colorref;
+    }
+    const int lum = Luminance(colorref);
+    if (lum >= minLum && lum <= maxLum) {
+        return colorref;
+    }
+    if (lum <= 0) {
+        // Pure black has no hue to preserve; scaling it stays black
+        // however hard it is scaled.
+        const uint32_t grey = static_cast<uint32_t>(std::clamp(minLum, 0, 255));
+        return grey | (grey << 8) | (grey << 16);
+    }
+    const int targetLum = lum < minLum ? minLum : maxLum;
+    const auto scale = [&](uint32_t channel) {
+        return static_cast<uint32_t>(
+            std::clamp(static_cast<int>(channel) * targetLum / lum, 0, 255));
+    };
+    return scale(colorref & 0xFFu) | (scale((colorref >> 8) & 0xFFu) << 8) |
+           (scale((colorref >> 16) & 0xFFu) << 16);
+}
+
 }  // namespace halo_math
 
 namespace {
@@ -113,13 +143,20 @@ constexpr wchar_t kClassName[] = L"PolishActiveWindowHalo";
 // extended-frame-bounds and the monitor rect.
 constexpr int kEdgeTolerance = 2;
 
-// Peak alpha at the target's own edge, tuned by eye -- separate per theme
-// because the two don't read the same at equal alpha: a black glow this
-// strong reads as a heavy drop shadow around every window, unpleasant at
-// the white value's 190. Adjust after seeing both live (see PLAN.md's
-// verification walkthrough).
-constexpr int kPeakAlphaDark = 190;
-constexpr int kPeakAlphaLight = 100;
+// Peak alpha at the target's own edge, tuned by eye.
+//
+// One value, not one per theme. The old split existed because a *black*
+// glow at the white value's 190 read as a heavy drop shadow around every
+// window; the glow is no longer black in either theme, so the reason is
+// gone with it.
+constexpr int kPeakAlpha = 190;
+
+// The band the accent colour's luminance is pulled into before it is
+// used, so an accent that is nearly white or nearly black cannot put the
+// glow back into the invisible-against-one-extreme state this whole
+// approach exists to escape. Tuned by eye, like everything else here.
+constexpr int kGlowMinLuminance = 60;
+constexpr int kGlowMaxLuminance = 185;
 
 // How far the glow keeps painting, at full peak alpha, *inside* the
 // target's own edge (at 96 DPI) rather than stopping dead at d = 0.
@@ -147,21 +184,18 @@ constexpr int kPeakAlphaLight = 100;
 // up.
 constexpr int kUnderlapDip = 2;
 
-// The contrasting outline ring: thickness in DIPs, and its alpha per
-// theme. See the class comment for why it exists -- a one-toned glow
-// disappears against a background of its own tone, in both themes.
+// The contrasting outline ring: thickness in DIPs, and its alpha. See
+// the class comment for why it exists. Its tone is not a constant -- it
+// is whichever of black or white opposes the accent's own luminance.
 //
 // Scaled by DPI like every other dimension here, so it stays a visible
 // hairline rather than a sub-pixel suggestion on a high-DPI display.
 constexpr int kOutlineDip = 1;
 
-// Strong, because this is the half that has to carry on an unfavourable
-// background, and it is one DIP wide with nothing else to help it. Both
-// tuned by eye and worth re-checking live against a light wallpaper and
-// a dark one (see PLAN.md's verification walkthrough) -- they are the
-// kind of value only looking at it can settle.
-constexpr int kOutlineAlphaDark = 210;
-constexpr int kOutlineAlphaLight = 210;
+// Strong, because it is one DIP wide with nothing else to help it.
+// Tuned by eye and worth re-checking live (see PLAN.md's verification
+// walkthrough) -- the kind of value only looking at it can settle.
+constexpr int kOutlineAlpha = 210;
 
 void EnsureClassRegistered(HINSTANCE instance) {
     static bool registered = false;
@@ -180,15 +214,23 @@ void EnsureClassRegistered(HINSTANCE instance) {
     registered = true;
 }
 
-// Because the color is always pure white or pure black, premultiplying is
-// a single store per pixel rather than a separate per-pixel multiply pass:
-// premultiplied white is (a,a,a,a) in every channel, which as a top-down
-// 32bpp BGRA store (alpha in the high byte) is just alpha broadcast into
-// every byte; premultiplied black is (0,0,0,a), alpha alone in the high
-// byte.
-uint32_t PremultipliedPixel(int alpha, bool white) {
+// A premultiplied top-down 32bpp BGRA pixel (alpha in the high byte) in
+// `colorref`, which is in COLORREF's own 0x00BBGGRR layout.
+//
+// An earlier version took a bool and shortcut the multiply, because the
+// colour was only ever pure white (a,a,a,a -- alpha broadcast into every
+// byte) or pure black (alpha alone in the high byte). An arbitrary accent
+// colour needs the real multiply. It costs almost nothing in practice:
+// the bands, which are the overwhelming majority of the pixels, compute
+// one value per row or column and fill_n/memcpy it, so this runs per
+// *line*, not per pixel. Only the four small corner boxes call it per
+// pixel, and they were already doing per-pixel sqrtf work.
+uint32_t PremultipliedPixel(int alpha, uint32_t colorref) {
     const uint32_t a = static_cast<uint32_t>(std::clamp(alpha, 0, 255));
-    return white ? a * 0x01010101u : (a << 24);
+    const uint32_t r = ((colorref & 0xFFu) * a) / 255u;
+    const uint32_t g = (((colorref >> 8) & 0xFFu) * a) / 255u;
+    const uint32_t b = (((colorref >> 16) & 0xFFu) * a) / 255u;
+    return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
 }  // namespace
@@ -341,7 +383,11 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
         }
     }
 
-    const bool isDark = IsDarkModeEnabled();
+    // Read fresh every render, never cached -- the same convention
+    // IsDarkModeEnabled() carries, and for the same reason: the user can
+    // change the accent in Settings while this is running.
+    const COLORREF glow =
+        halo_math::ClampGlowLuminance(GetAccentColor(), kGlowMinLuminance, kGlowMaxLuminance);
     const int glowWidth = targetWidth + inflate.left + inflate.right;
     const int glowHeight = targetHeight + inflate.top + inflate.bottom;
 
@@ -350,14 +396,14 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
 
     POINT dstPoint{targetRect.left - inflate.left, targetRect.top - inflate.top};
 
-    // Cache key: (glow width, glow height, dpi, isDark). Glow width/height
+    // Cache key: (glow width, glow height, dpi, accent colour). Glow width/height
     // (not just the target's own size) already bakes in the per-side
     // inflation, so a target that crosses a monitor's flush edge without
     // changing its own size still correctly triggers a full re-render
     // here, even though CachedTargetSize() (target-size-only, for callers
     // debouncing resize bursts) would have reported "unchanged".
     const bool sameContent =
-        (glowWidth == width_ && glowHeight == height_ && dpi == dpi_ && isDark == isDark_ && bits_ != nullptr);
+        (glowWidth == width_ && glowHeight == height_ && dpi == dpi_ && glow == glow_ && bits_ != nullptr);
 
     if (sameContent) {
         // Cheap move-only path: reposition without touching content
@@ -376,7 +422,7 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
     }
 
     const ULONGLONG renderStartMs = GetTickCount64();
-    Render(targetWidth, targetHeight, inflate, dpi, isDark);
+    Render(targetWidth, targetHeight, inflate, dpi, glow);
     cachedTargetSize_ = SIZE{targetWidth, targetHeight};
     const ULONGLONG renderDurationMs = GetTickCount64() - renderStartMs;
 
@@ -404,9 +450,9 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
     visible_ = true;
 
     polish::LogDebug(std::format(
-        L"[Polish] Halo: render target={} rect=({},{})-({},{}) dpi={} dark={} durationMs={}",
+        L"[Polish] Halo: render target={} rect=({},{})-({},{}) dpi={} glow=0x{:06X} durationMs={}",
         reinterpret_cast<void*>(target), targetRect.left, targetRect.top, targetRect.right, targetRect.bottom, dpi,
-        isDark, renderDurationMs));
+        glow, renderDurationMs));
 }
 
 void ActiveWindowHalo::EnsureDibCapacity(int width, int height) {
@@ -452,7 +498,7 @@ void ActiveWindowHalo::ClearRect(const RECT& rect) {
     }
 }
 
-void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, UINT dpi, bool isDark) {
+void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, UINT dpi, COLORREF glow) {
     const int glowWidth = targetWidth + inflate.left + inflate.right;
     const int glowHeight = targetHeight + inflate.top + inflate.bottom;
     EnsureDibCapacity(glowWidth, glowHeight);
@@ -489,7 +535,13 @@ void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, U
     const float r = static_cast<float>(std::max(rInt, 0));
 
     const int halo = std::max({inflate.left, inflate.top, inflate.right, inflate.bottom});
-    const int peak = isDark ? kPeakAlphaDark : kPeakAlphaLight;
+    const int peak = kPeakAlpha;
+
+    // Black under a light accent, white under a dark one -- whichever
+    // opposes the glow. Derived from the colour actually being drawn, not
+    // from the theme, so the pair always spans a real luminance range
+    // however the accent is set.
+    const uint32_t ringColor = halo_math::Luminance(glow) >= 128 ? 0x00000000u : 0x00FFFFFFu;
 
     // How far each band runs *past* the target's own edge, into pixels the
     // target itself covers -- see kUnderlapDip for why it exists at all.
@@ -511,7 +563,7 @@ void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, U
     // halo's own extent so a target with almost no room around it cannot
     // end up as a bare ring with no glow behind it.
     const int outlineThickness = std::min(std::max(1, MulDiv(kOutlineDip, static_cast<int>(dpi), 96)), halo);
-    const int outlineAlpha = isDark ? kOutlineAlphaDark : kOutlineAlphaLight;
+    const int outlineAlpha = kOutlineAlpha;
 
     const auto colorForDistance = [&](float d) -> uint32_t {
         if (d >= static_cast<float>(halo) || d < -static_cast<float>(underlap)) {
@@ -524,9 +576,9 @@ void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, U
         // for -- and the ring is one DIP wide, so there is no room for a
         // gradient to say anything useful anyway.
         if (const int ring = halo_math::OutlineAlpha(d, outlineThickness, outlineAlpha); ring > 0) {
-            return PremultipliedPixel(ring, !isDark);
+            return PremultipliedPixel(ring, ringColor);
         }
-        return PremultipliedPixel(halo_math::DistanceToAlpha(d, halo, peak), isDark);
+        return PremultipliedPixel(halo_math::DistanceToAlpha(d, halo, peak), glow);
     };
 
     const int midLeft = tl.left + rInt;
@@ -610,7 +662,7 @@ void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, U
     width_ = glowWidth;
     height_ = glowHeight;
     dpi_ = dpi;
-    isDark_ = isDark;
+    glow_ = glow;
 
     // Each one covers its band's underlapped extent too, not just the
     // pixels outside the target: those inner pixels are painted like any

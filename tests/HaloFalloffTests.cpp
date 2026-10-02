@@ -113,3 +113,45 @@ TEST_CASE("OutlineAlpha: a zero or negative thickness draws no ring at all") {
     CHECK(OutlineAlpha(0.0f, /*thickness=*/0, /*alpha=*/210) == 0);
     CHECK(OutlineAlpha(0.0f, /*thickness=*/-2, /*alpha=*/210) == 0);
 }
+
+TEST_CASE("Luminance: COLORREF channel order is 0x00BBGGRR, not RGB") {
+    // Getting this backwards would silently swap red and blue and make
+    // every luminance decision below wrong for anything but a grey.
+    CHECK(Luminance(0x000000FF) == 76);    // pure red
+    CHECK(Luminance(0x0000FF00) == 149);   // pure green (587*255/1000 truncates)
+    CHECK(Luminance(0x00FF0000) == 29);    // pure blue
+    CHECK(Luminance(0x00FFFFFF) == 255);   // white
+    CHECK(Luminance(0x00000000) == 0);     // black
+}
+
+TEST_CASE("ClampGlowLuminance: a colour already in band is returned untouched") {
+    constexpr uint32_t accent = 0x00D47800;  // the Windows default blue
+    CHECK(ClampGlowLuminance(accent, 60, 185) == accent);
+}
+
+TEST_CASE("ClampGlowLuminance: a near-white accent is pulled down into band") {
+    // The case the band exists for: an accent that would vanish against a
+    // white page, which is the backdrop that started all this.
+    const uint32_t pulled = ClampGlowLuminance(0x00FFFFFF, 60, 185);
+    CHECK(Luminance(pulled) <= 185);
+    CHECK(Luminance(pulled) >= 180);  // pulled to the edge of the band, not past it
+}
+
+TEST_CASE("ClampGlowLuminance: a near-black accent is pushed up into band") {
+    const uint32_t pushed = ClampGlowLuminance(0x00100808, 60, 185);
+    CHECK(Luminance(pushed) >= 60);
+}
+
+TEST_CASE("ClampGlowLuminance: pure black becomes a grey, having no hue to keep") {
+    const uint32_t grey = ClampGlowLuminance(0x00000000, 60, 185);
+    CHECK(Luminance(grey) >= 60);
+    CHECK((grey & 0xFF) == ((grey >> 8) & 0xFF));
+    CHECK((grey & 0xFF) == ((grey >> 16) & 0xFF));
+}
+
+TEST_CASE("ClampGlowLuminance: scaling keeps the hue's dominant channel dominant") {
+    // A dark red stays recognisably red rather than drifting grey.
+    const uint32_t lifted = ClampGlowLuminance(0x00000040, 60, 185);
+    CHECK((lifted & 0xFF) > ((lifted >> 8) & 0xFF));
+    CHECK((lifted & 0xFF) > ((lifted >> 16) & 0xFF));
+}
