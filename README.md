@@ -103,31 +103,46 @@ Alt+Tab session.
 **Hold Win to move or resize any window, from anywhere on it.** Apps
 increasingly draw their own UI into the title bar, or have no title bar
 at all, so the strip you can grab to move a window has quietly shrunk to
-nothing -- and the resize border is about seven pixels wide. Hold the Win
-key: after a moment every window dims, and the one under the pointer gets
-an accent outline. Now drag with the **left button anywhere on a window**
-to move it, or the **right button anywhere on it** to resize. Release Win
-to leave. There is nothing to aim at in either gesture.
+nothing — and the resize border is about seven pixels wide. Hold the Win
+key: after a moment every window dims, and the one under the pointer
+shows its own map — an inch-wide band around the edge that resizes, and
+everything inside it that moves. Drag with the **left button**, and where
+you pressed decides what happens. Release Win to leave. There is nothing
+to aim at in either gesture, and only one button to use.
 
-- **Resize grabs the nearest corner.** The window is split into four
-  quadrants, and the corner of the quadrant you grabbed follows the
-  pointer -- so the smallest target is a quarter of the window.
-- **Windows snap, but are never blocked.** Edges are drawn magnetically
-  to the monitor's work area and to the visible edges of other windows,
-  so you can butt two windows flush or line them up without aiming. Push
-  a little further and the window slides straight past: overlapping
-  needs no modifier, no override, nothing held down.
+- **The map shows what a click will do before you click.** The zone under
+  the pointer is filled in, so you can see you're about to resize the
+  right edge rather than move the window. Once you're dragging, the map
+  disappears and only the edges actually moving stay lit — so a move and
+  a resize look different while they're happening, not just before.
+- **The band is an inch wide**, which is the point: the native 7px border
+  is what this feature exists to replace, so a band you had to aim at
+  would bring the problem back. On a window too small for a full inch it
+  shrinks to keep a usable move area in the middle.
+- **Drop at a screen edge to snap.** Drag a window to the left or right
+  edge for half the screen, into a corner for a quarter, or to the top to
+  maximize. A preview shows exactly where it will land, and nothing
+  commits until you let go — so carrying on past the edge just dismisses
+  it, which is also how you drag between monitors.
+- **Windows snap to each other, but are never blocked.** Edges are drawn
+  magnetically to the monitor's work area and to the visible edges of
+  other windows, so you can butt two windows flush or line them up
+  without aiming. Push a little further and the window slides straight
+  past: overlapping needs no modifier, no override, nothing held down.
 - **The monitor edge is a wall.** Slam a window at the boundary between
   two screens and it parks flush against it instead of spilling onto the
-  next one. Keep pushing well past the edge and it crosses -- no modifier
+  next one. Keep pushing well past the edge and it crosses — no modifier
   for that either. On a single monitor it simply cannot leave the screen.
 - **Without the mouse: Win+Space.** That latches onto the window under
   the pointer (or the active one) and keeps the session open after you
   let go of Win. Arrows move it, snapping as they go; **Shift+Arrow**
-  resizes the active corner and **Tab** cycles which corner that is;
-  **Ctrl+Arrow** jumps the window flush to the next snap target in that
-  direction. **Enter** keeps it, **Escape** puts it back exactly where it
-  started, and a click anywhere keeps it and ends the session.
+  resizes the active zone and **Tab** walks that zone around the eight
+  edges and corners; **Ctrl+Arrow** jumps the window flush to the next
+  snap target in that direction. **Enter** keeps it, **Escape** puts it
+  back exactly where it started, and a click anywhere keeps it and ends
+  the session.
+- **Moving a window never raises it**, so you can tidy something in the
+  background without bringing it to the front.
 - **Normal Win shortcuts are untouched.** Pressing any other key during
   the hold hands the whole thing back to Windows, and the dim waits a
   quarter-second before appearing, so Win+L, Win+D, Win+E, Win+Arrow and

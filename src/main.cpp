@@ -2,10 +2,12 @@
 
 #include <objbase.h>
 #include <shellapi.h>
+#include <shellscalingapi.h>
 #include <shobjidl_core.h>
 #include <tlhelp32.h>
 
 #include <algorithm>
+#include <cmath>
 #include <format>
 #include <map>
 #include <set>
@@ -26,6 +28,7 @@
 #include "hook/GroupPickerWindow.h"
 #include "hook/GroupTabThumbnail.h"
 #include "hook/MoveModeHook.h"
+#include "hook/MoveModeZoneOverlay.h"
 #include "hook/TaskbarHook.h"
 #include "hook/TaskbarShield.h"
 #include "settings/Settings.h"
@@ -33,6 +36,7 @@
 #include "tabs/UiaWorker.h"
 #include "tray/TrayIcon.h"
 #include "util/AnchorPoint.h"
+#include "util/DarkMode.h"
 #include "util/AppIdentity.h"
 #include "util/AppResolver.h"
 #include "util/Logging.h"
@@ -4660,6 +4664,25 @@ std::unique_ptr<polish::MoveModeHook> g_moveModeHook;
 std::vector<std::unique_ptr<polish::AltTabDimOverlay>> g_moveModeOverlays;
 std::vector<HWND> g_moveModeDimTargets;
 std::unique_ptr<polish::AltTabHighlightBorder> g_moveModeBorder;
+// The zone map drawn on the window under the pointer, and -- a second
+// instance of the same class, since it is the same machinery with
+// different content -- the preview of where a half/quarter/maximize drop
+// would put the window.
+std::unique_ptr<polish::MoveModeZoneOverlay> g_moveModeZones;
+std::unique_ptr<polish::MoveModeZoneOverlay> g_moveModeLayoutPreview;
+
+// The resize band's width for the window currently under the pointer, and
+// the zone that pointer is in. Recomputed as the pointer moves so the map
+// can follow it.
+int g_moveModeBorderPx = 0;
+polish::Grip g_moveModeHoverGrip = polish::Grip::Move;
+
+// The layout a drop would commit to right now, or None. Only ever set
+// during a Grip::Move drag -- resizing into a half makes no sense.
+polish::SnapLayout g_moveModeLayout = polish::SnapLayout::None;
+// The work area the pending layout is measured against. The pointer's
+// monitor, which is not necessarily the dragged window's.
+RECT g_moveModeLayoutWork{};
 
 // The window in hand, or the one a click would grab while only hovering.
 // Null the rest of the time.
@@ -4844,6 +4867,49 @@ void SampleMoveModeGeometry(HWND hwnd) {
     g_moveModeSnapEdges = polish::CollectSnapEdges(g_moveModeWorkArea, g_moveModeNeighbourRects);
 }
 
+// The DPI of the monitor a window is on, which is what every dimension
+// in this feature is scaled by.
+//
+// GetDpiForMonitor, never GetDpiForWindow: the latter answers with the
+// *target's* own DPI-awareness context, so a system-DPI-aware app on a
+// high-DPI monitor reports 96 and would get a half-size band and a
+// half-size zone map. ActiveWindowHalo.cpp hit exactly that.
+UINT MoveModeDpiForMonitor(HMONITOR monitor) {
+    UINT dpiX = 96;
+    UINT dpiY = 96;
+    if (monitor != nullptr && SUCCEEDED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY))) {
+        return dpiX;
+    }
+    return 96;
+}
+
+UINT MoveModeDpiFor(HWND hwnd) {
+    const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    UINT dpiX = 96;
+    UINT dpiY = 96;
+    if (monitor != nullptr && SUCCEEDED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY))) {
+        return dpiX;
+    }
+    return 96;
+}
+
+// The resize band for this window: one inch, which at any DPI is just the
+// DPI itself, clamped by ResizeBorderPx so it can never eat the window.
+int MoveModeBorderFor(HWND hwnd, const RECT& visible) {
+    const int oneInch = static_cast<int>(
+        std::lround(static_cast<double>(MoveModeDpiFor(hwnd)) * polish::kResizeBorderInches));
+    return polish::ResizeBorderPx(visible, oneInch);
+}
+
+COLORREF MoveModeAccent() { return polish::GetAccentColor(); }
+
+void HideMoveModeLayoutPreview() {
+    g_moveModeLayout = polish::SnapLayout::None;
+    if (g_moveModeLayoutPreview) {
+        g_moveModeLayoutPreview->Hide();
+    }
+}
+
 void UpdateMoveModeOutline() {
     if (g_moveModeBorder && g_moveModeTarget != nullptr && IsWindow(g_moveModeTarget)) {
         // ShowAroundTarget already skips its own DIB/GDI+/premultiply
@@ -4918,6 +4984,10 @@ void EndMoveModeSession() {
     if (g_moveModeBorder) {
         g_moveModeBorder->Hide();
     }
+    if (g_moveModeZones) {
+        g_moveModeZones->Hide();
+    }
+    HideMoveModeLayoutPreview();
     RestoreMoveModeZOrder();
     const HWND target = g_moveModeTarget;
     const bool wasDimmed = g_moveModeDimmed;
@@ -4993,10 +5063,21 @@ void OnMoveModeDimTimer() {
     if (GetCursorPos(&cursor)) {
         g_moveModeTarget = MoveModeCandidateAt(cursor);
         UpdateMoveModeOutline();
+        // The map has to be up the moment the mode becomes visible, not
+        // on the first pointer movement after it: a hold with a still
+        // hand would otherwise dim the screen and explain nothing.
+        if (g_moveModeTarget != nullptr && g_moveModeZones) {
+            RECT inset{};
+            const RECT visible = MoveModeVisibleRectFor(g_moveModeTarget, inset);
+            g_moveModeBorderPx = MoveModeBorderFor(g_moveModeTarget, visible);
+            g_moveModeHoverGrip = polish::GripForPoint(visible, cursor, g_moveModeBorderPx);
+            g_moveModeZones->ShowZones(visible, g_moveModeBorderPx, g_moveModeHoverGrip, /*dragging=*/false,
+                                        MoveModeAccent(), MoveModeDpiFor(g_moveModeTarget));
+        }
     }
 }
 
-void OnMoveModeGrab(polish::MoveModeHook::Grab grab, POINT screenPt) {
+void OnMoveModeGrab(POINT screenPt) {
     HWND target = MoveModeCandidateAt(screenPt);
     if (target == nullptr) {
         // canGrab already said yes from inside the hook; the window can
@@ -5040,9 +5121,11 @@ void OnMoveModeGrab(polish::MoveModeHook::Grab grab, POINT screenPt) {
     RECT visible{};
     RECT inset{};
     visible = MoveModeVisibleRectFor(target, inset);
-    const polish::Grip grip = grab == polish::MoveModeHook::Grab::Move
-                                  ? polish::Grip::Move
-                                  : polish::GripForPoint(visible, screenPt);
+    // Where you pressed decides what this is: the band resizes, the
+    // middle moves. One button, one hit-test -- see MoveModeHook.h for
+    // why the right button is no longer in this.
+    g_moveModeBorderPx = MoveModeBorderFor(target, visible);
+    const polish::Grip grip = polish::GripForPoint(visible, screenPt, g_moveModeBorderPx);
     BeginMoveModeTarget(target, screenPt, grip);
     g_moveModeMovingWindow = true;
     if (auto* overlay = MoveModeOverlayFor(target)) {
@@ -5054,8 +5137,14 @@ void OnMoveModeGrab(polish::MoveModeHook::Grab grab, POINT screenPt) {
         overlay->Hide();
     }
     UpdateMoveModeOutline();
-    polish::LogDebug(std::format(L"[Polish] MoveMode: grabbed hwnd={} as {}", reinterpret_cast<void*>(target),
-                                  grip == polish::Grip::Move ? L"move" : L"resize"));
+    g_moveModeHoverGrip = grip;
+    if (g_moveModeZones) {
+        g_moveModeZones->ShowZones(visible, g_moveModeBorderPx, grip, /*dragging=*/true, MoveModeAccent(),
+                                    MoveModeDpiFor(target));
+    }
+    polish::LogDebug(std::format(L"[Polish] MoveMode: grabbed hwnd={} zone={} border={}px",
+                                  reinterpret_cast<void*>(target), static_cast<int>(grip),
+                                  g_moveModeBorderPx));
 }
 
 void OnMoveModeDrag(POINT screenPt) {
@@ -5067,16 +5156,33 @@ void OnMoveModeDrag(POINT screenPt) {
             return;
         }
         const HWND hovered = MoveModeCandidateAt(screenPt);
-        if (hovered == g_moveModeTarget) {
-            return;
-        }
-        g_moveModeTarget = hovered;
         if (hovered == nullptr) {
+            g_moveModeTarget = nullptr;
             if (g_moveModeBorder) {
                 g_moveModeBorder->Hide();
             }
-        } else {
+            if (g_moveModeZones) {
+                g_moveModeZones->Hide();
+            }
+            return;
+        }
+        const bool newTarget = hovered != g_moveModeTarget;
+        g_moveModeTarget = hovered;
+        if (newTarget) {
             UpdateMoveModeOutline();
+        }
+        // The zone map follows the pointer within one window, not just
+        // between windows, so which zone is live updates as the pointer
+        // crosses from the band into the middle. ShowZones skips the
+        // rasterize when nothing it draws has changed, so calling it on
+        // every coalesced move is cheap.
+        RECT inset{};
+        const RECT visible = MoveModeVisibleRectFor(hovered, inset);
+        g_moveModeBorderPx = MoveModeBorderFor(hovered, visible);
+        g_moveModeHoverGrip = polish::GripForPoint(visible, screenPt, g_moveModeBorderPx);
+        if (g_moveModeZones) {
+            g_moveModeZones->ShowZones(visible, g_moveModeBorderPx, g_moveModeHoverGrip,
+                                        /*dragging=*/false, MoveModeAccent(), MoveModeDpiFor(hovered));
         }
         return;
     }
@@ -5130,11 +5236,74 @@ void OnMoveModeDrag(POINT screenPt) {
     // screen, never back off it.
     result = polish::ApplySnap(result, g_moveModeSnapEdges, MoveModeSnapThreshold(), g_moveModeGrip);
     ApplyMoveModeRect(result);
+
+    // The committed look follows the window. For a move this costs a
+    // window reposition and nothing else -- see
+    // MoveModeZoneOverlay::PresentMoveOnly.
+    if (g_moveModeZones) {
+        g_moveModeZones->ShowZones(result, g_moveModeBorderPx, g_moveModeGrip, /*dragging=*/true,
+                                    MoveModeAccent(), MoveModeDpiFor(g_moveModeTarget));
+    }
+
+    // Layout snapping, and only for a move: dropping a resize into a half
+    // means nothing. Driven by the pointer rather than the window, the
+    // way the native gesture is -- the window itself is clamped to the
+    // monitor, so its edges would reach a screen edge long before the
+    // user meant anything by it.
+    //
+    // This does fire at the shared edge between two monitors, where the
+    // user may have meant to cross rather than to snap. That is what the
+    // native gesture does too, and it is recoverable in the same way:
+    // nothing commits until the button comes up, so carrying on past the
+    // edge dismisses the preview and crosses as usual.
+    if (g_moveModeGrip != polish::Grip::Move) {
+        HideMoveModeLayoutPreview();
+        return;
+    }
+    const HMONITOR layoutMonitor = MonitorFromPoint(screenPt, MONITOR_DEFAULTTONULL);
+    MONITORINFO layoutInfo{};
+    layoutInfo.cbSize = sizeof(layoutInfo);
+    polish::SnapLayout layout = polish::SnapLayout::None;
+    UINT layoutDpi = 96;
+    if (layoutMonitor != nullptr && GetMonitorInfoW(layoutMonitor, &layoutInfo)) {
+        layoutDpi = MoveModeDpiForMonitor(layoutMonitor);
+        layout = polish::LayoutForPointer(screenPt, layoutInfo.rcMonitor,
+                                          MulDiv(polish::kLayoutEdgeDip, static_cast<int>(layoutDpi), 96),
+                                          MulDiv(polish::kLayoutCornerDip, static_cast<int>(layoutDpi), 96));
+    }
+    if (layout == polish::SnapLayout::None) {
+        HideMoveModeLayoutPreview();
+        return;
+    }
+    g_moveModeLayout = layout;
+    g_moveModeLayoutWork = layoutInfo.rcWork;
+    if (g_moveModeLayoutPreview) {
+        g_moveModeLayoutPreview->ShowFill(polish::RectForLayout(layout, layoutInfo.rcWork), MoveModeAccent(),
+                                           layoutDpi);
+    }
 }
 
 void OnMoveModeDrop() {
     g_moveModeMovingWindow = false;
     if (g_moveModeTarget != nullptr && IsWindow(g_moveModeTarget)) {
+        // A pending layout wins over wherever the drag happened to leave
+        // the window: the preview has been showing this rect, and the
+        // drop is the commitment it was waiting for.
+        if (g_moveModeLayout != polish::SnapLayout::None) {
+            if (g_moveModeLayout == polish::SnapLayout::Maximize) {
+                // A real maximize, not just a work-area-sized rect, so
+                // the window's own Restore button works afterwards and
+                // restore-position sync has something meaningful to
+                // write. SW_RESTORE's raising problem applies here too,
+                // hence the z-order restore below.
+                ShowWindow(g_moveModeTarget, SW_MAXIMIZE);
+            } else {
+                ApplyMoveModeRect(polish::RectForLayout(g_moveModeLayout, g_moveModeLayoutWork));
+            }
+            polish::LogDebug(std::format(L"[Polish] MoveMode: dropped hwnd={} into layout {}",
+                                          reinterpret_cast<void*>(g_moveModeTarget),
+                                          static_cast<int>(g_moveModeLayout)));
+        }
         SyncRestorePlacementNow(g_moveModeTarget);
         RestoreMoveModeZOrder();
         if (g_moveModeDimmed) {
@@ -5144,12 +5313,23 @@ void OnMoveModeDrop() {
                 overlay->ShowOverTarget(g_moveModeTarget);
             }
         }
+        if (g_moveModeZones) {
+            // Back to the hover map: the drag is over, but the session
+            // may well continue on this same window.
+            RECT inset{};
+            const RECT nowVisible = MoveModeVisibleRectFor(g_moveModeTarget, inset);
+            g_moveModeBorderPx = MoveModeBorderFor(g_moveModeTarget, nowVisible);
+            g_moveModeZones->ShowZones(nowVisible, g_moveModeBorderPx, g_moveModeHoverGrip,
+                                        /*dragging=*/false, MoveModeAccent(),
+                                        MoveModeDpiFor(g_moveModeTarget));
+        }
         RECT dropped{};
         GetWindowRect(g_moveModeTarget, &dropped);
         polish::LogDebug(std::format(L"[Polish] MoveMode: dropped hwnd={} at ({},{})-({},{})",
                                       reinterpret_cast<void*>(g_moveModeTarget), dropped.left, dropped.top,
                                       dropped.right, dropped.bottom));
     }
+    HideMoveModeLayoutPreview();
     g_moveModeHaveOriginal = false;
 }
 
@@ -5188,15 +5368,28 @@ void OnMoveModeKeyboardLatch(POINT screenPt) {
                                   reinterpret_cast<void*>(target)));
 }
 
+// Tab walks the eight resize zones in the order they sit around the
+// window, so the cycle reads as going round the edge rather than jumping
+// about. Grip::Move is not in it: a keyboard session moves with the
+// plain arrows, so there is nothing for it to be the "active" zone of.
 polish::Grip NextMoveModeGrip(polish::Grip grip) {
     switch (grip) {
         case polish::Grip::TopLeft:
+            return polish::Grip::Top;
+        case polish::Grip::Top:
             return polish::Grip::TopRight;
         case polish::Grip::TopRight:
+            return polish::Grip::Right;
+        case polish::Grip::Right:
             return polish::Grip::BottomRight;
         case polish::Grip::BottomRight:
+            return polish::Grip::Bottom;
+        case polish::Grip::Bottom:
             return polish::Grip::BottomLeft;
         case polish::Grip::BottomLeft:
+            return polish::Grip::Left;
+        case polish::Grip::Left:
+            return polish::Grip::TopLeft;
         case polish::Grip::Move:
         default:
             return polish::Grip::TopLeft;
@@ -6780,6 +6973,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // window inside it is exactly what caused a real first-show flash
     // bug once before (see AltTabListWindow.h).
     g_moveModeBorder = std::make_unique<polish::AltTabHighlightBorder>(GetModuleHandleW(nullptr));
+    g_moveModeZones = std::make_unique<polish::MoveModeZoneOverlay>(GetModuleHandleW(nullptr));
+    g_moveModeLayoutPreview = std::make_unique<polish::MoveModeZoneOverlay>(GetModuleHandleW(nullptr));
     g_moveModeHook = std::make_unique<polish::MoveModeHook>(
         g_messageWindow, []() { return g_settings.moveModeEnabled; },
         [](POINT screenPt) {

@@ -24,26 +24,67 @@ SnapCandidates WorkAreaOnly() {
 
 }  // namespace
 
-TEST_CASE("GripForPoint: each quadrant returns its own corner") {
-    constexpr RECT window = {100, 100, 300, 300};  // centre at 200,200
-    CHECK(GripForPoint(window, {110, 110}) == Grip::TopLeft);
-    CHECK(GripForPoint(window, {290, 110}) == Grip::TopRight);
-    CHECK(GripForPoint(window, {110, 290}) == Grip::BottomLeft);
-    CHECK(GripForPoint(window, {290, 290}) == Grip::BottomRight);
+TEST_CASE("ResizeBorderPx: the full band on a big window, shrunk on a small one") {
+    constexpr RECT big = {0, 0, 2000, 1500};
+    CHECK(ResizeBorderPx(big, 192) == 192);
+
+    // 30% of the smaller side, so a band can never eat the move zone.
+    constexpr RECT small = {0, 0, 400, 300};
+    CHECK(ResizeBorderPx(small, 192) == 90);
+
+    // Degenerate inputs give no band at all, making the whole window a
+    // move target -- the safe way round.
+    CHECK(ResizeBorderPx(RECT{0, 0, 0, 0}, 192) == 0);
+    CHECK(ResizeBorderPx(big, 0) == 0);
 }
 
-TEST_CASE("GripForPoint: the exact centre and the midlines resolve down and right") {
-    // Arbitrary but fixed, so a drag started on a midline cannot flicker
-    // between two grips.
-    constexpr RECT window = {100, 100, 300, 300};
-    CHECK(GripForPoint(window, {200, 200}) == Grip::BottomRight);
-    CHECK(GripForPoint(window, {200, 110}) == Grip::TopRight);
-    CHECK(GripForPoint(window, {110, 200}) == Grip::BottomLeft);
+TEST_CASE("GripForPoint: the band resizes and the middle moves") {
+    constexpr RECT window = {100, 100, 1100, 800};  // 1000 x 700
+    constexpr int border = 100;
+
+    CHECK(GripForPoint(window, {600, 450}, border) == Grip::Move);  // dead centre
+    CHECK(GripForPoint(window, {110, 450}, border) == Grip::Left);
+    CHECK(GripForPoint(window, {1090, 450}, border) == Grip::Right);
+    CHECK(GripForPoint(window, {600, 110}, border) == Grip::Top);
+    CHECK(GripForPoint(window, {600, 790}, border) == Grip::Bottom);
+    CHECK(GripForPoint(window, {110, 110}, border) == Grip::TopLeft);
+    CHECK(GripForPoint(window, {1090, 110}, border) == Grip::TopRight);
+    CHECK(GripForPoint(window, {110, 790}, border) == Grip::BottomLeft);
+    CHECK(GripForPoint(window, {1090, 790}, border) == Grip::BottomRight);
 }
 
-TEST_CASE("GripForPoint: a degenerate window still answers") {
-    constexpr RECT empty = {500, 500, 500, 500};
-    CHECK(GripForPoint(empty, {500, 500}) == Grip::BottomRight);
+TEST_CASE("GripForPoint: the boundary belongs to the band, and just inside it moves") {
+    constexpr RECT window = {100, 100, 1100, 800};
+    constexpr int border = 100;
+    CHECK(GripForPoint(window, {199, 450}, border) == Grip::Left);  // last band pixel
+    CHECK(GripForPoint(window, {200, 450}, border) == Grip::Move);  // first move pixel
+    CHECK(GripForPoint(window, {1000, 450}, border) == Grip::Right);
+    CHECK(GripForPoint(window, {999, 450}, border) == Grip::Move);
+}
+
+TEST_CASE("GripForPoint: no band, or a degenerate window, is all move") {
+    constexpr RECT window = {100, 100, 1100, 800};
+    CHECK(GripForPoint(window, {100, 100}, 0) == Grip::Move);
+    CHECK(GripForPoint(RECT{5, 5, 5, 5}, {5, 5}, 100) == Grip::Move);
+}
+
+TEST_CASE("Grip edge predicates: each grip drags exactly the edges it names") {
+    CHECK_FALSE(GripMovesLeft(Grip::Move));
+    CHECK_FALSE(GripMovesRight(Grip::Move));
+    CHECK_FALSE(GripMovesTop(Grip::Move));
+    CHECK_FALSE(GripMovesBottom(Grip::Move));
+    CHECK_FALSE(GripResizes(Grip::Move));
+
+    CHECK(GripMovesLeft(Grip::Left));
+    CHECK_FALSE(GripMovesRight(Grip::Left));
+    CHECK_FALSE(GripMovesTop(Grip::Left));
+    CHECK_FALSE(GripMovesBottom(Grip::Left));
+
+    CHECK(GripMovesTop(Grip::TopRight));
+    CHECK(GripMovesRight(Grip::TopRight));
+    CHECK_FALSE(GripMovesLeft(Grip::TopRight));
+    CHECK_FALSE(GripMovesBottom(Grip::TopRight));
+    CHECK(GripResizes(Grip::TopRight));
 }
 
 TEST_CASE("DragGrip: a move displaces the whole rect, a corner only its own two edges") {
@@ -56,6 +97,12 @@ TEST_CASE("DragGrip: a move displaces the whole rect, a corner only its own two 
     CHECK(Same(DragGrip(start, Grip::TopRight, 30, -20), RECT{100, 80, 530, 400}));
     CHECK(Same(DragGrip(start, Grip::BottomLeft, 30, -20), RECT{130, 100, 500, 380}));
     CHECK(Same(DragGrip(start, Grip::BottomRight, 30, -20), RECT{100, 100, 530, 380}));
+
+    // An edge grip moves one edge and ignores the other axis entirely.
+    CHECK(Same(DragGrip(start, Grip::Left, 30, -20), RECT{130, 100, 500, 400}));
+    CHECK(Same(DragGrip(start, Grip::Right, 30, -20), RECT{100, 100, 530, 400}));
+    CHECK(Same(DragGrip(start, Grip::Top, 30, -20), RECT{100, 80, 500, 400}));
+    CHECK(Same(DragGrip(start, Grip::Bottom, 30, -20), RECT{100, 100, 500, 380}));
 }
 
 TEST_CASE("CollectSnapEdges: work-area edges are always candidates, sorted and deduplicated") {
@@ -116,6 +163,13 @@ TEST_CASE("ApplySnap: a corner resize only attracts that corner's own edges") {
 
     const RECT bottomRight = ApplySnap(dragged, candidates, kDefaultSnapThresholdPx, Grip::BottomRight);
     CHECK(Same(bottomRight, RECT{5, 6, 900, 1040}));
+
+    // An edge grip attracts that edge only -- the other axis is untouched
+    // even where it sits well within the threshold of a candidate.
+    const RECT leftOnly = ApplySnap(dragged, candidates, kDefaultSnapThresholdPx, Grip::Left);
+    CHECK(Same(leftOnly, RECT{0, 6, 900, 1035}));
+    const RECT bottomOnly = ApplySnap(dragged, candidates, kDefaultSnapThresholdPx, Grip::Bottom);
+    CHECK(Same(bottomOnly, RECT{5, 6, 900, 1040}));
 }
 
 TEST_CASE("ClampToMonitor: a move is parked flush instead of spilling onto the next screen") {
@@ -190,4 +244,133 @@ TEST_CASE("EnforceMinimumSize: a window already big enough is untouched, and a m
 
     constexpr RECT tiny = {500, 500, 510, 505};
     CHECK(Same(EnforceMinimumSize(tiny, Grip::Move, kMinWindowWidthPx, kMinWindowHeightPx), tiny));
+}
+
+TEST_CASE("EnforceMinimumSize: an edge grip only corrects the axis it drags") {
+    constexpr RECT tiny = {500, 500, 510, 505};
+
+    // Top drags no horizontal edge, so the width is left as it found it
+    // even though it is under the floor -- it cannot have caused that.
+    const RECT top = EnforceMinimumSize(tiny, Grip::Top, kMinWindowWidthPx, kMinWindowHeightPx);
+    CHECK(Same(top, RECT{500, 505 - kMinWindowHeightPx, 510, 505}));
+
+    const RECT left = EnforceMinimumSize(tiny, Grip::Left, kMinWindowWidthPx, kMinWindowHeightPx);
+    CHECK(Same(left, RECT{510 - kMinWindowWidthPx, 500, 510, 505}));
+}
+
+TEST_CASE("LayoutForPointer: edges offer halves and the top offers maximize") {
+    constexpr RECT monitor = {0, 0, 1920, 1080};
+    constexpr int edge = 6;
+    constexpr int corner = 40;
+
+    CHECK(LayoutForPointer({960, 2}, monitor, edge, corner) == SnapLayout::Maximize);
+    CHECK(LayoutForPointer({2, 540}, monitor, edge, corner) == SnapLayout::LeftHalf);
+    CHECK(LayoutForPointer({1917, 540}, monitor, edge, corner) == SnapLayout::RightHalf);
+    CHECK(LayoutForPointer({960, 540}, monitor, edge, corner) == SnapLayout::None);
+}
+
+TEST_CASE("LayoutForPointer: the bottom edge deliberately offers nothing") {
+    constexpr RECT monitor = {0, 0, 1920, 1080};
+    // Natively it does not snap either, and claiming it would make
+    // dragging near the taskbar unpredictable.
+    CHECK(LayoutForPointer({960, 1079}, monitor, 6, 40) == SnapLayout::None);
+}
+
+TEST_CASE("LayoutForPointer: corners win over edges, or the quarter is unreachable") {
+    constexpr RECT monitor = {0, 0, 1920, 1080};
+    constexpr int edge = 6;
+    constexpr int corner = 40;
+
+    // Each of these is also inside an edge zone; the corner must win.
+    CHECK(LayoutForPointer({2, 2}, monitor, edge, corner) == SnapLayout::TopLeftQuarter);
+    CHECK(LayoutForPointer({1918, 2}, monitor, edge, corner) == SnapLayout::TopRightQuarter);
+    CHECK(LayoutForPointer({2, 1078}, monitor, edge, corner) == SnapLayout::BottomLeftQuarter);
+    CHECK(LayoutForPointer({1918, 1078}, monitor, edge, corner) == SnapLayout::BottomRightQuarter);
+
+    // Within the corner square but well clear of any edge zone.
+    CHECK(LayoutForPointer({30, 30}, monitor, edge, corner) == SnapLayout::TopLeftQuarter);
+}
+
+TEST_CASE("LayoutForPointer: a pointer that has left this monitor asks it for nothing") {
+    constexpr RECT monitor = {0, 0, 1920, 1080};
+    CHECK(LayoutForPointer({-1, 540}, monitor, 6, 40) == SnapLayout::None);
+    CHECK(LayoutForPointer({1920, 540}, monitor, 6, 40) == SnapLayout::None);
+}
+
+TEST_CASE("LayoutForPointer: a monitor offset from the origin still works") {
+    // The second monitor in a side-by-side pair -- the zones have to be
+    // relative to its own rect, not to the desktop origin.
+    constexpr RECT monitor = {1920, 0, 3840, 1080};
+    CHECK(LayoutForPointer({1922, 540}, monitor, 6, 40) == SnapLayout::LeftHalf);
+    CHECK(LayoutForPointer({3837, 540}, monitor, 6, 40) == SnapLayout::RightHalf);
+    CHECK(LayoutForPointer({2880, 2}, monitor, 6, 40) == SnapLayout::Maximize);
+}
+
+TEST_CASE("RectForLayout: halves and quarters tile the work area exactly") {
+    constexpr RECT work = {0, 0, 1921, 1081};  // odd, to catch a rounding gap
+
+    const RECT left = RectForLayout(SnapLayout::LeftHalf, work);
+    const RECT right = RectForLayout(SnapLayout::RightHalf, work);
+    CHECK(left.right == right.left);            // no gap, no overlap
+    CHECK(left.left == work.left);
+    CHECK(right.right == work.right);
+    CHECK(left.top == work.top);
+    CHECK(left.bottom == work.bottom);
+
+    const RECT tl = RectForLayout(SnapLayout::TopLeftQuarter, work);
+    const RECT tr = RectForLayout(SnapLayout::TopRightQuarter, work);
+    const RECT bl = RectForLayout(SnapLayout::BottomLeftQuarter, work);
+    const RECT br = RectForLayout(SnapLayout::BottomRightQuarter, work);
+    CHECK(tl.right == tr.left);
+    CHECK(bl.right == br.left);
+    CHECK(tl.bottom == bl.top);
+    CHECK(tr.bottom == br.top);
+    CHECK(tl.left == work.left);
+    CHECK(br.right == work.right);
+    CHECK(br.bottom == work.bottom);
+}
+
+TEST_CASE("RectForLayout: maximize is the whole work area, not the whole monitor") {
+    constexpr RECT work = {0, 0, 1920, 1040};  // taskbar takes the last 40
+    CHECK(Same(RectForLayout(SnapLayout::Maximize, work), work));
+}
+
+TEST_CASE("ZoneRect: the nine zones tile the window exactly, with no gap or overlap") {
+    constexpr RECT window = {100, 100, 1100, 800};
+    constexpr int b = 100;
+
+    CHECK(Same(ZoneRect(Grip::TopLeft, window, b), RECT{100, 100, 200, 200}));
+    CHECK(Same(ZoneRect(Grip::Top, window, b), RECT{200, 100, 1000, 200}));
+    CHECK(Same(ZoneRect(Grip::TopRight, window, b), RECT{1000, 100, 1100, 200}));
+    CHECK(Same(ZoneRect(Grip::Left, window, b), RECT{100, 200, 200, 700}));
+    CHECK(Same(ZoneRect(Grip::Move, window, b), RECT{200, 200, 1000, 700}));
+    CHECK(Same(ZoneRect(Grip::Right, window, b), RECT{1000, 200, 1100, 700}));
+    CHECK(Same(ZoneRect(Grip::BottomLeft, window, b), RECT{100, 700, 200, 800}));
+    CHECK(Same(ZoneRect(Grip::Bottom, window, b), RECT{200, 700, 1000, 800}));
+    CHECK(Same(ZoneRect(Grip::BottomRight, window, b), RECT{1000, 700, 1100, 800}));
+}
+
+TEST_CASE("ZoneRect agrees with GripForPoint everywhere, so the map cannot lie") {
+    // The map the UI draws and the hit-test that decides what a click
+    // does have to be the same geometry. Walk the window and check that
+    // every point lands inside the rect drawn for the zone it hit-tests
+    // to.
+    constexpr RECT window = {100, 100, 1100, 800};
+    constexpr int b = 100;
+    for (LONG y = window.top; y < window.bottom; y += 7) {
+        for (LONG x = window.left; x < window.right; x += 7) {
+            const Grip grip = GripForPoint(window, {x, y}, b);
+            const RECT zone = ZoneRect(grip, window, b);
+            CHECK(x >= zone.left);
+            CHECK(x < zone.right);
+            CHECK(y >= zone.top);
+            CHECK(y < zone.bottom);
+        }
+    }
+}
+
+TEST_CASE("ZoneRect: no band means every zone is the whole window") {
+    constexpr RECT window = {100, 100, 1100, 800};
+    CHECK(Same(ZoneRect(Grip::Move, window, 0), window));
+    CHECK(Same(ZoneRect(Grip::TopLeft, window, 0), window));
 }

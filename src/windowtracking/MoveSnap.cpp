@@ -71,25 +71,71 @@ LONG LeadingTarget(const std::vector<LONG>& sorted, LONG edge, int direction) {
     return it == sorted.begin() ? edge : *(it - 1);
 }
 
-bool GripMovesLeftEdge(Grip grip) {
-    return grip == Grip::TopLeft || grip == Grip::BottomLeft;
-}
-
-bool GripMovesTopEdge(Grip grip) {
-    return grip == Grip::TopLeft || grip == Grip::TopRight;
-}
-
 }  // namespace
 
-Grip GripForPoint(const RECT& visible, POINT pt) {
-    const LONG centerX = visible.left + (visible.right - visible.left) / 2;
-    const LONG centerY = visible.top + (visible.bottom - visible.top) / 2;
-    const bool left = pt.x < centerX;
-    const bool top = pt.y < centerY;
-    if (top) {
-        return left ? Grip::TopLeft : Grip::TopRight;
+bool GripMovesLeft(Grip grip) {
+    return grip == Grip::Left || grip == Grip::TopLeft || grip == Grip::BottomLeft;
+}
+
+bool GripMovesRight(Grip grip) {
+    return grip == Grip::Right || grip == Grip::TopRight || grip == Grip::BottomRight;
+}
+
+bool GripMovesTop(Grip grip) {
+    return grip == Grip::Top || grip == Grip::TopLeft || grip == Grip::TopRight;
+}
+
+bool GripMovesBottom(Grip grip) {
+    return grip == Grip::Bottom || grip == Grip::BottomLeft || grip == Grip::BottomRight;
+}
+
+bool GripResizes(Grip grip) {
+    return grip != Grip::Move;
+}
+
+int ResizeBorderPx(const RECT& visible, int requestedPx) {
+    const LONG width = visible.right - visible.left;
+    const LONG height = visible.bottom - visible.top;
+    if (width <= 0 || height <= 0 || requestedPx <= 0) {
+        return 0;
     }
-    return left ? Grip::BottomLeft : Grip::BottomRight;
+    const LONG limit = std::min(width, height) * 3 / 10;
+    return static_cast<int>(std::max<LONG>(0, std::min<LONG>(requestedPx, limit)));
+}
+
+Grip GripForPoint(const RECT& visible, POINT pt, int borderPx) {
+    if (borderPx <= 0 || visible.right <= visible.left || visible.bottom <= visible.top) {
+        return Grip::Move;
+    }
+    const bool left = pt.x < visible.left + borderPx;
+    const bool right = pt.x >= visible.right - borderPx;
+    const bool top = pt.y < visible.top + borderPx;
+    const bool bottom = pt.y >= visible.bottom - borderPx;
+    if (top && left) {
+        return Grip::TopLeft;
+    }
+    if (top && right) {
+        return Grip::TopRight;
+    }
+    if (bottom && left) {
+        return Grip::BottomLeft;
+    }
+    if (bottom && right) {
+        return Grip::BottomRight;
+    }
+    if (top) {
+        return Grip::Top;
+    }
+    if (bottom) {
+        return Grip::Bottom;
+    }
+    if (left) {
+        return Grip::Left;
+    }
+    if (right) {
+        return Grip::Right;
+    }
+    return Grip::Move;
 }
 
 RECT DragGrip(const RECT& start, Grip grip, int dx, int dy) {
@@ -101,17 +147,113 @@ RECT DragGrip(const RECT& start, Grip grip, int dx, int dy) {
         result.bottom += dy;
         return result;
     }
-    if (GripMovesLeftEdge(grip)) {
+    if (GripMovesLeft(grip)) {
         result.left += dx;
-    } else {
+    }
+    if (GripMovesRight(grip)) {
         result.right += dx;
     }
-    if (GripMovesTopEdge(grip)) {
+    if (GripMovesTop(grip)) {
         result.top += dy;
-    } else {
+    }
+    if (GripMovesBottom(grip)) {
         result.bottom += dy;
     }
     return result;
+}
+
+RECT ZoneRect(Grip grip, const RECT& visible, int borderPx) {
+    const LONG b = static_cast<LONG>(std::max(0, borderPx));
+    const LONG l = visible.left;
+    const LONG t = visible.top;
+    const LONG r = visible.right;
+    const LONG bot = visible.bottom;
+    if (b <= 0) {
+        return visible;
+    }
+    switch (grip) {
+        case Grip::Move:
+            return RECT{l + b, t + b, r - b, bot - b};
+        case Grip::Left:
+            return RECT{l, t + b, l + b, bot - b};
+        case Grip::Right:
+            return RECT{r - b, t + b, r, bot - b};
+        case Grip::Top:
+            return RECT{l + b, t, r - b, t + b};
+        case Grip::Bottom:
+            return RECT{l + b, bot - b, r - b, bot};
+        case Grip::TopLeft:
+            return RECT{l, t, l + b, t + b};
+        case Grip::TopRight:
+            return RECT{r - b, t, r, t + b};
+        case Grip::BottomLeft:
+            return RECT{l, bot - b, l + b, bot};
+        case Grip::BottomRight:
+            return RECT{r - b, bot - b, r, bot};
+        default:
+            return visible;
+    }
+}
+
+SnapLayout LayoutForPointer(POINT pt, const RECT& monitor, int edgePx, int cornerPx) {
+    if (monitor.right <= monitor.left || monitor.bottom <= monitor.top) {
+        return SnapLayout::None;
+    }
+    // Outside the monitor entirely -- the pointer has moved on to another
+    // screen, and this monitor has nothing to offer it.
+    if (pt.x < monitor.left || pt.x >= monitor.right || pt.y < monitor.top || pt.y >= monitor.bottom) {
+        return SnapLayout::None;
+    }
+    const bool nearLeftCorner = pt.x < monitor.left + cornerPx;
+    const bool nearRightCorner = pt.x >= monitor.right - cornerPx;
+    const bool nearTopCorner = pt.y < monitor.top + cornerPx;
+    const bool nearBottomCorner = pt.y >= monitor.bottom - cornerPx;
+    if (nearTopCorner && nearLeftCorner) {
+        return SnapLayout::TopLeftQuarter;
+    }
+    if (nearTopCorner && nearRightCorner) {
+        return SnapLayout::TopRightQuarter;
+    }
+    if (nearBottomCorner && nearLeftCorner) {
+        return SnapLayout::BottomLeftQuarter;
+    }
+    if (nearBottomCorner && nearRightCorner) {
+        return SnapLayout::BottomRightQuarter;
+    }
+    if (pt.y < monitor.top + edgePx) {
+        return SnapLayout::Maximize;
+    }
+    if (pt.x < monitor.left + edgePx) {
+        return SnapLayout::LeftHalf;
+    }
+    if (pt.x >= monitor.right - edgePx) {
+        return SnapLayout::RightHalf;
+    }
+    return SnapLayout::None;
+}
+
+RECT RectForLayout(SnapLayout layout, const RECT& workArea) {
+    const LONG midX = workArea.left + (workArea.right - workArea.left) / 2;
+    const LONG midY = workArea.top + (workArea.bottom - workArea.top) / 2;
+    switch (layout) {
+        case SnapLayout::Maximize:
+            return workArea;
+        case SnapLayout::LeftHalf:
+            return RECT{workArea.left, workArea.top, midX, workArea.bottom};
+        case SnapLayout::RightHalf:
+            return RECT{midX, workArea.top, workArea.right, workArea.bottom};
+        case SnapLayout::TopLeftQuarter:
+            return RECT{workArea.left, workArea.top, midX, midY};
+        case SnapLayout::TopRightQuarter:
+            return RECT{midX, workArea.top, workArea.right, midY};
+        case SnapLayout::BottomLeftQuarter:
+            return RECT{workArea.left, midY, midX, workArea.bottom};
+        case SnapLayout::BottomRightQuarter:
+            return RECT{midX, midY, workArea.right, workArea.bottom};
+        case SnapLayout::None:
+        default:
+            return workArea;
+    }
 }
 
 SnapCandidates CollectSnapEdges(const RECT& workArea, std::span<const RECT> others) {
@@ -144,14 +286,16 @@ RECT ApplySnap(const RECT& desired, const SnapCandidates& candidates, int thresh
         result.bottom += dy;
         return result;
     }
-    if (GripMovesLeftEdge(grip)) {
+    if (GripMovesLeft(grip)) {
         result.left += BestDelta(candidates.xEdges, desired.left, thresholdPx);
-    } else {
+    }
+    if (GripMovesRight(grip)) {
         result.right += BestDelta(candidates.xEdges, desired.right, thresholdPx);
     }
-    if (GripMovesTopEdge(grip)) {
+    if (GripMovesTop(grip)) {
         result.top += BestDelta(candidates.yEdges, desired.top, thresholdPx);
-    } else {
+    }
+    if (GripMovesBottom(grip)) {
         result.bottom += BestDelta(candidates.yEdges, desired.bottom, thresholdPx);
     }
     return result;
@@ -168,20 +312,23 @@ RECT ClampToMonitor(const RECT& desired, const RECT& monitor, Grip grip) {
         result.bottom += dy;
         return result;
     }
-    // A resize only ever drags two edges, so only those are clamped. The
+    // A resize only ever drags one or two edges, so only those are
+    // clamped. The
     // anchored two are left exactly where they were even if they are
     // outside the monitor -- a window that was already hanging off an
     // edge when the resize started keeps hanging off by the same amount,
     // rather than being quietly shoved on screen by a gesture the user
     // asked to change its size.
-    if (GripMovesLeftEdge(grip)) {
+    if (GripMovesLeft(grip)) {
         result.left = std::clamp(desired.left, monitor.left, monitor.right);
-    } else {
+    }
+    if (GripMovesRight(grip)) {
         result.right = std::clamp(desired.right, monitor.left, monitor.right);
     }
-    if (GripMovesTopEdge(grip)) {
+    if (GripMovesTop(grip)) {
         result.top = std::clamp(desired.top, monitor.top, monitor.bottom);
-    } else {
+    }
+    if (GripMovesBottom(grip)) {
         result.bottom = std::clamp(desired.bottom, monitor.top, monitor.bottom);
     }
     return result;
@@ -214,16 +361,19 @@ RECT EnforceMinimumSize(const RECT& desired, Grip grip, int minWidth, int minHei
     }
     RECT result = desired;
     if (result.right - result.left < minWidth) {
-        if (GripMovesLeftEdge(grip)) {
+        // Whichever horizontal edge this grip drags gets pushed back. A
+        // grip that drags neither (Top, Bottom) cannot have changed the
+        // width, so there is nothing to correct.
+        if (GripMovesLeft(grip)) {
             result.left = result.right - minWidth;
-        } else {
+        } else if (GripMovesRight(grip)) {
             result.right = result.left + minWidth;
         }
     }
     if (result.bottom - result.top < minHeight) {
-        if (GripMovesTopEdge(grip)) {
+        if (GripMovesTop(grip)) {
             result.top = result.bottom - minHeight;
-        } else {
+        } else if (GripMovesBottom(grip)) {
             result.bottom = result.top + minHeight;
         }
     }

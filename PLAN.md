@@ -554,6 +554,72 @@ current todo list.
     wobbles with Polish's own dim overlays appearing and disappearing;
     counting only real candidate windows is the stable measure.
 
+- Move/resize mode: rebuilt the gesture around zones on the left button
+  alone. The right button was doing resize, which is genuinely awkward on
+  a touchpad -- and a touchpad is where this gets used. Now an inch-wide
+  band around the window's edge resizes and everything inside it moves,
+  with the left button for both.
+  - Eight resize zones rather than the old four quadrants, because an
+    inch of band has room for the edges as well as the corners and
+    dragging one edge is usually what is wanted. `Grip` grew from five
+    values to nine, and the per-edge predicates had to stop being
+    `left-or-else-right`: an edge grip drags one edge and must leave the
+    other three alone, which the old `else` silently got wrong.
+  - The band is an inch (`ResizeBorderPx`), clamped to 30% of the smaller
+    dimension so it can never eat the move area, and 0 on a window too
+    small for any sensible band -- which makes the whole window a move
+    target, the safe way round, since a window can always be resized from
+    the keyboard but an unmovable one is stuck.
+  - `ZoneRect` is the inverse of `GripForPoint` and sits next to it
+    deliberately: the map the UI draws and the hit-test that decides what
+    a click does are the same geometry, and a map one pixel out of step
+    with the band that actually responds would be a bug nobody would
+    think to look for. A test walks every point of a window and asserts
+    the two agree -- 57k assertions, and the cheapest kind to keep.
+  - `MoveModeZoneOverlay` draws it: the hovered zone filled, the
+    band/move boundary drawn so the layout can be read, and the window
+    outlined. On a drag the map goes away and only the edges that grip
+    actually moves are drawn, heavily -- which is the half that makes a
+    move and a resize look different *while* they happen.
+  - Its content depends on the window's size and grip, never its
+    position, so a move drag repositions the overlay with
+    `UpdateLayeredWindow(hdcSrc=null)` and never touches a pixel. Without
+    that split a full-window bitmap would be cleared and refilled 60
+    times a second for the length of every drag. The zone fill is also
+    dropped during a resize, where the size changes every frame and the
+    bars already carry the message.
+  - The hook stops classifying the gesture entirely: `Grab` is gone, and
+    it reports only where the press landed. Which zone that is needs the
+    target's rect and DPI, which is the caller's business.
+
+- Move/resize mode: drop a move at a screen edge to snap to half, a
+  corner for a quarter, or the top to maximize, with a preview of where
+  it will land.
+  - Driven by the *pointer*, not the window, the way the native gesture
+    is: the window is clamped to its monitor, so its edges would reach a
+    screen edge long before the user meant anything by it.
+  - Corners beat edges, or the quarter would be unreachable -- a pointer
+    in the top-left corner is inside the top edge's zone too. The corner
+    square is much larger than the edge strip (40 DIP against 6), since
+    arriving at a corner precisely is harder and overshooting into one is
+    cheap when nothing commits until the button comes up.
+  - The bottom edge deliberately means nothing, as it does natively:
+    claiming it would make dragging near the taskbar unpredictable.
+  - Maximize uses `ShowWindow(SW_MAXIMIZE)` rather than a work-area-sized
+    rect, so the window's own Restore button works afterwards and
+    restore-position sync has something meaningful to write.
+  - `RectForLayout` tiles exactly -- the right half starts where the left
+    half ends -- which an odd-width work area is the test for.
+  - This does fire at the shared edge between two monitors, where the
+    user may have meant to cross. Native does the same and it recovers
+    the same way: nothing commits until the drop, so carrying on past
+    dismisses the preview and crosses.
+  - Verified live on all six gestures with synthetic input: centre drag
+    moves without resizing, the right band changes width alone, the
+    bottom-left corner moves left and bottom alone, and the three layout
+    drops land on exact halves, quarters and a real maximize.
+
+
 ## v1.0 release -- Microsoft Store
 
 The route is settled and should not be re-litigated: v1.0 ships through the

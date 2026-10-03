@@ -31,8 +31,11 @@ namespace polish {
 //     untouched (see nativeHandoffActive_). Without both of those, every
 //     Win+L, Win+D, Win+Arrow and Win+number would flash the screen on
 //     the way to doing something else entirely.
-//   - Left button moves, right button resizes. Resize uses the grabbed
-//     corner quadrant (MoveSnap.h's Grip), so there is nothing to aim at.
+//   - The left button does everything, and where you press decides what
+//     it does: an inch-wide band around the window's edge resizes,
+//     everything inside it moves (MoveSnap.h's Grip). An earlier version
+//     used the right button for resize, which is genuinely awkward on a
+//     touchpad -- and a touchpad is where this feature gets used most.
 //   - Space latches a keyboard session that survives Win-up, which is the
 //     only way to offer arrow-key move/resize at all: Win+Arrow is
 //     native Snap and is not available to take.
@@ -77,9 +80,6 @@ namespace polish {
 // (mouse-move volume is much higher than keyboard's) at idle.
 class MoveModeHook {
 public:
-    // Which button started a drag, and therefore what it does.
-    enum class Grab { Move, Resize };
-
     // A keyboard-session request. One packed value rather than a
     // callback per key: Move/Resize/Jump are the same request in three
     // flavours (plain Arrow, Shift+Arrow, Ctrl+Arrow) and twelve
@@ -135,10 +135,15 @@ public:
     // that never dimmed at all.
     void SetOnEnd(std::function<void()> onEnd) { onEnd_ = std::move(onEnd); }
 
-    // A button went down on something grabbable, at this screen point.
-    // The caller should resolve the window, sample its rect and insets,
-    // and dim immediately if the delay timer hasn't fired yet.
-    void SetOnGrab(std::function<void(Grab grab, POINT screenPt)> onGrab) { onGrab_ = std::move(onGrab); }
+    // The left button went down on something grabbable, at this screen
+    // point. The caller should resolve the window, work out from the
+    // point whether this is a move or a resize, sample its rect and
+    // insets, and dim immediately if the delay timer hasn't fired yet.
+    //
+    // The hook deliberately does not classify the gesture: which zone a
+    // point falls in needs the target's rect and DPI, which is the
+    // caller's business, and the hook has no reason to learn it.
+    void SetOnGrab(std::function<void(POINT screenPt)> onGrab) { onGrab_ = std::move(onGrab); }
 
     // The pointer moved, either during a drag or while the mode is merely
     // armed and hovering -- the caller distinguishes them by whether it
@@ -229,7 +234,7 @@ private:
     std::function<bool(POINT screenPt)> canGrab_;
     std::function<void()> onArm_;
     std::function<void()> onEnd_;
-    std::function<void(Grab, POINT)> onGrab_;
+    std::function<void(POINT)> onGrab_;
     std::function<void(POINT)> onDrag_;
     std::function<void()> onDrop_;
     std::function<void(POINT)> onKeyboardLatch_;
@@ -259,14 +264,11 @@ private:
     // always did and never flash the dim. Reset on Win-up. Same idea as
     // AltTabHook's nativeHandoffActive_.
     bool nativeHandoffActive_ = false;
-    // A button is down and a window is following the pointer. Survives
-    // Win-up on purpose: the button, not the modifier, owns a drag in
-    // progress, and yanking the window to a stop because a finger left
-    // the Win key mid-throw is not what anyone means.
+    // The left button is down and a window is following the pointer.
+    // Survives Win-up on purpose: the button, not the modifier, owns a
+    // drag in progress, and yanking the window to a stop because a finger
+    // left the Win key mid-throw is not what anyone means.
     bool dragging_ = false;
-    // Which button is doing it, so the matching up-event ends the drag
-    // and the other button's doesn't.
-    Grab dragGrab_ = Grab::Move;
     // A latched keyboard session, which outlives the hold that started
     // it and is ended only by Enter, Escape, a click, or the caller
     // noticing its target is gone.

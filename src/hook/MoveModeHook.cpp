@@ -15,8 +15,7 @@ MoveModeHook* g_instance = nullptr;
 enum class HookAction : WPARAM {
     Arm,
     End,
-    GrabMove,
-    GrabResize,
+    Grab,
     Drag,
     Drop,
     KeyboardLatch,
@@ -411,9 +410,7 @@ bool MoveModeHook::HandleMouseEvent(WPARAM wParam, POINT screenPt) {
     }
 
     if (dragging_) {
-        const bool matchingUp =
-            dragGrab_ == Grab::Move ? wParam == WM_LBUTTONUP : wParam == WM_RBUTTONUP;
-        if (matchingUp) {
+        if (wParam == WM_LBUTTONUP) {
             dragging_ = false;
             dragPostPending_ = false;
             Post(static_cast<WPARAM>(HookAction::Drop));
@@ -425,12 +422,12 @@ bool MoveModeHook::HandleMouseEvent(WPARAM wParam, POINT screenPt) {
             return true;  // swallow, pairing with the swallowed button-down
         }
         // Every other button event during a drag is swallowed too: a
-        // stray right-click mid-move would otherwise open a context menu
-        // on top of the window being dragged.
+        // stray right-click mid-drag would otherwise open a context menu
+        // on top of the window being moved.
         return IsButtonDown(wParam) || IsButtonUp(wParam);
     }
 
-    if (wParam == WM_LBUTTONDOWN || wParam == WM_RBUTTONDOWN) {
+    if (wParam == WM_LBUTTONDOWN) {
         if (!canGrab_ || !canGrab_(screenPt)) {
             // Nothing here Polish may move -- the desktop, the taskbar, an
             // elevated window. Leave the click completely alone so
@@ -441,10 +438,9 @@ bool MoveModeHook::HandleMouseEvent(WPARAM wParam, POINT screenPt) {
             return false;
         }
         dragging_ = true;
-        dragGrab_ = wParam == WM_LBUTTONDOWN ? Grab::Move : Grab::Resize;
         grabPoint_ = screenPt;
         SuppressStartMenuForThisHold();
-        Post(static_cast<WPARAM>(dragGrab_ == Grab::Move ? HookAction::GrabMove : HookAction::GrabResize));
+        Post(static_cast<WPARAM>(HookAction::Grab));
         return true;  // swallow: this button belongs to the mode
     }
     return false;
@@ -462,14 +458,9 @@ void MoveModeHook::HandleHookMessage(WPARAM wParam, LPARAM lParam) {
                 onEnd_();
             }
             break;
-        case HookAction::GrabMove:
+        case HookAction::Grab:
             if (onGrab_) {
-                onGrab_(Grab::Move, grabPoint_);
-            }
-            break;
-        case HookAction::GrabResize:
-            if (onGrab_) {
-                onGrab_(Grab::Resize, grabPoint_);
+                onGrab_(grabPoint_);
             }
             break;
         case HookAction::Drag:

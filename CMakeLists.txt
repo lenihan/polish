@@ -46,6 +46,7 @@ add_library(polish_core STATIC
     src/hook/BullseyeOverlay.cpp
     src/hook/AltTabHook.cpp
     src/hook/MoveModeHook.cpp
+    src/hook/MoveModeZoneOverlay.cpp
     src/hook/AltTabDimOverlay.cpp
     src/hook/AltTabHighlightBorder.cpp
     src/hook/AltTabListWindow.cpp

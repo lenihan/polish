@@ -26,28 +26,128 @@ namespace polish {
 // main.cpp, which explains why that sampling is safe here even though
 // RectUtils.h warns against inset conversion for restore-position sync.
 
-// Which part of a window a resize drag grabbed. The whole window is a
-// resize target, split into four corner quadrants, so the smallest thing
-// to aim at is a quarter of the window -- no hitting a 7px border, and
-// finger-friendly as PLAN.md asked. Both edges of the grabbed corner
-// follow the cursor.
+// Which part of a window a drag grabbed, under the zone model: a band
+// around the window's edge resizes, and everything inside it moves.
+//
+// This replaced a two-button scheme (left button moved from anywhere,
+// right button resized by the nearest quadrant). The right button was the
+// problem: it is genuinely awkward on a touchpad, which is where this
+// feature gets used most. One button and a hit-test is the trade -- you
+// now have to be in the band to resize, but the band is an inch wide, so
+// there is still nothing to aim at in the sense that matters.
+//
+// Eight resize zones rather than the old four, because an inch-wide band
+// has room for the edges as well as the corners, and dragging one edge is
+// what you usually want.
 enum class Grip {
     // The whole rect translates; width and height never change.
     Move,
+    Left,
+    Right,
+    Top,
+    Bottom,
     TopLeft,
     TopRight,
     BottomLeft,
     BottomRight,
 };
 
-// Which corner quadrant of `visible` holds `pt`.
+// Which edges a grip drags. Grip::Move answers false to all four: it
+// translates the whole rect rather than moving any edge independently,
+// and every function here special-cases it before asking.
+bool GripMovesLeft(Grip grip);
+bool GripMovesRight(Grip grip);
+bool GripMovesTop(Grip grip);
+bool GripMovesBottom(Grip grip);
+
+// Whether a grip resizes at all, i.e. anything but Grip::Move.
+bool GripResizes(Grip grip);
+
+// Width of the resize band, in physical pixels, for a window of this
+// size, given the band width actually wanted (one inch at the target's
+// DPI -- which is just the DPI, since DPI is dots per inch).
 //
-// Never returns Grip::Move -- that is the left-button gesture, which does
-// not hit-test at all (the entire window moves it). Boundaries resolve
-// down and right: a point exactly on the centre, on a midline, or in a
-// degenerate/empty rect comes back BottomRight. Arbitrary, but fixed, so
-// a drag started on a midline can't flicker between two grips.
-Grip GripForPoint(const RECT& visible, POINT pt);
+// Clamped to 30% of each dimension so the band can never eat the window:
+// a full inch on each side of a 1.5-inch-wide window would leave no
+// middle to move by, and on a narrow window the two bands would overlap
+// and the hit-test would have to break the tie arbitrarily. On a window
+// too small for any sensible band this returns 0, which makes the whole
+// window a move target -- the safe way round, since a window can always
+// be resized from the keyboard but an unmovable one is stuck.
+int ResizeBorderPx(const RECT& visible, int requestedPx);
+
+// Which zone of `visible` holds `pt`, given a band of `borderPx`.
+//
+// Boundaries belong to the band: a point exactly `borderPx` in from the
+// left edge is already Move, and the band covers [left, left+borderPx).
+// A borderPx of 0 makes everything Move. A degenerate or empty rect
+// likewise comes back Move, which does nothing rather than resizing
+// something to nonsense.
+Grip GripForPoint(const RECT& visible, POINT pt, int borderPx);
+
+// The rect a zone occupies inside `visible`, given a band of `borderPx`.
+//
+// The inverse of GripForPoint, and deliberately next to it: the zone map
+// the UI draws and the hit-test that decides what a click does are the
+// same geometry, and they must not be able to drift apart -- a map that
+// shows a band one pixel wider than the band that actually responds is a
+// bug nobody would think to look for.
+//
+// Grip::Move returns the inner rectangle. A borderPx of 0 makes every
+// zone the whole rect, matching GripForPoint answering Move everywhere.
+RECT ZoneRect(Grip grip, const RECT& visible, int borderPx);
+
+// A whole-monitor layout a move drag can be dropped into, the way
+// dragging a window at a screen edge works natively.
+//
+// Separate from the magnetic edge snapping above, and triggered
+// differently: that one attracts the *window* to nearby edges as a
+// continuous nudge, this one is a discrete commitment driven by where
+// the *pointer* is. They coexist because they answer different wants --
+// "line this up with its neighbour" versus "give this half the screen".
+enum class SnapLayout {
+    None,
+    Maximize,
+    LeftHalf,
+    RightHalf,
+    TopLeftQuarter,
+    TopRightQuarter,
+    BottomLeftQuarter,
+    BottomRightQuarter,
+};
+
+// Which layout the pointer is asking for, or None.
+//
+// `monitor` is the full monitor rect, not the work area: the trigger is
+// the physical screen edge the pointer can actually run into, and the
+// taskbar does not move it. Corners win over edges, so the corner zones
+// are checked first -- otherwise a pointer in the top-left corner would
+// maximize, and the quarter would be unreachable.
+//
+// The bottom edge deliberately means nothing. Natively it does not snap
+// either, and claiming it would make dragging a window near the taskbar
+// unpredictable.
+SnapLayout LayoutForPointer(POINT pt, const RECT& monitor, int edgePx, int cornerPx);
+
+// The rect a layout resolves to within `workArea` -- the work area, not
+// the monitor, so a snapped window sits above the taskbar rather than
+// under it. Halves and quarters tile exactly: the right half starts
+// where the left half ends, with no overlap or gap at an odd width.
+//
+// SnapLayout::Maximize returns the whole work area, but a caller that can
+// should prefer ShowWindow(SW_MAXIMIZE) so the window is genuinely
+// maximized -- its own Restore button then works, and restore-position
+// sync already knows what to do with it.
+RECT RectForLayout(SnapLayout layout, const RECT& workArea);
+
+// How close to a monitor edge the pointer has to get, in DIPs, before a
+// layout is offered, and the size of the square at each corner that
+// offers a quarter instead. The corner zone is much larger because a
+// corner is harder to arrive at precisely, and because overshooting into
+// a corner you did not want is a cheap mistake -- the preview shows what
+// will happen before the button comes up.
+inline constexpr int kLayoutEdgeDip = 6;
+inline constexpr int kLayoutCornerDip = 40;
 
 // Edges a dragged window can snap to, split by axis. Plain sorted,
 // deduplicated coordinate lists rather than anything richer, because
@@ -64,8 +164,8 @@ struct SnapCandidates {
 };
 
 // `start` with the grip's own edges displaced by (dx, dy): the whole
-// rect for Grip::Move, and only the grabbed corner's two edges for a
-// resize, leaving the opposite two anchored. The one place the pointer
+// rect for Grip::Move, and only the edges that grip drags for a resize,
+// leaving the others anchored. The one place the pointer
 // delta turns into a rect, shared by the mouse drag and the keyboard
 // session so the two cannot disagree about what a resize means.
 RECT DragGrip(const RECT& start, Grip grip, int dx, int dy);
@@ -94,8 +194,8 @@ SnapCandidates CollectSnapEdges(const RECT& workArea, std::span<const RECT> othe
 //
 // For Grip::Move the whole rect translates, so both edges on an axis are
 // offered to the candidate set and the winning delta shifts both. For a
-// corner grip only that corner's two edges are attracted; the opposite
-// edges are anchored and must not move.
+// resize grip only the edges that grip drags are attracted; the anchored
+// ones must not move.
 RECT ApplySnap(const RECT& desired, const SnapCandidates& candidates, int thresholdPx, Grip grip);
 
 // `desired` confined to `monitor` (rcMonitor, not rcWork).
@@ -147,7 +247,8 @@ RECT NextSnapInDirection(const RECT& current, const SnapCandidates& candidates, 
 
 // `desired` with its width/height floored, by pushing back whichever
 // edges the grip is moving (the anchored edges stay put). Grip::Move is
-// returned unchanged -- it cannot change size.
+// returned unchanged -- it cannot change size -- and so is an axis the
+// grip does not drag, so a Top drag never adjusts the width.
 RECT EnforceMinimumSize(const RECT& desired, Grip grip, int minWidth, int minHeight);
 
 // How close an edge must come to a candidate to be pulled in, in physical
@@ -163,10 +264,17 @@ inline constexpr int kKeyboardStepPx = 20;
 
 // Floor for a resize, in physical pixels. Picked to leave a window big
 // enough to still be grabbable by this very feature after a resize --
-// a window shrunk to nothing has no quadrants worth aiming at. Apps with
-// a larger minimum of their own enforce it themselves via
+// a window shrunk to nothing has no move zone left in the middle. Apps
+// with a larger minimum of their own enforce it themselves via
 // WM_GETMINMAXINFO; this only stops Polish asking for something absurd.
 inline constexpr int kMinWindowWidthPx = 160;
 inline constexpr int kMinWindowHeightPx = 100;
+
+// The resize band's width, in inches. An inch is a deliberately large
+// target: this feature exists because the native ~7px border cannot be
+// hit reliably, and a band that needs aiming at would reintroduce the
+// problem it was built to solve. See ResizeBorderPx for how it shrinks
+// on a small window.
+inline constexpr double kResizeBorderInches = 1.0;
 
 }  // namespace polish
