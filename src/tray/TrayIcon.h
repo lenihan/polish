@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <functional>
+#include <string>
 
 namespace polish {
 
@@ -23,8 +24,13 @@ public:
     // onCommand(commandId): routes a selected menu item's ID back to the
     //   caller (including whatever the caller used for its own Exit
     //   item -- TrayIcon no longer has an opinion on that).
+    // tooltip: what hovering the icon says. The caller's, not this
+    //   class's, because what is worth saying there is build identity
+    //   (see util/BuildInfo.h) and TrayIcon has no business knowing
+    //   about that. Truncated to the shell's 127-character limit rather
+    //   than being allowed to overflow szTip.
     TrayIcon(HWND messageWindow, std::function<void(HMENU)> populateMenu,
-             std::function<void(UINT commandId)> onCommand);
+             std::function<void(UINT commandId)> onCommand, std::wstring tooltip);
     ~TrayIcon();
 
     TrayIcon(const TrayIcon&) = delete;
@@ -49,6 +55,10 @@ private:
     HWND messageWindow_;
     std::function<void(HMENU)> populateMenu_;
     std::function<void(UINT)> onCommand_;
+    // Kept, not just used once: the icon is re-added from scratch after
+    // explorer restarts (see HandleTaskbarRecreated), and the tooltip has
+    // to survive that.
+    std::wstring tooltip_;
     bool iconAdded_ = false;
 };
 

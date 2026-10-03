@@ -1,0 +1,23 @@
+// GENERATED FILE -- do not edit, and do not check the output in.
+//
+// Written from this template by cmake/BuildStamp.cmake, which re-runs
+// before every build so the stamp is never stale. Edit the template or
+// that script, never the generated BuildInfo.cpp in the build tree.
+
+#include "util/BuildInfo.h"
+
+namespace polish {
+
+const wchar_t* BuildVersion() { return L"@POLISH_VERSION@"; }
+
+const wchar_t* BuildCommit() { return L"@POLISH_COMMIT@"; }
+
+bool BuildIsModified() { return @POLISH_MODIFIED_BOOL@; }
+
+const wchar_t* BuildTime() { return L"@POLISH_BUILD_TIME@"; }
+
+std::wstring BuildStamp() {
+    return L"@POLISH_VERSION@ - @POLISH_COMMIT@@POLISH_MODIFIED_SUFFIX@ - @POLISH_BUILD_TIME@";
+}
+
+}  // namespace polish

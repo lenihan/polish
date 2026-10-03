@@ -172,6 +172,22 @@ and silent during an Alt+Tab session or a full-screen game.
   trick that keeps a mouse cursor visible everywhere. A single-coloured
   ring disappeared against a white document.
 
+**Hovering the tray icon says which build you're running.** Not just the
+version — the commit it was built from, whether the working tree had
+uncommitted changes in it, and when it was built:
+
+```
+Polish 0.3.0 - 6383594+ - 2026-10-03 11:27
+Add fit and finish to Windows
+```
+
+The trailing `+` marks a build made from a modified tree, the way most
+git prompts mark one. This exists because the version on its own cannot
+answer the question that actually comes up: two binaries both say 0.3.0,
+behave differently, and nothing on screen says which is which. The same
+line is written to the log at startup, so a log file identifies its own
+binary.
+
 Every feature can be turned off independently from the tray icon's
 right-click menu, which also has a **Start with Windows** option and
 Exit.

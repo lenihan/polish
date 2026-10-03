@@ -620,6 +620,36 @@ current todo list.
     drops land on exact halves, quarters and a real maximize.
 
 
+- Build identity in the tray tooltip: version, the commit it was built
+  from, a `+` if the tree was modified, and the build time. The version
+  alone could not answer the question that kept coming up -- two binaries
+  both saying 0.3.0, behaving differently, with nothing on screen to tell
+  them apart. The same line goes into the log at startup, so a log file
+  identifies its own binary.
+  - Stamped by `cmake/BuildStamp.cmake` before *every build*, not only at
+    configure time. A configure-time stamp goes stale on the next
+    rebuild, which is exactly the case it exists for; that would have
+    been a stamp that lies, which is worse than none.
+  - Only the executables link the generated `BuildInfo.cpp`, never
+    `polish_core`. The build time changes every build, so the file
+    changes every build, so something must recompile -- this keeps that
+    down to one tiny translation unit and a relink, and never disturbs
+    the test binary.
+  - `git status --untracked-files=no`: a stray scratch file says nothing
+    about what went into the binary, and a stamp that cried "modified"
+    over one would train you to ignore it.
+  - Falls back to commit "unknown" outside a git checkout or with no git
+    on PATH, so a source archive still builds.
+  - `TrayIcon` takes the tooltip from its caller rather than owning it:
+    what is worth saying there is build identity, and the tray class has
+    no business knowing about that. It keeps the string because the icon
+    is rebuilt from scratch when explorer restarts.
+  - Both branches verified: the working tree stamps `6383594+` with
+    `BuildIsModified() == true`, and a throwaway `git worktree` at the
+    same commit stamps `6383594` with false -- same commit, different
+    stamp, which is the whole point.
+
+
 ## v1.0 release -- Microsoft Store
 
 The route is settled and should not be re-litigated: v1.0 ships through the

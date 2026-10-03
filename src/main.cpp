@@ -36,6 +36,7 @@
 #include "tabs/UiaWorker.h"
 #include "tray/TrayIcon.h"
 #include "util/AnchorPoint.h"
+#include "util/BuildInfo.h"
 #include "util/DarkMode.h"
 #include "util/AppIdentity.h"
 #include "util/AppResolver.h"
@@ -6723,6 +6724,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         g_settings.bullseyeEnabled, g_settings.taskbarEnabled, g_settings.moveModeEnabled,
         g_settings.moveModeSnapThresholdPx));
 
+    polish::LogDebug(std::format(L"[Polish] build {}", polish::BuildStamp()));
+
     g_messageWindow = CreateMessageWindow(instance);
     if (g_messageWindow == nullptr) {
         CloseHandle(singleInstanceMutex);
@@ -6757,7 +6760,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_minimizeEndHook = SetWinEventHook(EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZEEND, nullptr, OnWinEvent, 0,
                                          0, WINEVENT_OUTOFCONTEXT);
 
-    g_trayIcon = std::make_unique<polish::TrayIcon>(g_messageWindow, PopulateTrayMenu, HandleTrayCommand);
+    // Two lines: which build this is, then what the app is. Build
+    // identity goes first because that is the question the tooltip is
+    // actually being asked -- two binaries both saying 0.3.0 and
+    // behaving differently is the case it exists for.
+    g_trayIcon = std::make_unique<polish::TrayIcon>(
+        g_messageWindow, PopulateTrayMenu, HandleTrayCommand,
+        std::format(L"Polish {}\nAdd fit and finish to Windows", polish::BuildStamp()));
 
     if (!RegisterGroupHotkeyFromSettings()) {
         polish::LogDebug(std::format(

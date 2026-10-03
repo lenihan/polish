@@ -1,5 +1,7 @@
 #include "tray/TrayIcon.h"
 
+#include <algorithm>
+
 #include <shellapi.h>
 
 #include "resource.h"
@@ -12,8 +14,11 @@ constexpr UINT kIconId = 1;
 }  // namespace
 
 TrayIcon::TrayIcon(HWND messageWindow, std::function<void(HMENU)> populateMenu,
-                    std::function<void(UINT)> onCommand)
-    : messageWindow_(messageWindow), populateMenu_(std::move(populateMenu)), onCommand_(std::move(onCommand)) {
+                    std::function<void(UINT)> onCommand, std::wstring tooltip)
+    : messageWindow_(messageWindow),
+      populateMenu_(std::move(populateMenu)),
+      onCommand_(std::move(onCommand)),
+      tooltip_(std::move(tooltip)) {
     AddIcon();
 }
 
@@ -35,7 +40,13 @@ void TrayIcon::AddIcon() {
     data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     data.uCallbackMessage = kCallbackMessage;
     data.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_POLISH_TRAY));
-    wcscpy_s(data.szTip, L"Polish - Add fit and finish to Windows");
+    // szTip holds 128 wchar_t including the terminator, and the shell
+    // simply drops a tip that does not fit rather than truncating it for
+    // you -- so truncate here, where it is obvious why.
+    const size_t cap = ARRAYSIZE(data.szTip) - 1;
+    const size_t length = std::min(tooltip_.size(), cap);
+    std::copy_n(tooltip_.begin(), length, data.szTip);
+    data.szTip[length] = 0;
 
     iconAdded_ = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
 }

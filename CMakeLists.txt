@@ -112,13 +112,38 @@ endif()
 # has no ProductVersion to read.
 configure_file(resources/version.rc.in "${CMAKE_CURRENT_BINARY_DIR}/version.rc" @ONLY)
 
+# The build stamp: commit, dirty flag and build time, so a running binary
+# can say which build it is and not merely which version. See
+# cmake/BuildStamp.cmake for why it is regenerated before every build
+# rather than only at configure time, and why only the executables link
+# it.
+set(POLISH_BUILDINFO_CPP "${CMAKE_CURRENT_BINARY_DIR}/BuildInfo.cpp")
+set(POLISH_BUILDSTAMP_ARGS
+    -D "SRC=${CMAKE_CURRENT_SOURCE_DIR}"
+    -D "TEMPLATE=${CMAKE_CURRENT_SOURCE_DIR}/src/util/BuildInfo.cpp.in"
+    -D "OUT=${POLISH_BUILDINFO_CPP}"
+    -D "POLISH_VERSION=${PROJECT_VERSION}"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/BuildStamp.cmake")
+
+# Once now, so the file exists for the generators that want to see it at
+# configure time...
+execute_process(COMMAND "${CMAKE_COMMAND}" ${POLISH_BUILDSTAMP_ARGS})
+# ...and again before each build, which is the part that keeps it honest.
+add_custom_target(polish_build_stamp ALL
+    COMMAND "${CMAKE_COMMAND}" ${POLISH_BUILDSTAMP_ARGS}
+    COMMENT "Stamping build info (commit, tree state, time)"
+    VERBATIM)
+set_source_files_properties("${POLISH_BUILDINFO_CPP}" PROPERTIES GENERATED TRUE)
+
 add_executable(polish WIN32
     src/main.cpp
+    "${POLISH_BUILDINFO_CPP}"
     resources/app.rc
     "${CMAKE_CURRENT_BINARY_DIR}/version.rc"
 )
 
 target_link_libraries(polish PRIVATE polish_core)
+add_dependencies(polish polish_build_stamp)
 
 if(MSVC)
     target_compile_options(polish PRIVATE /W4 /permissive- /utf-8)
@@ -134,10 +159,12 @@ set_target_properties(polish PROPERTIES OUTPUT_NAME "polish")
 # under Program Files to launch: see tools/uiaccess/ and docs/UIACCESS.md.
 add_executable(polish_uia WIN32
     src/main.cpp
+    "${POLISH_BUILDINFO_CPP}"
     resources/app_uiaccess.rc
     "${CMAKE_CURRENT_BINARY_DIR}/version.rc"
 )
 target_link_libraries(polish_uia PRIVATE polish_core)
+add_dependencies(polish_uia polish_build_stamp)
 if(MSVC)
     target_compile_options(polish_uia PRIVATE /W4 /permissive- /utf-8)
     target_link_options(polish_uia PRIVATE /MANIFEST:NO)
