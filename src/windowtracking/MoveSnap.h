@@ -116,6 +116,19 @@ enum class SnapLayout {
     BottomRightQuarter,
 };
 
+// `pt` pulled inside `r`, treating the right and bottom edges as
+// exclusive the way the zone tests do.
+//
+// Needed because a low-level mouse hook reports the pointer *unclamped*:
+// shove at the top of the screen and keep pushing, and the hook says
+// y=-173 while GetCursorPos says y=0. Measured. Asking which monitor
+// that is gives no answer at all, so the layout the user was plainly
+// requesting was withdrawn exactly as they committed to it -- the
+// preview vanished at the top edge and the maximize did not take.
+// Resolving to the nearest monitor and clamping into it is what makes
+// "push harder at the edge" mean what it looks like it means.
+POINT ClampPointToRect(POINT pt, const RECT& r);
+
 // Which layout the pointer is asking for, or None.
 //
 // `monitor` is the full monitor rect, not the work area: the trigger is
@@ -146,8 +159,35 @@ RECT RectForLayout(SnapLayout layout, const RECT& workArea);
 // corner is harder to arrive at precisely, and because overshooting into
 // a corner you did not want is a cheap mistake -- the preview shows what
 // will happen before the button comes up.
-inline constexpr int kLayoutEdgeDip = 6;
+// 24, not the 6 this started at. Six DIPs is six physical pixels at 96
+// DPI, which the pointer only reaches at the very end of a throw at the
+// edge -- so the preview appeared correctly but with a few milliseconds
+// left before the drop, and the gesture felt like it had no feedback at
+// all even though it worked. Erring generous is right here: nothing
+// commits until the button comes up, so an offer you did not want costs
+// a shrug, while an offer that arrives too late to see costs the whole
+// point of having a preview.
+inline constexpr int kLayoutEdgeDip = 24;
 inline constexpr int kLayoutCornerDip = 40;
+
+// How much further the pointer must travel to *leave* a layout than it
+// needed to enter one.
+//
+// Without this the trigger strip is about 12 physical pixels at 192 DPI,
+// and no hand holds a pointer that still: approaching the top edge
+// crossed in and out of it five times in a third of a second, measured,
+// which flickered the preview on and off and left whether the drop
+// counted down to where the pointer happened to be on the last sample.
+inline constexpr int kLayoutReleaseDip = 24;
+
+// The layout to show now, given the one showing already.
+//
+// Entering uses the plain zones; leaving requires clearing a zone grown
+// by `releasePx`. A different layout coming back from the enlarged test
+// is a switch rather than a release, so sliding along the top edge into
+// a corner still trades maximize for a quarter.
+SnapLayout LayoutWithHysteresis(SnapLayout current, POINT pt, const RECT& monitor, int edgePx, int cornerPx,
+                                int releasePx);
 
 // Edges a dragged window can snap to, split by axis. Plain sorted,
 // deduplicated coordinate lists rather than anything richer, because

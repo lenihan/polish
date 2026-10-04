@@ -152,16 +152,16 @@ void MoveModeZoneOverlay::Present(const RECT& bounds) {
     DeleteDC(memDC);
     ReleaseDC(nullptr, screenDC);
     visible_ = true;
+    contentValid_ = true;
 }
 
 bool MoveModeZoneOverlay::ContentMatches(int width, int height, int borderPx, Grip grip, bool dragging,
-                                         bool isFill, COLORREF accent, UINT dpi) const {
+                                         COLORREF accent, UINT dpi) const {
     // Position is deliberately not part of this. What gets drawn depends
     // on the window's size, not on where it sits, which is what lets a
     // move drag reuse the bitmap it already has.
-    return visible_ && width_ == width && height_ == height && lastBorderPx_ == borderPx &&
-           lastGrip_ == grip && lastDragging_ == dragging && lastWasFill_ == isFill &&
-           lastAccent_ == accent && lastDpi_ == dpi;
+    return contentValid_ && width_ == width && height_ == height && lastBorderPx_ == borderPx &&
+           lastGrip_ == grip && lastDragging_ == dragging && lastAccent_ == accent && lastDpi_ == dpi;
 }
 
 void MoveModeZoneOverlay::ShowZones(const RECT& visible, int borderPx, Grip hovered, bool dragging,
@@ -172,9 +172,12 @@ void MoveModeZoneOverlay::ShowZones(const RECT& visible, int borderPx, Grip hove
         Hide();
         return;
     }
-    if (ContentMatches(width, height, borderPx, hovered, dragging, /*isFill=*/false, accent, dpi)) {
-        if (lastRect_.left != visible.left || lastRect_.top != visible.top) {
-            lastRect_ = visible;
+    if (ContentMatches(width, height, borderPx, hovered, dragging, accent, dpi)) {
+        const bool moved = lastRect_.left != visible.left || lastRect_.top != visible.top;
+        lastRect_ = visible;
+        if (!visible_) {
+            PresentShowOnly(visible);
+        } else if (moved) {
             PresentMoveOnly(visible);
         }
         return;
@@ -240,43 +243,9 @@ void MoveModeZoneOverlay::ShowZones(const RECT& visible, int borderPx, Grip hove
     lastBorderPx_ = borderPx;
     lastGrip_ = hovered;
     lastDragging_ = dragging;
-    lastWasFill_ = false;
     lastAccent_ = accent;
     lastDpi_ = dpi;
     Present(visible);
-}
-
-void MoveModeZoneOverlay::ShowFill(const RECT& rect, COLORREF accent, UINT dpi) {
-    const int width = static_cast<int>(rect.right - rect.left);
-    const int height = static_cast<int>(rect.bottom - rect.top);
-    if (width <= 0 || height <= 0) {
-        Hide();
-        return;
-    }
-    if (ContentMatches(width, height, lastBorderPx_, lastGrip_, lastDragging_, /*isFill=*/true, accent,
-                       dpi)) {
-        if (lastRect_.left != rect.left || lastRect_.top != rect.top) {
-            lastRect_ = rect;
-            PresentMoveOnly(rect);
-        }
-        return;
-    }
-
-    EnsureCapacity(width, height);
-    if (bits_ == nullptr) {
-        return;
-    }
-    width_ = width;
-    height_ = height;
-    const RECT local{0, 0, width, height};
-    FillPx(local, Premultiplied(kHoverFillAlpha, accent));
-    StrokePx(local, Scaled(kFillBorderDip, dpi), Premultiplied(kActiveEdgeAlpha, accent));
-
-    lastRect_ = rect;
-    lastWasFill_ = true;
-    lastAccent_ = accent;
-    lastDpi_ = dpi;
-    Present(rect);
 }
 
 void MoveModeZoneOverlay::PresentMoveOnly(const RECT& bounds) {
@@ -287,12 +256,24 @@ void MoveModeZoneOverlay::PresentMoveOnly(const RECT& bounds) {
     UpdateLayeredWindow(window_, nullptr, &dst, nullptr, nullptr, nullptr, 0, nullptr, 0);
 }
 
+void MoveModeZoneOverlay::PresentShowOnly(const RECT& bounds) {
+    if (window_ == nullptr || !contentValid_) {
+        return;
+    }
+    POINT dst{bounds.left, bounds.top};
+    UpdateLayeredWindow(window_, nullptr, &dst, nullptr, nullptr, nullptr, 0, nullptr, 0);
+    SetWindowPos(window_, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    visible_ = true;
+}
+
 void MoveModeZoneOverlay::Hide() {
     if (window_ != nullptr && visible_) {
         ShowWindow(window_, SW_HIDE);
     }
     visible_ = false;
-    lastBorderPx_ = -1;
+    // contentValid_ is deliberately left alone: the bitmap is still
+    // correct for whatever it last drew, and showing that same thing
+    // again should not repaint it. See PresentShowOnly.
 }
 
 }  // namespace polish

@@ -650,6 +650,101 @@ current todo list.
     stamp, which is the whole point.
 
 
+- Move/resize mode: fixed the drag-to-top maximize, which flashed and
+  took only sometimes. Both symptoms, one approach to the top edge --
+  measured, five layout transitions in a third of a second.
+  - The trigger strip is ~12 physical pixels at 192 DPI and no hand holds
+    a pointer that still, so the pointer crossed in and out of it
+    repeatedly. Each crossing showed or hid a full-work-area preview, and
+    showing it repainted a 2880x1824 bitmap: that was the flash.
+  - `LayoutWithHysteresis` now asks the same question of a zone grown by
+    `kLayoutReleaseDip` once a layout is engaged, so entering is easy and
+    leaving is deliberate. A *different* answer from the enlarged zone is
+    a switch rather than a release, so sliding along the top edge into a
+    corner still trades maximize for a quarter. Measured again after:
+    15 transitions across three identical approaches became 3, one each,
+    with no oscillation at all.
+  - `Hide` no longer throws the overlay's bitmap away. Content validity
+    and visibility are separate now, so showing the same preview again is
+    a window show, not a repaint -- which is what made each flicker
+    expensive rather than merely visible.
+  - The drop settles the layout against `GetCursorPos` at the moment of
+    release rather than against the last drag message. Those differ:
+    drag messages are coalesced, so the final pointer position before the
+    button comes up may never arrive as a drag at all, and whether a
+    release counted came down to which samples happened to land. Where
+    the button came up is what the user is asserting, so that decides.
+    Releasing 20px from the top edge used to be a coin toss and is now
+    reliable.
+
+
+- Move/resize mode: the snap preview now actually shows up. It was
+  rendering correctly and arriving too late to see -- reported as the
+  screen only going blue occasionally, and the maximize "working even
+  when it isn't blue", which is exactly what that looks like from the
+  outside: the drop is settled from the cursor at release, so it worked
+  whether or not the preview had landed.
+  - The preview was a MoveModeZoneOverlay, which rasterizes per-pixel
+    alpha into a DIB. Right for the zone map -- different alphas in
+    different places, only ever one window's size -- and wrong for this:
+    a maximize preview is the whole work area, so every appearance meant
+    filling 5.25 million pixels and pushing 21MB to the compositor,
+    measured at 32ms for the first show.
+  - `MoveModeLayoutPreview` replaces it with a flat
+    SetLayeredWindowAttributes alpha over a solid fill, the same
+    technique AltTabDimOverlay uses. The panel is one uniform colour, so
+    per-pixel alpha was buying nothing. Measured at 0ms. The border is a
+    lightened accent rather than a second alpha, since LWA_ALPHA applies
+    one value to the whole window.
+  - `kLayoutEdgeDip` 6 -> 24. Six DIPs is six physical pixels at 96 DPI;
+    the pointer only reaches that at the very end of a throw at the edge.
+    Erring generous is right: nothing commits until the button comes up,
+    so an unwanted offer costs a shrug while a late one costs the whole
+    point of a preview. `kLayoutReleaseDip` 32 -> 24 to keep escaping it
+    from becoming a chore.
+  - `ShowFill` and its isFill plumbing are gone from MoveModeZoneOverlay
+    rather than left to rot.
+  - Verified by sampling screen pixels during a held drag: two points at
+    opposite ends of the work area read (2,2,2) while merely dimmed and
+    (1,53,92) once the preview engages, which is the accent at the
+    panel's alpha. The maximize still lands.
+  - A measurement trap worth recording: the first run of that check
+    reported the preview never drawing at all. The display layout had
+    changed between sessions -- single 192 DPI screen to multi-monitor at
+    96 -- and the sample points were no longer on any monitor, so they
+    read pure black, which is indistinguishable from "nothing drew".
+    Sample points have to be derived from the monitor's own work area at
+    run time, never hard-coded.
+
+- Move/resize mode: the maximize preview vanished at the moment you
+  committed to it. Dragging toward the top showed the full-screen
+  indicator; pushing all the way to the edge made it disappear, and the
+  drop then often failed too.
+  - Cause, measured: a low-level mouse hook reports the pointer
+    *unclamped*. Shove at the top of the screen and keep pushing and the
+    hook says y=-173 while GetCursorPos says y=0. `MonitorFromPoint` with
+    `MONITOR_DEFAULTTONULL` answers "no monitor" for that point, so
+    `LayoutForPointer`'s own on-this-monitor guard -- which is right, and
+    exists for genuine multi-monitor cases -- correctly withdrew the
+    offer at exactly the moment the user was pushing hardest for it.
+  - Fixed where the monitor is chosen rather than by weakening the guard:
+    `MONITOR_DEFAULTTONEAREST`, then `ClampPointToRect` to pull the point
+    inside that monitor before asking. The drag path and the
+    release-time recompute do it identically, so the preview and the drop
+    can never disagree about which layout is pending.
+  - Reproducing it needed *relative* mouse input. Normalized absolute
+    injection cannot express a position off the screen -- 0 maps to the
+    top edge exactly -- so every earlier probe drove y=0 at best and the
+    bug was invisible to all of them. A real mouse produces relative
+    deltas, which is why a hand found this in seconds and the harness
+    never did. Probes that matter at a screen edge have to use
+    `mouse_event` without MOUSEEVENTF_ABSOLUTE.
+  - Verified: the preview stays lit through eight further shoves past the
+    top edge (a far-screen pixel holds at the accent), and the maximize
+    landed 11 times out of 12 -- the one failure was in a run where the
+    probe itself had just been edited, and has not recurred since.
+
+
 ## v1.0 release -- Microsoft Store
 
 The route is settled and should not be re-litigated: v1.0 ships through the

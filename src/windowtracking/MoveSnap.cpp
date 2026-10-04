@@ -195,6 +195,16 @@ RECT ZoneRect(Grip grip, const RECT& visible, int borderPx) {
     }
 }
 
+POINT ClampPointToRect(POINT pt, const RECT& r) {
+    if (r.right <= r.left || r.bottom <= r.top) {
+        return pt;
+    }
+    POINT out;
+    out.x = std::clamp(pt.x, r.left, r.right - 1);
+    out.y = std::clamp(pt.y, r.top, r.bottom - 1);
+    return out;
+}
+
 SnapLayout LayoutForPointer(POINT pt, const RECT& monitor, int edgePx, int cornerPx) {
     if (monitor.right <= monitor.left || monitor.bottom <= monitor.top) {
         return SnapLayout::None;
@@ -230,6 +240,17 @@ SnapLayout LayoutForPointer(POINT pt, const RECT& monitor, int edgePx, int corne
         return SnapLayout::RightHalf;
     }
     return SnapLayout::None;
+}
+
+SnapLayout LayoutWithHysteresis(SnapLayout current, POINT pt, const RECT& monitor, int edgePx, int cornerPx,
+                                int releasePx) {
+    if (current == SnapLayout::None) {
+        return LayoutForPointer(pt, monitor, edgePx, cornerPx);
+    }
+    // Already engaged: the same question, asked of a bigger zone. Staying
+    // inside it keeps the layout, a different answer switches to it, and
+    // only leaving the enlarged zone altogether lets go.
+    return LayoutForPointer(pt, monitor, edgePx + releasePx, cornerPx + releasePx);
 }
 
 RECT RectForLayout(SnapLayout layout, const RECT& workArea) {

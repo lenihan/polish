@@ -55,12 +55,6 @@ public:
     // can be called on every pointer move during a drag.
     void ShowZones(const RECT& visible, int borderPx, Grip hovered, bool dragging, COLORREF accent, UINT dpi);
 
-    // A plain translucent panel with a thick border, filling `rect` --
-    // the preview of where a half/quarter/maximize snap would put the
-    // window if the button came up now. Same overlay machinery, different
-    // content, so this needs no second class of its own.
-    void ShowFill(const RECT& rect, COLORREF accent, UINT dpi);
-
     void Hide();
 
 private:
@@ -75,8 +69,14 @@ private:
     // every frame of every drag. Z-order is deliberately left alone here,
     // the same reasoning ActiveWindowHalo's own cheap path gives.
     void PresentMoveOnly(const RECT& bounds);
-    bool ContentMatches(int width, int height, int borderPx, Grip grip, bool dragging, bool isFill,
-                        COLORREF accent, UINT dpi) const;
+    // Puts an already-correct bitmap back on screen after a Hide,
+    // without re-rasterizing it. Hiding deliberately does not throw the
+    // content away: a preview that is being shown, hidden and shown again
+    // as the pointer crosses a boundary would otherwise repaint a
+    // full-screen bitmap every time, which is what the flicker was.
+    void PresentShowOnly(const RECT& bounds);
+    bool ContentMatches(int width, int height, int borderPx, Grip grip, bool dragging, COLORREF accent,
+                        UINT dpi) const;
     void FillPx(RECT r, uint32_t premultiplied);
     void StrokePx(RECT r, int thickness, uint32_t premultiplied);
 
@@ -97,9 +97,12 @@ private:
     int lastBorderPx_ = -1;
     Grip lastGrip_ = Grip::Move;
     bool lastDragging_ = false;
-    bool lastWasFill_ = false;
     COLORREF lastAccent_ = 0;
     UINT lastDpi_ = 0;
+    // Whether the bitmap holds what the last Show* call asked for.
+    // Deliberately separate from visible_: content survives a Hide, so
+    // showing the same thing again costs nothing.
+    bool contentValid_ = false;
     bool visible_ = false;
 };
 

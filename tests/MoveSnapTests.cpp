@@ -374,3 +374,70 @@ TEST_CASE("ZoneRect: no band means every zone is the whole window") {
     CHECK(Same(ZoneRect(Grip::Move, window, 0), window));
     CHECK(Same(ZoneRect(Grip::TopLeft, window, 0), window));
 }
+
+TEST_CASE("LayoutWithHysteresis: entering uses the plain zone") {
+    constexpr RECT monitor = {0, 0, 1920, 1080};
+    CHECK(LayoutWithHysteresis(SnapLayout::None, {960, 2}, monitor, 6, 40, 32) == SnapLayout::Maximize);
+    // Just outside the entry strip, with nothing engaged: still nothing.
+    CHECK(LayoutWithHysteresis(SnapLayout::None, {960, 20}, monitor, 6, 40, 32) == SnapLayout::None);
+}
+
+TEST_CASE("LayoutWithHysteresis: leaving takes much more than entering") {
+    constexpr RECT monitor = {0, 0, 1920, 1080};
+    // The exact case that made the drop a coin toss: the pointer wanders
+    // back to y=20, well outside the 6px entry strip but inside the 38px
+    // release zone, and the layout holds.
+    CHECK(LayoutWithHysteresis(SnapLayout::Maximize, {960, 20}, monitor, 6, 40, 32) ==
+          SnapLayout::Maximize);
+    CHECK(LayoutWithHysteresis(SnapLayout::Maximize, {960, 37}, monitor, 6, 40, 32) ==
+          SnapLayout::Maximize);
+    // Past the release zone it finally lets go.
+    CHECK(LayoutWithHysteresis(SnapLayout::Maximize, {960, 60}, monitor, 6, 40, 32) == SnapLayout::None);
+}
+
+TEST_CASE("LayoutWithHysteresis: a different zone is a switch, not a release") {
+    constexpr RECT monitor = {0, 0, 1920, 1080};
+    // Sliding along the top edge into the corner trades maximize for the
+    // quarter rather than dropping the preview entirely.
+    CHECK(LayoutWithHysteresis(SnapLayout::Maximize, {30, 10}, monitor, 6, 40, 32) ==
+          SnapLayout::TopLeftQuarter);
+}
+
+TEST_CASE("LayoutWithHysteresis: nothing engaged and nothing nearby stays nothing") {
+    constexpr RECT monitor = {0, 0, 1920, 1080};
+    CHECK(LayoutWithHysteresis(SnapLayout::None, {960, 540}, monitor, 6, 40, 32) == SnapLayout::None);
+    CHECK(LayoutWithHysteresis(SnapLayout::Maximize, {960, 540}, monitor, 6, 40, 32) == SnapLayout::None);
+}
+
+TEST_CASE("ClampPointToRect: an unclamped hook point is pulled back onto the monitor") {
+    constexpr RECT monitor = {0, 0, 1920, 1080};
+    // The measured case: the pointer is shoved at the top edge and the
+    // low-level hook keeps reporting it climbing, well off the screen.
+    CHECK(ClampPointToRect({1400, -173}, monitor).y == 0);
+    CHECK(ClampPointToRect({1400, -173}, monitor).x == 1400);
+
+    // Right and bottom are exclusive, matching the zone tests, so a
+    // clamped point still reads as inside rather than one past the end.
+    CHECK(ClampPointToRect({5000, 5000}, monitor).x == 1919);
+    CHECK(ClampPointToRect({5000, 5000}, monitor).y == 1079);
+    CHECK(ClampPointToRect({-9, -9}, monitor).x == 0);
+}
+
+TEST_CASE("ClampPointToRect: a point already inside is untouched") {
+    constexpr RECT monitor = {0, 0, 1920, 1080};
+    CHECK(ClampPointToRect({960, 540}, monitor).x == 960);
+    CHECK(ClampPointToRect({960, 540}, monitor).y == 540);
+}
+
+TEST_CASE("ClampPointToRect: clamping an off-screen point makes the top edge offer maximize") {
+    // The bug end to end, in the pure layer: unclamped, the monitor test
+    // refuses everything; clamped, it is plainly a maximize.
+    constexpr RECT monitor = {0, 0, 2880, 1920};
+    constexpr POINT raw{1400, -173};
+    CHECK(LayoutForPointer(raw, monitor, 48, 80) == SnapLayout::None);
+    CHECK(LayoutForPointer(ClampPointToRect(raw, monitor), monitor, 48, 80) == SnapLayout::Maximize);
+}
+
+TEST_CASE("ClampPointToRect: a degenerate monitor rect is left alone") {
+    CHECK(ClampPointToRect({7, 9}, RECT{0, 0, 0, 0}).x == 7);
+}

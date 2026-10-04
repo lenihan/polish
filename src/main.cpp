@@ -28,6 +28,7 @@
 #include "hook/GroupPickerWindow.h"
 #include "hook/GroupTabThumbnail.h"
 #include "hook/MoveModeHook.h"
+#include "hook/MoveModeLayoutPreview.h"
 #include "hook/MoveModeZoneOverlay.h"
 #include "hook/TaskbarHook.h"
 #include "hook/TaskbarShield.h"
@@ -4665,12 +4666,14 @@ std::unique_ptr<polish::MoveModeHook> g_moveModeHook;
 std::vector<std::unique_ptr<polish::AltTabDimOverlay>> g_moveModeOverlays;
 std::vector<HWND> g_moveModeDimTargets;
 std::unique_ptr<polish::AltTabHighlightBorder> g_moveModeBorder;
-// The zone map drawn on the window under the pointer, and -- a second
-// instance of the same class, since it is the same machinery with
-// different content -- the preview of where a half/quarter/maximize drop
-// would put the window.
+// The zone map drawn on the window under the pointer, and the preview of
+// where a half/quarter/maximize drop would put the window. Two classes,
+// not two instances of one: the map wants per-pixel alpha over a single
+// window, the preview is a flat panel that can be the whole screen, and
+// using the map's machinery for it made the preview too slow to see.
+// See MoveModeLayoutPreview.h.
 std::unique_ptr<polish::MoveModeZoneOverlay> g_moveModeZones;
-std::unique_ptr<polish::MoveModeZoneOverlay> g_moveModeLayoutPreview;
+std::unique_ptr<polish::MoveModeLayoutPreview> g_moveModeLayoutPreview;
 
 // The resize band's width for the window currently under the pointer, and
 // the zone that pointer is in. Recomputed as the pointer moves so the map
@@ -5261,16 +5264,25 @@ void OnMoveModeDrag(POINT screenPt) {
         HideMoveModeLayoutPreview();
         return;
     }
-    const HMONITOR layoutMonitor = MonitorFromPoint(screenPt, MONITOR_DEFAULTTONULL);
+    // MONITOR_DEFAULTTONEAREST, and the point clamped into whatever that
+    // returns. A low-level mouse hook reports the pointer unclamped: shove
+    // at the top of the screen and keep pushing, and it says y=-173 while
+    // GetCursorPos says y=0 -- measured. With DEFAULTTONULL that is no
+    // monitor at all, so the layout was withdrawn at exactly the moment
+    // the user pushed hardest for it: the preview vanished at the top edge
+    // and the maximize did not take.
+    const HMONITOR layoutMonitor = MonitorFromPoint(screenPt, MONITOR_DEFAULTTONEAREST);
     MONITORINFO layoutInfo{};
     layoutInfo.cbSize = sizeof(layoutInfo);
     polish::SnapLayout layout = polish::SnapLayout::None;
     UINT layoutDpi = 96;
     if (layoutMonitor != nullptr && GetMonitorInfoW(layoutMonitor, &layoutInfo)) {
         layoutDpi = MoveModeDpiForMonitor(layoutMonitor);
-        layout = polish::LayoutForPointer(screenPt, layoutInfo.rcMonitor,
-                                          MulDiv(polish::kLayoutEdgeDip, static_cast<int>(layoutDpi), 96),
-                                          MulDiv(polish::kLayoutCornerDip, static_cast<int>(layoutDpi), 96));
+        layout = polish::LayoutWithHysteresis(
+            g_moveModeLayout, polish::ClampPointToRect(screenPt, layoutInfo.rcMonitor), layoutInfo.rcMonitor,
+            MulDiv(polish::kLayoutEdgeDip, static_cast<int>(layoutDpi), 96),
+            MulDiv(polish::kLayoutCornerDip, static_cast<int>(layoutDpi), 96),
+            MulDiv(polish::kLayoutReleaseDip, static_cast<int>(layoutDpi), 96));
     }
     if (layout == polish::SnapLayout::None) {
         HideMoveModeLayoutPreview();
@@ -5279,14 +5291,51 @@ void OnMoveModeDrag(POINT screenPt) {
     g_moveModeLayout = layout;
     g_moveModeLayoutWork = layoutInfo.rcWork;
     if (g_moveModeLayoutPreview) {
-        g_moveModeLayoutPreview->ShowFill(polish::RectForLayout(layout, layoutInfo.rcWork), MoveModeAccent(),
-                                           layoutDpi);
+        g_moveModeLayoutPreview->Show(polish::RectForLayout(layout, layoutInfo.rcWork), MoveModeAccent(),
+                                       layoutDpi);
     }
 }
 
 void OnMoveModeDrop() {
     g_moveModeMovingWindow = false;
     if (g_moveModeTarget != nullptr && IsWindow(g_moveModeTarget)) {
+        // Settle the layout against where the pointer actually is at the
+        // moment of release, not against whatever the last drag message
+        // happened to sample.
+        //
+        // Those differ, and it mattered: drag messages are coalesced, so
+        // the final pointer position before the button comes up may never
+        // be delivered as a drag at all. Releasing at the top edge then
+        // maximized or did not depending on which samples arrived --
+        // reported as "sometimes releasing maximizes, sometimes it does
+        // not", and reproduced. Where the button came up is the thing the
+        // user is actually asserting, so that is what decides.
+        if (g_moveModeGrip == polish::Grip::Move) {
+            POINT releasePt{};
+            if (GetCursorPos(&releasePt)) {
+                // Nearest-and-clamped here too, for the same reason as the
+                // drag path. GetCursorPos is clamped where the hook's own
+                // point is not, so this is belt and braces rather than a
+                // second bug -- but the two must agree about which layout
+                // is pending, and the cheapest way to guarantee that is to
+                // ask the question identically.
+                const HMONITOR releaseMonitor = MonitorFromPoint(releasePt, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO releaseInfo{};
+                releaseInfo.cbSize = sizeof(releaseInfo);
+                if (releaseMonitor != nullptr && GetMonitorInfoW(releaseMonitor, &releaseInfo)) {
+                    const UINT releaseDpi = MoveModeDpiForMonitor(releaseMonitor);
+                    g_moveModeLayout = polish::LayoutWithHysteresis(
+                        g_moveModeLayout, polish::ClampPointToRect(releasePt, releaseInfo.rcMonitor),
+                        releaseInfo.rcMonitor,
+                        MulDiv(polish::kLayoutEdgeDip, static_cast<int>(releaseDpi), 96),
+                        MulDiv(polish::kLayoutCornerDip, static_cast<int>(releaseDpi), 96),
+                        MulDiv(polish::kLayoutReleaseDip, static_cast<int>(releaseDpi), 96));
+                    g_moveModeLayoutWork = releaseInfo.rcWork;
+                } else {
+                    g_moveModeLayout = polish::SnapLayout::None;
+                }
+            }
+        }
         // A pending layout wins over wherever the drag happened to leave
         // the window: the preview has been showing this rect, and the
         // drop is the commitment it was waiting for.
@@ -6983,7 +7032,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     // bug once before (see AltTabListWindow.h).
     g_moveModeBorder = std::make_unique<polish::AltTabHighlightBorder>(GetModuleHandleW(nullptr));
     g_moveModeZones = std::make_unique<polish::MoveModeZoneOverlay>(GetModuleHandleW(nullptr));
-    g_moveModeLayoutPreview = std::make_unique<polish::MoveModeZoneOverlay>(GetModuleHandleW(nullptr));
+    g_moveModeLayoutPreview = std::make_unique<polish::MoveModeLayoutPreview>(GetModuleHandleW(nullptr));
     g_moveModeHook = std::make_unique<polish::MoveModeHook>(
         g_messageWindow, []() { return g_settings.moveModeEnabled; },
         [](POINT screenPt) {
