@@ -39,6 +39,12 @@ Settings LoadSettings() {
         settings.taskbarEnabled = ReadDword(key, L"TaskbarEnabled", 1) != 0;
         settings.moveModeEnabled = ReadDword(key, L"MoveModeEnabled", 1) != 0;
         settings.moveModeSnapThresholdPx = ReadDword(key, L"MoveModeSnapThresholdPx", 12);
+        settings.arrangeTileHotkeyModifiers =
+            ReadDword(key, L"ArrangeTileHotkeyModifiers", MOD_CONTROL | MOD_ALT);
+        settings.arrangeTileHotkeyVirtualKey = ReadDword(key, L"ArrangeTileHotkeyVirtualKey", 'T');
+        settings.arrangeCascadeHotkeyModifiers =
+            ReadDword(key, L"ArrangeCascadeHotkeyModifiers", MOD_CONTROL | MOD_ALT);
+        settings.arrangeCascadeHotkeyVirtualKey = ReadDword(key, L"ArrangeCascadeHotkeyVirtualKey", 'C');
         settings.groupHotkeyModifiers = ReadDword(key, L"GroupHotkeyModifiers", MOD_WIN | MOD_ALT);
         settings.groupHotkeyVirtualKey = ReadDword(key, L"GroupHotkeyVirtualKey", 'G');
         RegCloseKey(key);
@@ -61,6 +67,10 @@ void SaveSettings(const Settings& settings) {
     WriteDword(key, L"TaskbarEnabled", settings.taskbarEnabled ? 1 : 0);
     WriteDword(key, L"MoveModeEnabled", settings.moveModeEnabled ? 1 : 0);
     WriteDword(key, L"MoveModeSnapThresholdPx", settings.moveModeSnapThresholdPx);
+    WriteDword(key, L"ArrangeTileHotkeyModifiers", settings.arrangeTileHotkeyModifiers);
+    WriteDword(key, L"ArrangeTileHotkeyVirtualKey", settings.arrangeTileHotkeyVirtualKey);
+    WriteDword(key, L"ArrangeCascadeHotkeyModifiers", settings.arrangeCascadeHotkeyModifiers);
+    WriteDword(key, L"ArrangeCascadeHotkeyVirtualKey", settings.arrangeCascadeHotkeyVirtualKey);
     WriteDword(key, L"GroupHotkeyModifiers", settings.groupHotkeyModifiers);
     WriteDword(key, L"GroupHotkeyVirtualKey", settings.groupHotkeyVirtualKey);
     RegCloseKey(key);

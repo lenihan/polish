@@ -48,6 +48,7 @@
 #include "windowtracking/GroupManager.h"
 #include "windowtracking/MoveSnap.h"
 #include "windowtracking/RectUtils.h"
+#include "windowtracking/WindowLayout.h"
 #include "windowtracking/TaskbarButtons.h"
 #include "windowtracking/TaskbarReadPolicy.h"
 #include "windowtracking/WindowFilters.h"
@@ -5538,6 +5539,202 @@ void OnMoveModeCommit() {
     EndMoveModeSession();
 }
 
+constexpr UINT_PTR kArrangeSyncTimerId = 15;
+// How long to let the async moves land before telling restore-position
+// sync about them. Generous: being late costs nothing, being early
+// writes the pre-arrange rect back and undoes the whole thing.
+constexpr UINT kArrangeSyncDelayMs = 250;
+// The windows an arrange command just moved, waiting for that timer,
+// and the work area they were arranged into.
+std::vector<HWND> g_arrangeSyncPending;
+RECT g_arrangeSyncWorkArea{};
+
+// ===================== Arrange every window =====================
+//
+// Tile or cascade every non-minimized window on one monitor in one go --
+// as opposed to move/resize mode, which acts on the single window under
+// the pointer. The geometry is windowtracking/WindowLayout.h; this is the
+// part that decides *which* windows and then moves them.
+
+// Appends every candidate window on `monitor` that is not already in
+// `out`, in Z-order.
+//
+// Needed because the MRU list only knows windows that have been
+// focused since Polish started (docs/LIMITATIONS.md #3 describes the
+// same gap for restore-position sync). Arranging is exactly the command
+// where leaving those out would be most obvious: the window you have not
+// touched this session is still on screen and still wants a slot. Same
+// MRU-first-then-Z-order-tail shape RebuildAltTabCandidates uses.
+std::vector<HWND>* g_arrangeCollecting = nullptr;
+HMONITOR g_arrangeCollectingMonitor = nullptr;
+
+BOOL CALLBACK EnumArrangeCandidatesProc(HWND hwnd, LPARAM) {
+    if (g_arrangeCollecting == nullptr) {
+        return FALSE;
+    }
+    if (IsOwnProcessWindow(hwnd) || !polish::IsCandidateWindow(hwnd) || polish::IsElevatedWindow(hwnd)) {
+        return TRUE;
+    }
+    if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != g_arrangeCollectingMonitor) {
+        return TRUE;
+    }
+    if (std::find(g_arrangeCollecting->begin(), g_arrangeCollecting->end(), hwnd) ==
+        g_arrangeCollecting->end()) {
+        g_arrangeCollecting->push_back(hwnd);
+    }
+    return TRUE;
+}
+
+// The windows an arrange command acts on: every non-minimized,
+// non-elevated candidate on `monitor`, most-recently-used first.
+//
+// Elevated windows are left out rather than attempted: UIPI makes
+// SetWindowPos a silent no-op against them (docs/LIMITATIONS.md #1), so
+// including one would leave a hole in the tiling where a window sat
+// stubbornly in its old place.
+std::vector<HWND> ArrangeCandidates(HMONITOR monitor) {
+    std::vector<HWND> windows;
+    for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+        if (!IsWindow(hwnd) || IsOwnProcessWindow(hwnd) || !polish::IsCandidateWindow(hwnd) ||
+            polish::IsElevatedWindow(hwnd)) {
+            continue;
+        }
+        if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != monitor) {
+            continue;
+        }
+        windows.push_back(hwnd);
+    }
+    g_arrangeCollecting = &windows;
+    g_arrangeCollectingMonitor = monitor;
+    EnumWindows(EnumArrangeCandidatesProc, 0);
+    g_arrangeCollecting = nullptr;
+    return windows;
+}
+
+// Which monitor gets arranged.
+//
+// The most-recently-used real window's monitor, not the foreground
+// window's: the tray menu is one of the two ways in, and opening it
+// takes the foreground for Polish's own message window (see
+// CreateMessageWindow's note on why it is not HWND_MESSAGE-parented), so
+// by the time the command runs GetForegroundWindow answers "us". The MRU
+// list is unaffected by that and still remembers what the user was
+// actually looking at.
+HMONITOR ArrangeTargetMonitor() {
+    for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+        if (IsWindow(hwnd) && !IsOwnProcessWindow(hwnd) && polish::IsCandidateWindow(hwnd)) {
+            return MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        }
+    }
+    POINT cursor{};
+    if (GetCursorPos(&cursor)) {
+        return MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    }
+    return MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTONEAREST);
+}
+
+// Puts one window into its slot.
+//
+// `target` is in visible-rect space, like everything in MoveSnap.h, and
+// is converted back through the window's own per-edge inset. That
+// conversion is not optional here: tiling two windows flush using raw
+// GetWindowRect coordinates leaves a ~14px gap between the edges you can
+// actually see, which is the whole point of a tiling command.
+void ApplyArrangedRect(HWND hwnd, const RECT& target) {
+    if (IsZoomed(hwnd)) {
+        // SetWindowPos silently no-ops on a maximized window's size and
+        // position (GroupManager.h documents the same trap), so it has to
+        // come down first or it would sit out the arrangement.
+        ShowWindow(hwnd, SW_RESTORE);
+    }
+    RECT inset{};
+    MoveModeVisibleRectFor(hwnd, inset);
+    const RECT windowRect{target.left + inset.left, target.top + inset.top, target.right + inset.right,
+                          target.bottom + inset.bottom};
+    // Z-order deliberately untouched. A background process cannot
+    // reliably raise another process's window anyway (HWND_TOP returns
+    // success and does nothing -- see PlaceHaloBehindTarget), and the
+    // existing order is already roughly most-recent-in-front, which is
+    // what a cascade wants.
+    SetWindowPos(hwnd, nullptr, windowRect.left, windowRect.top, windowRect.right - windowRect.left,
+                 windowRect.bottom - windowRect.top,
+                 SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+    // Restore-position sync deliberately does NOT happen here, and the
+    // reason is worth keeping: SyncRestorePlacementNow reads the window's
+    // *current* rect and writes it into rcNormalPosition via
+    // SetWindowPlacement, which repositions a non-maximized window to
+    // that rect. Called straight after an async SetWindowPos it reads the
+    // rect the window has not finished leaving, and puts it right back --
+    // the whole arrangement applied and silently undid itself, with the
+    // slot assignments in the log looking perfectly correct. It happens
+    // on a short timer once the moves have landed instead; see
+    // kArrangeSyncTimerId.
+}
+
+// Slides a window back onto the work area if it ended up hanging off it.
+//
+// An app can refuse to be as small as its slot -- a minimum size through
+// WM_GETMINMAXINFO -- and nothing here can overrule that. Measured: a
+// four-way tile of a 2880x1824 work area gave one window a 912px-tall
+// slot and it came back 1286 tall, running 374px past the bottom of the
+// screen. It cannot be made to fit, but it can at least be made
+// reachable, so this moves rather than resizes: the window keeps the
+// size it insisted on and gets as much of itself on screen as that
+// allows, with its top-left corner winning if it is simply too big.
+void NudgeArrangedWindowOnScreen(HWND hwnd) {
+    RECT inset{};
+    const RECT visible = MoveModeVisibleRectFor(hwnd, inset);
+    const RECT fitted = polish::ClampToMonitor(visible, g_arrangeSyncWorkArea, polish::Grip::Move);
+    if (polish::RectsApproximatelyEqual(visible, fitted, /*epsilonPixels=*/0)) {
+        return;
+    }
+    const RECT windowRect{fitted.left + inset.left, fitted.top + inset.top, fitted.right + inset.right,
+                          fitted.bottom + inset.bottom};
+    SetWindowPos(hwnd, nullptr, windowRect.left, windowRect.top, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+}
+
+void ArrangeWindows(polish::ArrangeKind kind) {
+    const wchar_t* kindName = kind == polish::ArrangeKind::Tile ? L"tile" : L"cascade";
+    const HMONITOR monitor = ArrangeTargetMonitor();
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (monitor == nullptr || !GetMonitorInfoW(monitor, &info)) {
+        polish::LogDebug(std::format(L"[Polish] Arrange ({}): no monitor to arrange on", kindName));
+        return;
+    }
+    const std::vector<HWND> windows = ArrangeCandidates(monitor);
+    if (windows.empty()) {
+        polish::LogDebug(std::format(L"[Polish] Arrange ({}): nothing to arrange", kindName));
+        return;
+    }
+
+    const UINT dpi = MoveModeDpiForMonitor(monitor);
+    const int count = static_cast<int>(windows.size());
+    const std::vector<RECT> rects =
+        kind == polish::ArrangeKind::Tile
+            ? polish::TileRects(info.rcWork, count)
+            : polish::CascadeRects(info.rcWork, count,
+                                   MulDiv(polish::kCascadeStepDip, static_cast<int>(dpi), 96));
+    if (rects.size() != windows.size()) {
+        return;
+    }
+    // Last first, so the most-recently-used window is positioned last and
+    // any repaint storm settles with it on top.
+    for (size_t i = windows.size(); i-- > 0;) {
+        ApplyArrangedRect(windows[i], rects[i]);
+    }
+    // Hand the new positions to restore-position sync once they have
+    // actually taken, so the native Maximize/Restore pair round-trips
+    // through the arrangement -- the thing this whole app exists to fix.
+    g_arrangeSyncPending = windows;
+    g_arrangeSyncWorkArea = info.rcWork;
+    SetTimer(g_messageWindow, kArrangeSyncTimerId, kArrangeSyncDelayMs, nullptr);
+    polish::LogDebug(
+        std::format(L"[Polish] Arrange ({}): {} window(s) on work area ({},{})-({},{})", kindName, count,
+                     info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom));
+}
+
 constexpr UINT kMenuIdRestoreSync = 1;
 constexpr UINT kMenuIdAltTab = 2;
 constexpr UINT kMenuIdNewGroup = 3;
@@ -5549,6 +5746,8 @@ constexpr UINT kMenuIdHalo = 8;
 constexpr UINT kMenuIdBullseye = 9;
 constexpr UINT kMenuIdTaskbar = 10;
 constexpr UINT kMenuIdMoveMode = 11;
+constexpr UINT kMenuIdArrangeTile = 12;
+constexpr UINT kMenuIdArrangeCascade = 13;
 
 constexpr wchar_t kAboutUrl[] = L"https://www.linkedin.com/in/davidlenihan/";
 
@@ -5562,6 +5761,12 @@ constexpr wchar_t kAboutUrl[] = L"https://www.linkedin.com/in/davidlenihan/";
 // Win+Alt+G) -- confirmed necessary, not just nice-to-have: something
 // else on the dev machine itself already claims Win+Alt+G.
 constexpr int kNewGroupHotkeyId = 1;
+// Two more of the same, for the arrange commands. Separate ids rather
+// than one id with a modifier test, because RegisterHotKey is what
+// decides which combination fired and a failed registration has to be
+// reportable per command.
+constexpr int kArrangeTileHotkeyId = 2;
+constexpr int kArrangeCascadeHotkeyId = 3;
 
 // (Re-)registers the group hotkey from g_settings' current combination,
 // unregistering any previous one first (harmless no-op if none was
@@ -5573,7 +5778,6 @@ bool RegisterGroupHotkeyFromSettings() {
     return RegisterHotKey(g_messageWindow, kNewGroupHotkeyId, g_settings.groupHotkeyModifiers | MOD_NOREPEAT,
                            g_settings.groupHotkeyVirtualKey) != FALSE;
 }
-
 // Formats a hotkey combination the way the tray menu / dialogs show it,
 // e.g. "Win+Alt+G".
 std::wstring FormatHotkey(UINT modifiers, UINT virtualKey) {
@@ -5593,6 +5797,31 @@ std::wstring FormatHotkey(UINT modifiers, UINT virtualKey) {
 // by something else on the machine (confirmed real, see
 // kNewGroupHotkeyId's comment), so this loops back to the same dialog
 // with an inline error instead of silently leaving no hotkey active.
+
+// The two arrange hotkeys, registered the same way. Failure is reported
+// rather than swallowed: the group hotkey's own history is that a
+// perfectly reasonable default was already taken on this very machine,
+// so "the key does nothing" has to be diagnosable from the log.
+void RegisterArrangeHotkeysFromSettings() {
+    UnregisterHotKey(g_messageWindow, kArrangeTileHotkeyId);
+    UnregisterHotKey(g_messageWindow, kArrangeCascadeHotkeyId);
+    const auto reg = [](int id, UINT modifiers, UINT vk, const wchar_t* what) {
+        if (RegisterHotKey(g_messageWindow, id, modifiers | MOD_NOREPEAT, vk) == FALSE) {
+            polish::LogDebug(std::format(
+                L"[Polish] WARNING: failed to register the {} hotkey for {} (already claimed on this PC?). "
+                L"GetLastError={}. Change it under HKCU\\Software\\Polish.",
+                FormatHotkey(modifiers, vk), what, GetLastError()));
+        } else {
+            polish::LogDebug(
+                std::format(L"[Polish] {} ({}) hotkey registered", FormatHotkey(modifiers, vk), what));
+        }
+    };
+    reg(kArrangeTileHotkeyId, g_settings.arrangeTileHotkeyModifiers, g_settings.arrangeTileHotkeyVirtualKey,
+        L"tile windows");
+    reg(kArrangeCascadeHotkeyId, g_settings.arrangeCascadeHotkeyModifiers,
+        g_settings.arrangeCascadeHotkeyVirtualKey, L"cascade windows");
+}
+
 void ChangeGroupHotkey() {
     polish::HotkeyChoice current{g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey};
     for (;;) {
@@ -6321,6 +6550,18 @@ void PopulateTrayMenu(HMENU menu) {
     AppendMenuW(menu, MF_STRING | (g_settings.moveModeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdMoveMode,
                 L"Hold Win to move/resize any window");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    // The hotkey is shown beside each item on purpose: the tray menu is
+    // the mouse way in, and seeing the key there is how anyone ever
+    // learns the keyboard way in.
+    AppendMenuW(menu, MF_STRING, kMenuIdArrangeTile,
+                (L"Tile windows	" + FormatHotkey(g_settings.arrangeTileHotkeyModifiers,
+                                                  g_settings.arrangeTileHotkeyVirtualKey))
+                    .c_str());
+    AppendMenuW(menu, MF_STRING, kMenuIdArrangeCascade,
+                (L"Cascade windows	" + FormatHotkey(g_settings.arrangeCascadeHotkeyModifiers,
+                                                     g_settings.arrangeCascadeHotkeyVirtualKey))
+                    .c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuIdNewGroup,
                 (L"New Group...\t" + FormatHotkey(g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey))
                     .c_str());
@@ -6390,6 +6631,12 @@ void HandleTrayCommand(UINT commandId) {
                 std::format(L"[Polish] start with Windows {}", newValue ? L"enabled" : L"disabled"));
             break;
         }
+        case kMenuIdArrangeTile:
+            ArrangeWindows(polish::ArrangeKind::Tile);
+            break;
+        case kMenuIdArrangeCascade:
+            ArrangeWindows(polish::ArrangeKind::Cascade);
+            break;
         case kMenuIdNewGroup:
             TriggerNewGroup(nullptr);
             break;
@@ -6442,6 +6689,15 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 RefreshAllHiddenThumbnails();
             } else if (wParam == kThumbnailStabilizeTimerId) {
                 StabilizeHoveredThumbnail();
+            } else if (wParam == kArrangeSyncTimerId) {
+                KillTimer(hwnd, kArrangeSyncTimerId);
+                for (HWND arranged : g_arrangeSyncPending) {
+                    if (IsWindow(arranged)) {
+                        NudgeArrangedWindowOnScreen(arranged);
+                        SyncRestorePlacementNow(arranged);
+                    }
+                }
+                g_arrangeSyncPending.clear();
             } else if (wParam == kMoveModeDimTimerId) {
                 OnMoveModeDimTimer();
             } else if (wParam == kHaloRenderTimerId) {
@@ -6592,6 +6848,10 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         case WM_HOTKEY:
             if (wParam == kNewGroupHotkeyId) {
                 TriggerNewGroup(nullptr);
+            } else if (wParam == kArrangeTileHotkeyId) {
+                ArrangeWindows(polish::ArrangeKind::Tile);
+            } else if (wParam == kArrangeCascadeHotkeyId) {
+                ArrangeWindows(polish::ArrangeKind::Cascade);
             }
             return 0;
 
@@ -6649,6 +6909,8 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             KillTimer(hwnd, kBullseyeFrameTimerId);
             KillTimer(hwnd, kMoveModeDimTimerId);
             UnregisterHotKey(hwnd, kNewGroupHotkeyId);
+            UnregisterHotKey(hwnd, kArrangeTileHotkeyId);
+            UnregisterHotKey(hwnd, kArrangeCascadeHotkeyId);
             if (g_foregroundHook != nullptr) {
                 UnhookWinEvent(g_foregroundHook);
             }
@@ -6829,6 +7091,8 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     g_trayIcon = std::make_unique<polish::TrayIcon>(
         g_messageWindow, PopulateTrayMenu, HandleTrayCommand,
         std::format(L"Polish {}\nAdd fit and finish to Windows", polish::BuildStamp()));
+
+    RegisterArrangeHotkeysFromSettings();
 
     if (!RegisterGroupHotkeyFromSettings()) {
         polish::LogDebug(std::format(

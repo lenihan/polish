@@ -188,6 +188,33 @@ behave differently, and nothing on screen says which is which. The same
 line is written to the log at startup, so a log file identifies its own
 binary.
 
+**Tile or cascade everything on screen, in one go.** The gestures above
+act on one window; these act on all of them. **Ctrl+Alt+T** tiles every
+non-minimized window on the current monitor into a roughly square grid —
+two windows become a left/right split, four become the corners, and an
+odd count puts the leftovers in a full-width row rather than leaving a
+hole. **Ctrl+Alt+C** cascades them instead, all the same size and stepped
+down and right so every title bar stays readable; a long enough stack
+restarts from the top-left rather than walking off the screen.
+
+Both are also in the tray menu, which shows the key beside each one —
+so the mouse way in teaches the keyboard way in. Windows are taken
+most-recently-used first, so the one you were just in gets the first
+slot. Maximized windows are restored first so they can take part;
+elevated windows are left alone, because Windows won't let an
+unelevated app move them (see
+[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)).
+
+One honest limit: an app can refuse to be as small as its slot, and
+nothing here can overrule that. Such a window keeps the size it insists
+on and is slid back onto the screen rather than left hanging off the
+edge, so it overlaps its neighbour instead of disappearing.
+
+If `Ctrl+Alt+T` or `Ctrl+Alt+C` is already taken on your machine, Polish
+says so in its log at startup and the key simply does nothing. Change it
+under `HKCU\Software\Polish` (`ArrangeTileHotkeyVirtualKey` and friends)
+— there's no picker for these two yet.
+
 Every feature can be turned off independently from the tray icon's
 right-click menu, which also has a **Start with Windows** option and
 Exit.

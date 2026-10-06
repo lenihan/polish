@@ -770,6 +770,50 @@ current todo list.
     from that fill (same hue, alpha 70, around (44,76,102)), and scan
     where the window sat *at the moment of release*.
 
+- Arrange every window: Ctrl+Alt+T tiles and Ctrl+Alt+C cascades every
+  non-minimized window on the current monitor, most-recently-used first.
+  Two doorways on purpose -- the tray menu for the mouse, a hotkey for
+  the keyboard -- and the menu prints the key beside each item, so the
+  mouse way in is how anyone learns the keyboard way in.
+  - `windowtracking/WindowLayout.h` holds the geometry, pure and tested
+    (18 cases). Deliberately not built on GroupManager's
+    `ComputeGridShape`, which computes the same kind of shape: that one
+    belongs to a subsystem this file already marks for removal, and the
+    arithmetic it saves is one ceil(sqrt). A new feature should not be
+    tied to code scheduled for deletion.
+  - Two useful cases fall out of the general grid rather than being
+    special-cased: a count of 2 is a left/right split and a count of 4 is
+    the four corners. A short final row is stretched to full width, since
+    three windows read better as two over one than as two with a hole.
+  - The MRU list only knows windows focused since Polish started, so the
+    candidate set is MRU first then an EnumWindows Z-order tail -- the
+    same shape RebuildAltTabCandidates uses, and arranging is exactly
+    where the windows you have not touched this session would be most
+    obviously missing.
+  - Ctrl+Alt rather than Win+Alt, which would have matched the group
+    hotkey. Probed first: Win+Alt+T, Win+Shift+T, Win+Shift+C and
+    Win+Ctrl+C were all already claimed on this machine, and a pair with
+    mismatched modifiers is worse than a pair that is not Win-based.
+    Registration failure is logged per command, because the group
+    hotkey's history is that a reasonable default was already taken.
+  - A bug worth remembering: the first version called
+    `SyncRestorePlacementNow` straight after an async `SetWindowPos`.
+    That reads the window's *current* rect -- still the old one -- and
+    writes it into `rcNormalPosition` via `SetWindowPlacement`, which
+    repositions the window right back. Every arrangement applied and
+    silently undid itself, while the slot assignments in the log looked
+    perfectly correct. The sync happens on a 250ms timer now, once the
+    moves have landed.
+  - An app can refuse to be as small as its slot (`WM_GETMINMAXINFO`) and
+    nothing can overrule that. Measured: a four-way tile gave one window
+    a 912px slot and it came back 1286 tall, 374px past the bottom of the
+    screen. It cannot be made to fit, so it is slid back on screen
+    instead -- moved, never resized -- and overlaps its neighbour rather
+    than disappearing off the edge.
+  - Verified with a probe that snapshots every window's placement first
+    and restores it afterwards, since the command moves the real desktop
+    and a test that leaves it scattered is not one worth running twice.
+
 
 ## v1.0 release -- Microsoft Store
 

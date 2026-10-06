@@ -38,6 +38,22 @@ struct Settings {
     // tuned on one machine. No UI for it yet -- registry only.
     UINT moveModeSnapThresholdPx = 12;
 
+    // The "Tile windows" and "Cascade windows" global hotkeys, in the
+    // same RegisterHotKey form as the group one below. Stored rather
+    // than fixed for the reason that one documents: a combination can
+    // already be claimed by something else on a given machine, which was
+    // confirmed happening here. No picker dialog for these yet -- change
+    // them in HKCU\Software\Polish if they collide.
+    // Ctrl+Alt rather than Win+Alt, which would have matched the group
+    // hotkey below: every Win-based pair tried had at least one half
+    // already claimed on the dev machine (Win+Alt+T, Win+Shift+T,
+    // Win+Shift+C and Win+Ctrl+C were all taken), and a pair that does
+    // not share its modifiers is worse than one that is not Win-based.
+    UINT arrangeTileHotkeyModifiers = MOD_CONTROL | MOD_ALT;
+    UINT arrangeTileHotkeyVirtualKey = 'T';
+    UINT arrangeCascadeHotkeyModifiers = MOD_CONTROL | MOD_ALT;
+    UINT arrangeCascadeHotkeyVirtualKey = 'C';
+
     // The "New Group" global hotkey -- RegisterHotKey's own modifier
     // flags (MOD_ALT/MOD_CONTROL/MOD_SHIFT/MOD_WIN, OR'd together) and
     // a single virtual-key code. Default Win+Alt+G. User-configurable
