@@ -23,10 +23,9 @@
 #include "hook/AltTabHook.h"
 #include "hook/AltTabListWindow.h"
 #include "hook/BullseyeOverlay.h"
-#include "hook/GroupChromeWindow.h"
-#include "hook/GroupHotkeyDialog.h"
-#include "hook/GroupPickerWindow.h"
-#include "hook/GroupTabThumbnail.h"
+#include "hook/StackHotkeyDialog.h"
+#include "hook/StackPickerWindow.h"
+#include "hook/StackStripWindow.h"
 #include "hook/MoveModeHook.h"
 #include "hook/MoveModeLayoutPreview.h"
 #include "hook/MoveModeZoneOverlay.h"
@@ -45,11 +44,14 @@
 #include "util/SwitcherCycle.h"
 #include "util/WindowIcon.h"
 #include "windowtracking/ActivationHistory.h"
-#include "windowtracking/GroupManager.h"
+#include "windowtracking/StackCollapse.h"
+#include "windowtracking/StackLayout.h"
+#include "windowtracking/StackManager.h"
 #include "windowtracking/MoveSnap.h"
 #include "windowtracking/RectUtils.h"
 #include "windowtracking/ArrangeSelection.h"
 #include "windowtracking/WindowLayout.h"
+#include "windowtracking/WindowPlacement.h"
 #include "windowtracking/TaskbarButtons.h"
 #include "windowtracking/TaskbarReadPolicy.h"
 #include "windowtracking/WindowFilters.h"
@@ -65,34 +67,6 @@ constexpr wchar_t kMessageWindowClassName[] = L"PolishMessageWindow";
 // LOCATIONCHANGE events into one, short enough to feel immediate.
 constexpr UINT_PTR kSettleTimerId = 1;
 constexpr UINT kSettleTimerDelayMs = 180;
-
-// A freshly-captured tab thumbnail (GroupManager::CaptureThumbnail, run
-// synchronously right after a member is hidden) can still be
-// incomplete -- confirmed real via a compiled spike against File
-// Explorer: some of its own content (e.g. enumerating drives for a
-// "This PC" view) loads asynchronously, arriving after our capture
-// already ran, no matter how long we force-repaint/flush messages
-// beforehand. Re-capturing once more after a real delay, off the UI
-// thread's own timer (not a blocking Sleep), catches content that
-// finishes loading shortly after. Re-armed (not just started) on every
-// reflow, so a burst of layout changes (e.g. interactively resizing a
-// group) only triggers one sweep, after things go quiet.
-constexpr UINT_PTR kThumbnailRefreshTimerId = 2;
-constexpr UINT kThumbnailRefreshDelayMs = 1200;
-
-// There's no universal Win32 signal for "this window has finished
-// loading its own content" -- every app manages that internally
-// without exposing it (GroupManager::RefreshThumbnail's own comment).
-// So while a tab's thumbnail is actively being hovered, keep
-// re-capturing it a few times a short interval apart, updating the
-// shown popup each time content actually changed, and stop as soon as
-// two captures in a row match (settled) or this many attempts run out
-// -- bounds worst-case latency to kThumbnailStabilizeMaxAttempts *
-// kThumbnailStabilizeIntervalMs (currently ~450ms) rather than polling
-// indefinitely.
-constexpr UINT_PTR kThumbnailStabilizeTimerId = 3;
-constexpr UINT kThumbnailStabilizeIntervalMs = 150;
-constexpr int kThumbnailStabilizeMaxAttempts = 3;
 
 // Debounces a burst of EVENT_OBJECT_LOCATIONCHANGE events that each carry
 // a *different* target size (e.g. dragging a resize border) into one
@@ -348,7 +322,7 @@ std::vector<HWND> g_altTabDimTargets;
 // --- Alt+` tab-switching session state (see TabSwitching.h) ---
 //
 // A tab session is a different shape from a window one: exactly one
-// window is involved, so there is no per-monitor grouping, no minimized
+// window is involved, so there is no per-monitor stacking, no minimized
 // section and no Z-order promotion -- just a list of tab titles and a
 // highlight. It therefore gets its own state rather than being squeezed
 // into g_altTabCandidates, which holds HWNDs; a tab has no HWND at all.
@@ -409,8 +383,8 @@ polish::TabRule g_pendingTabRule;
 // The theme-aware glow around whichever window is currently focused (see
 // ActiveWindowHalo's own class comment for why this is a separate class
 // from AltTabHighlightBorder, not a generalization of it) -- a
-// single persistent instance, unlike every overlay above (session-scoped)
-// or below (one per group's chrome): this is Polish's first continuously
+// single persistent instance, unlike every overlay above (session-scoped):
+// this is Polish's first continuously
 // rendering overlay. It's also what marks the highlighted candidate during
 // an Alt+Tab session (only one window is ever highlighted at a time, unlike
 // the dim overlays, so one instance serves both -- see ApplyAltTabDimming;
@@ -463,47 +437,44 @@ std::vector<HWND> g_altTabListWindowLastMinimized;
 // + non-minimized) happens where this list is consumed, not here.
 polish::ActivationHistory g_activationHistory;
 
-// Window groups (tab/tile) -- see PLAN.md "Window groups" and the
-// group plan file. v1, M3: GroupManager owns the pure state; each
-// group also gets a GroupChromeWindow (static tab-strip rendering only
-// so far -- no click handling, no real member positioning yet). Keyed
-// by GroupId, in parallel with GroupManager's own storage, rather than
-// folded into GroupState itself -- chrome is a Win32 window resource,
-// not part of the pure/testable state.
-polish::GroupManager g_groupManager;
-std::map<polish::GroupId, std::unique_ptr<polish::GroupChromeWindow>> g_groupChromeWindows;
+// Window stacks -- see PLAN.md. StackManager owns the state (membership,
+// order, active tab, the stack's rect); each stack also has a
+// StackStripWindow, its tab strip. Keyed by StackId in parallel with the
+// manager's own storage rather than folded into StackState, because a strip
+// is a Win32 window resource and StackState is deliberately pure.
+polish::StackManager g_stackManager;
+std::map<polish::StackId, std::unique_ptr<polish::StackStripWindow>> g_stackStrips;
 
-// One shared hover-preview popup, reused across every group's tab strip
-// (only one can ever be hovered at a time app-wide) -- created lazily
-// on first hover, not at startup, since most sessions may never hover
-// a tab at all.
-std::unique_ptr<polish::GroupTabThumbnail> g_groupTabThumbnail;
+// The stack member currently inside its own native move/size drag loop, if
+// any. Its rect is adopted when the drag ends, not while it is moving.
+HWND g_stackMovingMember = nullptr;
 
-// The member whose thumbnail is currently shown in g_groupTabThumbnail
-// (nullptr when nothing's showing) and its tab's screen rect -- tracked
-// so kThumbnailStabilizeTimerId knows what to keep re-checking/
-// re-displaying while the user is still hovering it. See that timer's
-// own comment for why a single capture isn't trusted.
-HWND g_hoveredThumbnailMember = nullptr;
-RECT g_hoveredThumbnailTabRect{};
-bool g_hoveredThumbnailPreferRight = false;
-int g_thumbnailStabilizeAttemptsLeft = 0;
+// The non-member window being dragged that might be dropped on a strip to
+// join its stack, and where it started (so a drag cancelled with Escape,
+// which ends back at the start, is not mistaken for a drop). While it is
+// set every strip is shown, since the dragged window is the foreground
+// window and would otherwise hide them all.
+HWND g_joinSubject = nullptr;
+RECT g_joinSubjectStartRect{};
 
-// Forward-declared: defined near the rest of the group-management code
-// (TriggerNewGroup etc.), further down; called from OnWinEvent's
-// EVENT_OBJECT_NAMECHANGE case, above that point. No-op unless hwnd is
-// a group member -- a member's title changing is common (browser tabs,
-// unsaved-changes markers, etc.) and previously just sat stale in its
-// group's tab label until something else (a tab click, a
-// drag) happened to trigger a repaint.
+// Defined with the rest of the stack code, far below, but needed by the
+// window-event handlers above it.
 void OnMemberTitleChanged(HWND hwnd);
-
-// Forward-declared for the same reason as OnMemberTitleChanged above:
-// called from OnWinEvent's new EVENT_OBJECT_FOCUS case, defined further
-// down near ActivateGroupTile. hwnd is whatever just received keyboard
-// focus, system-wide -- a no-op unless it turns out to be (or be nested
-// inside) a Tile-mode group's member window.
 void OnObjectFocusChanged(HWND hwnd);
+void OnMemberDestroyed(HWND hwnd);
+void OnMemberLocationChanged(HWND hwnd);
+void AdoptMemberRect(HWND hwnd);
+void UpdateStripVisibility();
+void OnMemberMinimizeChanged(HWND hwnd);
+void OnJoinDragStart(HWND hwnd);
+void OnJoinDragMove(HWND hwnd);
+void OnJoinDragEnd(HWND hwnd);
+void OnStackTaskbarForeground(HWND foreground, HWND previous);
+// The window that was in front before the current one, for the taskbar-button
+// toggle (see OnStackTaskbarForeground).
+HWND g_lastForeground = nullptr;
+// Posted when a window is minimized or restored; handled once it has settled.
+constexpr UINT kStackMinimizeMessage = WM_APP + 21;
 // Defined with the rest of the taskbar code, far below, but needed by the
 // window-event handlers above it.
 void ForgetTaskbarWindow(HWND hwnd);
@@ -518,24 +489,6 @@ bool TaskbarPanelOpen();
 bool TaskbarPanelOwnsKeys();
 void CloseTaskbarPanel();
 void EndTaskbarPreview();
-
-// Forward-declared so ReflowGroupTo (defined further down) can call them
-// after GroupManager::ApplyLayout drops a member that turned out to be
-// unreparentable -- the chrome's own tab labels/icons otherwise stay
-// stale (one tab too many) until some unrelated event happens to
-// refresh them. Defined further down near the rest of the tab-label
-// refresh call sites they already share.
-std::vector<std::wstring> CollectMemberTitles(const polish::GroupState& group);
-std::vector<HICON> CollectMemberIcons(const polish::GroupState& group);
-
-// A member's geometry belongs entirely to GroupManager -- see
-// GroupManager::EnforceMemberRect's own comment. Called from three of
-// OnWinEvent's cases below (MOVESIZESTART/LOCATIONCHANGE/MOVESIZEEND)
-// whenever hwnd is a group member, to snap back a drag/resize the
-// member's own frame let through. A thin wrapper only so those call
-// sites read as intent ("keep this in place") rather than reaching into
-// g_groupManager directly three times.
-void KeepGroupMemberInPlace(HWND hwnd) { g_groupManager.EnforceMemberRect(hwnd); }
 
 // The window currently being live-tracked for settle events -- i.e. the
 // foreground window, whenever it's a candidate window (see
@@ -703,35 +656,10 @@ void CheckSettledRectAndRecord() {
     CommitRectForTrackedWindow(*rect);
 }
 
-// True if hwnd is one of our own group chrome windows -- these pass
-// IsCandidateWindow's plain Win32-style checks (visible, WS_CAPTION,
-// no owner) just like any real application window, but their size and
-// position are fully owned by GroupManager/ReflowGroupTo, not the
-// user. Letting restore-sync track one anyway is a real, confirmed bug
-// (not hypothetical): a brand-new group's chrome naturally becomes the
-// foreground window right after creation, so it becomes g_trackedWindow
-// -- and if anything then reports even a spurious location-changed
-// event on it (a live spike confirmed a reparented member's own
-// content keeps repainting for a moment right after being reparented,
-// which is exactly the kind of activity that can trip this), restore-
-// sync's own SetWindowPlacement call on the chrome fights with
-// ReflowGroupTo's layout-owned resizing of that same window -- visibly
-// flashing, nonstop, since each side's correction can retrigger the
-// other. Confirmed by a single-Notepad group flashing continuously
-// with zero further calls into GroupManager after the initial layout.
-bool IsGroupChromeWindow(HWND hwnd) {
-    for (const auto& [id, chrome] : g_groupChromeWindows) {
-        if (chrome->Handle() == hwnd) {
-            return true;
-        }
-    }
-    return false;
-}
 
 // Whether hwnd belongs to this process -- used to keep our own windows
 // (the hidden message window TrackPopupMenu briefly foregrounds, the tray
-// menu itself, ...) from disturbing the halo, without excluding group
-// chrome, which is ours too but a legitimate halo target. See
+// menu itself, ...) from disturbing the halo. See
 // UpdateActiveWindowHalo's own comment for why this check exists at all.
 bool IsOwnProcessWindow(HWND hwnd) {
     DWORD pid = 0;
@@ -809,17 +737,15 @@ void UpdateActiveWindowHalo(HWND hwnd) {
         g_haloTarget = nullptr;
         return;
     }
-    // Own process and not group chrome -> leave the halo exactly as-is,
-    // rather than hiding it. Without this, the tray menu blinks the halo
-    // off every time it's opened: TrackPopupMenu needs
-    // SetForegroundWindow on our own hidden message window first (see
-    // CreateMessageWindow), and the menu window itself is ours too --
-    // both would otherwise fail IsCandidateWindow below and hide the
-    // halo, only for it to reappear once real focus returns. Group
-    // chrome windows are ours *and* legitimate targets, hence the
-    // exception -- without it, focusing a group would leave a stale halo
-    // on whatever was focused before it.
-    if (IsOwnProcessWindow(hwnd) && !IsGroupChromeWindow(hwnd)) {
+    // Own process -> leave the halo exactly as-is, rather than hiding it.
+    // Without this, the tray menu blinks the halo off every time it's
+    // opened: TrackPopupMenu needs SetForegroundWindow on our own hidden
+    // message window first (see CreateMessageWindow), and the menu window
+    // itself is ours too -- both would otherwise fail IsCandidateWindow
+    // below and hide the halo, only for it to reappear once real focus
+    // returns. (A stack's tab strip is ours too, but it never takes
+    // focus, so it never reaches here.)
+    if (IsOwnProcessWindow(hwnd)) {
         return;
     }
     // Re-validates hwnd is still a real, visible, non-cloaked candidate
@@ -1033,6 +959,11 @@ void BeginHaloRestoreWait(HWND restored) {
 }
 
 void OnForegroundChanged(HWND newForeground) {
+    // A click on a stack's taskbar button arrives as that stand-in window
+    // becoming foreground; the window before it decides what the click means.
+    const HWND previousForeground = g_lastForeground;
+    g_lastForeground = newForeground;
+    OnStackTaskbarForeground(newForeground, previousForeground);
     // A window coming to the front that went into the taskbar earlier is a
     // restore, and is usually how this app hears about one first -- before
     // EVENT_SYSTEM_MINIMIZEEND. Start the hold-off here so the halo is
@@ -1042,9 +973,9 @@ void OnForegroundChanged(HWND newForeground) {
     }
     // Before the early return below -- the halo needs to react to every
     // real foreground change, including ones that don't touch
-    // g_trackedWindow at all (e.g. a group chrome window, which
-    // OnForegroundChanged otherwise ignores entirely -- see `candidate`
-    // below).
+    // g_trackedWindow at all (a stack member, whose position is the
+    // stack's to decide, which OnForegroundChanged otherwise ignores
+    // for restore-sync -- see `candidate` below).
     UpdateActiveWindowHalo(newForeground);
 
     if (newForeground == g_trackedWindow) {
@@ -1055,11 +986,9 @@ void OnForegroundChanged(HWND newForeground) {
     g_pendingSettleRect.reset();
     g_trackedWindow = nullptr;
 
-    // Still counted for MRU/Alt+Tab purposes below (a group chrome
-    // window belongs in Alt+Tab like any real window) -- only excluded
-    // from becoming g_trackedWindow/restore-sync's target, per
-    // IsGroupChromeWindow's own comment above.
-    const bool candidate = polish::IsCandidateWindow(newForeground) && !IsGroupChromeWindow(newForeground);
+    // Counted for MRU/Alt+Tab purposes below whether or not it is a
+    // restore-sync candidate.
+    const bool candidate = polish::IsCandidateWindow(newForeground);
     wchar_t title[256] = L"";
     GetWindowTextW(newForeground, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
     polish::LogDebug(std::format(L"[Polish] foreground changed: hwnd={} title=\"{}\" candidate={}",
@@ -1105,7 +1034,7 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                           DWORD /*eventThread*/, DWORD /*eventTime*/) {
     // The halo's own UpdateLayeredWindow/SetWindowPos calls generate a
     // LOCATIONCHANGE per rendered frame -- without this guard it falls
-    // through to KeepGroupMemberInPlace's map lookup (harmless, just
+    // through to the stack-member lookup below (harmless, just
     // wasted work) below every single time the halo moves or redraws.
     if (g_activeWindowHalo && hwnd == g_activeWindowHalo->Handle()) {
         return;
@@ -1132,22 +1061,19 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 }
                 g_inMoveSizeLoop = true;
             }
-            if (g_groupManager.FindGroupContaining(hwnd) != nullptr) {
-                // A group member's own frame (Explorer's, a browser's,
-                // ...) is about to enter its native move/size modal
-                // loop -- confirmed real: dragging a member's resize
-                // border resized it in place, revealing the other
-                // members Z-ordered behind it (Tab mode never hides
-                // them, see ApplyTabLayout's own comment). WM_CANCELMODE
-                // is the documented way to abort that loop from outside
-                // it; posted, not sent, so a hung/slow member can't
-                // block this hook callback. EnforceMemberRect is the
-                // belt to this loop's suspenders -- it also covers the
-                // (likely, unverified) case where cancelling didn't
-                // actually stop something that already moved a pixel or
-                // two before this event was delivered.
-                PostMessageW(hwnd, WM_CANCELMODE, 0, 0);
-                KeepGroupMemberInPlace(hwnd);
+            // A stack member being moved or resized by hand. Nothing is
+            // done until the drag ends (MOVESIZEEND adopts the final rect):
+            // the other members follow on release, not live. This used to
+            // be the opposite -- the drag was cancelled and the member
+            // forced back, because as a child it had to be fought in real
+            // time. As a top-level window, moving itself is the intended
+            // gesture.
+            if (g_stackManager.FindStackContaining(hwnd) != nullptr) {
+                g_stackMovingMember = hwnd;
+            } else {
+                // Any other window being dragged may be on its way to a
+                // strip, to join that stack.
+                OnJoinDragStart(hwnd);
             }
             break;
 
@@ -1167,14 +1093,18 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 return;
             }
             if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF) {
-                // Cheap for the overwhelming majority of these events (a
-                // map lookup that immediately misses) -- see
-                // KeepGroupMemberInPlace's own comment. Note the chrome
-                // itself moving fires this for every child too, which is
-                // harmless: memberRects_ is chrome-client-relative, and
-                // a child's client-relative position doesn't change when
-                // its parent moves.
-                KeepGroupMemberInPlace(hwnd);
+                // While a window is being dragged toward a stack, keep the
+                // strip's insertion caret following the pointer.
+                OnJoinDragMove(hwnd);
+            }
+            if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF && hwnd != g_stackMovingMember &&
+                g_stackManager.FindStackContaining(hwnd) != nullptr) {
+                // A member moved or resized by something other than a
+                // drag loop of its own (a keyboard snap, an app resizing
+                // itself): wait for it to settle, then adopt the rect. A
+                // member in a drag loop is handled at MOVESIZEEND instead.
+                // The lookup is a cheap miss for nearly every window.
+                OnMemberLocationChanged(hwnd);
             }
             if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF && hwnd == g_trackedWindow &&
                 !g_inMoveSizeLoop && !g_moveModeMovingWindow) {
@@ -1255,17 +1185,24 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 KillTimer(g_messageWindow, kSettleTimerId);
                 CheckSettledRectAndRecord();
             }
-            // The final word once a drag loop survives the MOVESIZESTART
-            // cancel above (e.g. an app that runs its own drag loop
-            // rather than the system one, so WM_CANCELMODE had nothing
-            // to abort) -- LOCATIONCHANGE's own snap-back already fires
-            // live during the drag, but this guarantees the end state
-            // regardless.
-            KeepGroupMemberInPlace(hwnd);
+            // A window dragged onto a strip joins that stack on release.
+            OnJoinDragEnd(hwnd);
+            // A stack member the user just finished moving or resizing by
+            // hand: its new rect becomes the stack's, and the rest follow.
+            if (hwnd == g_stackMovingMember) {
+                g_stackMovingMember = nullptr;
+                AdoptMemberRect(hwnd);
+            }
             break;
 
         case EVENT_OBJECT_DESTROY:
             if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF) {
+                // A closing stack member has to leave its stack, or the
+                // strip keeps a tab for a window that no longer exists.
+                OnMemberDestroyed(hwnd);
+                if (hwnd == g_stackMovingMember) {
+                    g_stackMovingMember = nullptr;
+                }
                 g_activationHistory.Remove(hwnd);
                 // A window closed while minimized would otherwise sit in
                 // here forever, and HWNDs are recycled -- a later window
@@ -1296,6 +1233,7 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
             break;
 
         case EVENT_SYSTEM_MINIMIZESTART:
+            PostMessageW(g_messageWindow, kStackMinimizeMessage, reinterpret_cast<WPARAM>(hwnd), 0);
             g_minimizedWindows.insert(hwnd);
             if (hwnd == g_haloTarget && g_activeWindowHalo) {
                 // LOCATIONCHANGE fires continuously through Win11's
@@ -1313,6 +1251,7 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
             break;
 
         case EVENT_SYSTEM_MINIMIZEEND:
+            PostMessageW(g_messageWindow, kStackMinimizeMessage, reinterpret_cast<WPARAM>(hwnd), 0);
             // Stay suppressed until the restore animation has played out;
             // see kHaloRestoreTimerId for why this is a wait rather than a
             // follow. The suppression flag is already respected by both
@@ -1330,24 +1269,20 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
             // text specifically (not some arbitrary child control's
             // accessible name, which fires far more often) -- see
             // OnMemberTitleChanged's forward declaration for why this
-            // is only meaningful to a group member.
+            // is only meaningful to a stack member.
             if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF) {
                 OnMemberTitleChanged(hwnd);
             }
             break;
 
         case EVENT_OBJECT_FOCUS:
-            // Deliberately *not* filtered by idObject/idChild the way
-            // the cases above are -- a real click almost always lands
-            // on some nested control several levels inside a member's
-            // own window tree (an edit control, a list view, ...), not
-            // the member's own top-level client area, and this is
-            // exactly the signal meant to catch focus at any depth (see
-            // OnObjectFocusChanged's forward declaration). Its own
-            // GetParent walk + small map lookup is cheap enough to run
-            // unfiltered; the early exit for "not inside any group
-            // chrome" handles the overwhelming majority of focus
-            // changes system-wide.
+            // Deliberately *not* filtered by idObject/idChild the way the cases
+            // above are -- a real click almost always lands on some nested
+            // control inside a member's window tree (an edit control, a list
+            // view, ...), not on the member's own top-level window, and this is
+            // the signal that catches focus at any depth. OnObjectFocusChanged
+            // takes the top-level ancestor and returns at once unless that is a
+            // stack member, which is nearly every focus change system-wide.
             OnObjectFocusChanged(hwnd);
             break;
 
@@ -1372,7 +1307,7 @@ BOOL CALLBACK EnumMonitorsProc(HMONITOR monitor, HDC /*hdc*/, LPRECT /*rect*/, L
 
 // Every connected monitor, current-monitor-first then the rest in their
 // original (stable) EnumDisplayMonitors order -- the order
-// RebuildAltTabCandidates/UpdateAltTabCandidatesPreservingOrder group
+// RebuildAltTabCandidates/UpdateAltTabCandidatesPreservingOrder stack
 // candidates by, so that a flat Tab/Shift+Tab walk over the resulting
 // list finishes the current monitor's windows before continuing onto the
 // next one. std::stable_partition (not a full sort) is exactly "move the
@@ -1387,12 +1322,51 @@ std::vector<HMONITOR> GetMonitorsCurrentFirst() {
     return monitors;
 }
 
+// The stacks as the pure collapse function wants them: members, and the
+// active member standing in for each. A stack of one is not collapsed --
+// there is nothing to fold.
+std::vector<polish::StackEntry> CollectStackEntries() {
+    std::vector<polish::StackEntry> entries;
+    for (const polish::StackState& stack : g_stackManager.Stacks()) {
+        if (stack.MemberCount() < 2) {
+            continue;
+        }
+        polish::StackEntry entry;
+        for (const polish::StackMember& member : stack.Members()) {
+            entry.members.push_back(member.window);
+        }
+        entry.representative = stack.ActiveWindow().value_or(nullptr);
+        entries.push_back(std::move(entry));
+    }
+    return entries;
+}
+
+// Folds each stack down to one entry in an Alt+Tab list: this is the
+// Polish switcher only. The real taskbar and native Alt+Tab still show
+// every member, so they will disagree with this list; that is accepted,
+// because Polish does not control them.
+std::vector<HWND> CollapseForAltTab(const std::vector<HWND>& list) {
+    return polish::CollapseStackMembers(list, CollectStackEntries());
+}
+
+// A row's label. A stack's one entry is named for the stack, with its
+// member count -- showing the active member's own title would claim the
+// row *is* that window, while choosing it raises a whole set.
+std::wstring AltTabRowTitle(HWND hwnd) {
+    const polish::StackState* stack = g_stackManager.FindStackContaining(hwnd);
+    if (stack != nullptr && stack->MemberCount() >= 2) {
+        return std::format(L"{} ({})", stack->Name(), stack->MemberCount());
+    }
+    wchar_t title[256] = L"";
+    GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+    return title;
+}
+
 BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
-    // A group member is reachable through its group, not on its own --
-    // the group's chrome is the single Alt+Tab entry standing in for all
-    // of them, which is the whole point of grouping. A member excludes
-    // itself for free (it's WS_CHILD, so EnumWindows never offers it
-    // here at all).
+    // Stack members are listed like any other window here; the stack is
+    // folded to one entry afterwards (CollapseForAltTab), once the order is
+    // known, because *which* member stands in and *where* it sits depend on
+    // the whole list.
     if (polish::IsCandidateWindow(hwnd) && !IsIconic(hwnd)) {
         reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
     }
@@ -1416,9 +1390,9 @@ BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
 // first window rather than continuing onto the next monitor.
 //
 // This has now been all three ways, at the user's direction: monitor
-// ignored, then monitor-grouped-but-everything-reachable, now scoped.
+// ignored, then monitor-stacked-but-everything-reachable, now scoped.
 // The tradeoff it accepts, stated plainly because it is the reason the
-// grouped version existed: a window on another monitor is not reachable
+// stacked version existed: a window on another monitor is not reachable
 // from here at all. Switching monitors is done by focusing something
 // there first. If that proves annoying in practice, the middle option is
 // to keep this scoping for Tab and give Left/Right a monitor jump --
@@ -1439,6 +1413,11 @@ void RebuildAltTabCandidates() {
             globalOrdered.push_back(hwnd);
         }
     }
+
+    // Each stack becomes one entry, at the position of its earliest member.
+    // Done before the monitor filter, on the full ordered list: which window
+    // stands in for the stack is the active one, wherever it happens to be.
+    globalOrdered = CollapseForAltTab(globalOrdered);
 
     // Sampled here rather than read live everywhere below: this is the
     // one place a session's list is built from scratch, so it is also
@@ -1508,8 +1487,8 @@ void NormalizeAltTabSelectionSection() {
     }
 }
 
-// Which monitor a minimized window's row belongs to, grouping it the same
-// way BuildAltTabListRowsForMonitor groups active candidates. Deliberately
+// Which monitor a minimized window's row belongs to, stacking it the same
+// way BuildAltTabListRowsForMonitor stacks active candidates. Deliberately
 // NOT MonitorFromWindow(hwnd, ...) -- GetWindowRect (which that resolves
 // to under the hood) returns a meaningless off-screen sentinel rect for
 // an iconic window, which would make every minimized window resolve to
@@ -1538,7 +1517,7 @@ void RebuildAltTabMinimizedCandidates() {
     // section would quietly reintroduce the other monitors this session
     // is meant to leave alone.
     g_altTabMinimized.clear();
-    for (HWND hwnd : all) {
+    for (HWND hwnd : CollapseForAltTab(all)) {
         if (MonitorForMinimizedCandidate(hwnd) == g_altTabMonitor) {
             g_altTabMinimized.push_back(hwnd);
         }
@@ -1563,13 +1542,16 @@ void RebuildAltTabMinimizedCandidates() {
 // just without reordering survivors to do it. A brand-new candidate that
 // opens mid-session is appended at the very end of the whole list
 // (regardless of which monitor it's on) rather than being inserted into
-// its "correct" monitor group -- a known, accepted simplification (new
+// its "correct" monitor stack -- a known, accepted simplification (new
 // mid-session candidates are rare, and the existing snapshot's monitor
-// grouping is otherwise left completely undisturbed).
+// stacking is otherwise left completely undisturbed).
 void UpdateAltTabCandidatesPreservingOrder() {
     std::vector<HWND> allCandidates;
     EnumWindows(EnumCandidateWindowsProc, reinterpret_cast<LPARAM>(&allCandidates));
     g_altTabDimTargets = allCandidates;
+    // Folded the same way RebuildAltTabCandidates folds it, so a stack stays
+    // one entry mid-session as well.
+    allCandidates = CollapseForAltTab(allCandidates);
 
     std::vector<HWND> updated;
     for (HWND hwnd : g_altTabCandidates) {
@@ -1602,68 +1584,6 @@ void UpdateAltTabCandidatesPreservingOrder() {
 void EnsureAltTabOverlayPoolSize(size_t count) {
     while (g_altTabOverlays.size() < count) {
         g_altTabOverlays.push_back(std::make_unique<polish::AltTabDimOverlay>(GetModuleHandleW(nullptr)));
-    }
-}
-
-// Called when the active member changes via something other than the
-// tab strip -- keyboard focus or a click landing somewhere inside a
-// member (see OnObjectFocusChanged). Mirrors ActivateGroupTab's own
-// GroupState-then-chrome update, minus the reflow/refocus steps: the
-// member already has focus, which is the whole reason this fired.
-void ActivateGroupMember(polish::GroupId id, HWND hwnd) {
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    auto chromeIt = g_groupChromeWindows.find(id);
-    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
-        return;
-    }
-    group->SetActiveWindow(hwnd);
-    if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
-        chromeIt->second->SetActiveIndex(*activeIndex);
-    }
-}
-
-// Called from GroupChromeWindow's onMemberClicked (WM_PARENTNOTIFY) --
-// the click-based counterpart to OnObjectFocusChanged below (see
-// SetOnMemberClicked's own comment for why focus events alone aren't
-// enough). Resolves the specific member at the click point and
-// activates it, same as a focus event landing inside one would.
-void OnGroupMemberClicked(polish::GroupId id, POINT clientPt) {
-    auto chromeIt = g_groupChromeWindows.find(id);
-    if (chromeIt == g_groupChromeWindows.end()) {
-        return;
-    }
-    const HWND chrome = chromeIt->second->Handle();
-    const HWND member =
-        ChildWindowFromPointEx(chrome, clientPt, CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT);
-    if (member == nullptr || member == chrome) {
-        // No child at that point (only possible if the click didn't
-        // actually land on a member -- e.g. a gap between splitters).
-        return;
-    }
-    ActivateGroupMember(id, member);
-}
-
-void OnObjectFocusChanged(HWND hwnd) {
-    if (hwnd == nullptr || !IsWindow(hwnd) || g_groupChromeWindows.empty()) {
-        return;
-    }
-    // Walk up from whatever just received focus until either running
-    // out of ancestors or finding a window whose *own* parent is a
-    // known group chrome -- that window is the specific member (now
-    // WS_CHILD) the focus landed inside, however many levels down the
-    // actual focused control (an edit control, a list view, ...) sits
-    // within that member's own window tree. Bounded by the real (small)
-    // depth of a typical window hierarchy, not by anything under this
-    // app's control, so no separate iteration cap is needed.
-    HWND candidate = hwnd;
-    for (HWND parent = GetParent(candidate); parent != nullptr; parent = GetParent(candidate)) {
-        for (const auto& [id, chrome] : g_groupChromeWindows) {
-            if (chrome->Handle() == parent) {
-                ActivateGroupMember(id, candidate);
-                return;
-            }
-        }
-        candidate = parent;
     }
 }
 
@@ -1849,8 +1769,7 @@ MonitorRowsResult BuildAltTabListRowsForMonitor(HMONITOR monitor) {
         if (hwnd == highlighted) {
             result.highlightIndex = result.rows.size();
         }
-        wchar_t title[256] = L"";
-        GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+        const std::wstring title = AltTabRowTitle(hwnd);
         result.rows.push_back(polish::AltTabListRow{hwnd, title, polish::GetWindowIconHandle(hwnd), /*minimized=*/false});
     }
     // Minimized section, appended after every active row so it always
@@ -1863,8 +1782,7 @@ MonitorRowsResult BuildAltTabListRowsForMonitor(HMONITOR monitor) {
         if (hwnd == highlighted) {
             result.highlightIndex = result.rows.size();
         }
-        wchar_t title[256] = L"";
-        GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+        const std::wstring title = AltTabRowTitle(hwnd);
         result.rows.push_back(polish::AltTabListRow{hwnd, title, polish::GetWindowIconHandle(hwnd), /*minimized=*/true});
     }
     return result;
@@ -2048,7 +1966,7 @@ void EndAltTabSession() {
 //
 // Deliberately a parallel, much smaller path than the window session
 // below rather than a generalization of it: exactly one window is
-// involved, so there is no per-monitor grouping, no minimized section, no
+// involved, so there is no per-monitor stacking, no minimized section, no
 // MRU order to preserve and no Z-order promotion. The panel is the only
 // piece the two genuinely share.
 //
@@ -2439,7 +2357,7 @@ void OnAltTabCycle(bool backward, polish::AltTabHook::SessionKind kind) {
 // reasoning, as AltTabHook's own InjectHarmlessKeystroke (that one
 // suppresses a stuck-modifier side effect too, which doesn't apply
 // here, so this stays a separate, smaller local helper rather than
-// reusing that one). Shared by OnAltTabCommit and ActivateGroupTab,
+// reusing that one). Shared by OnAltTabCommit and ActivateStackTab,
 // below -- both call SetForegroundWindow from this background process.
 void InjectForegroundUnlockKeystroke() {
     // Which key gets tapped depends on whether the user is holding Ctrl,
@@ -2491,7 +2409,7 @@ void OnAltTabCommit() {
         if (selectionIsMinimized) {
             // A minimized window needs an explicit restore before
             // SetForegroundWindow reliably brings it to front -- same
-            // finding GroupManager already relies on for a maximized/
+            // finding StackManager already relies on for a maximized/
             // iconic member (see PLAN.md's Alt+Tab-improvements M4).
             ShowWindow(target, SW_RESTORE);
         }
@@ -2802,7 +2720,7 @@ void OnAltTabRowMinimizeToggle(HWND hwnd) {
         // land on whichever window took its place -- minimizing is
         // normally one step of clearing several windows out of the way,
         // and following this one down into the Minimized section would
-        // interrupt that every time. Same rule the group picker uses when
+        // interrupt that every time. Same rule the stack picker uses when
         // a run of windows is moved between its two lists.
         //
         // Clamped because the window may have been last, in which case
@@ -4732,15 +4650,7 @@ HWND MoveModeCandidateAt(POINT screenPt) {
 // hwnd's visible rect, and the inset needed to convert back -- see
 // g_moveModeInset for why both.
 RECT MoveModeVisibleRectFor(HWND hwnd, RECT& insetOut) {
-    RECT windowRect{};
-    GetWindowRect(hwnd, &windowRect);
-    RECT visible{};
-    if (!polish::GetVisibleWindowRect(hwnd, visible)) {
-        visible = windowRect;
-    }
-    insetOut = {windowRect.left - visible.left, windowRect.top - visible.top,
-                windowRect.right - visible.right, windowRect.bottom - visible.bottom};
-    return visible;
+    return polish::VisibleRectAndInset(hwnd, insetOut);
 }
 
 // The first window above hwnd that is not one of Polish's own.
@@ -5045,7 +4955,7 @@ void OnMoveModeGrab(POINT screenPt) {
     if (IsZoomed(target)) {
         // A maximized window cannot be moved or resized at all:
         // SetWindowPos silently no-ops on its size and position (see
-        // GroupManager.h's own note on this). Restore it first, then put
+        // StackManager.h's own note on this). Restore it first, then put
         // the restored rect under the cursor at the same relative
         // position, so the window arrives where the hand already is
         // rather than jumping to wherever it last floated.
@@ -5095,6 +5005,9 @@ void OnMoveModeGrab(POINT screenPt) {
     if (g_moveModeZones) {
         g_moveModeZones->ShowZones(visible, g_moveModeBorderPx, grip, /*dragging=*/true, MoveModeAccent(),
                                     MoveModeDpiFor(target));
+    }
+    if (grip == polish::Grip::Move) {
+        OnJoinDragStart(target);
     }
     polish::LogDebug(std::format(L"[Polish] MoveMode: grabbed hwnd={} zone={} border={}px",
                                   reinterpret_cast<void*>(target), static_cast<int>(grip),
@@ -5306,6 +5219,11 @@ void OnMoveModeDrop() {
         }
         SyncRestorePlacementNow(g_moveModeTarget);
         RestoreMoveModeZOrder();
+        // Dropped over a stack's strip: join that stack (see OnJoinDragEnd).
+        // Only for a move -- resizing a window is not a request to stack it.
+        if (g_moveModeGrip == polish::Grip::Move) {
+            OnJoinDragEnd(g_moveModeTarget);
+        }
         if (g_moveModeDimmed) {
             if (auto* overlay = MoveModeOverlayFor(g_moveModeTarget)) {
                 // Dimmed again now it has stopped moving -- the session
@@ -5720,48 +5638,6 @@ const wchar_t* ArrangeKindName(polish::ArrangeKind kind) {
     return L"4-way";
 }
 
-// The smallest *visible* size `hwnd` will accept, as it reports it through
-// WM_GETMINMAXINFO -- the same message the window manager consults when
-// the user drags a border, and the one an app answers to say "no smaller
-// than this".
-//
-// Asked with a timeout and ABORTIFHUNG, because this is a cross-process
-// SendMessage on the message-loop thread: a stalled target must cost a
-// bounded delay, not freeze Polish and its hooks. A window that does not
-// answer is treated as having no minimum, which falls back to ordinary
-// equal slots for it.
-//
-// Reported by the window as a window-rect size, so it is converted to
-// visible-rect space here (the space the slots are in) by removing the
-// invisible border.
-//
-// A maximized window gets NO border subtracted. Its invisible border is
-// larger while maximized than once restored (measured on a VS Code window
-// at 192 DPI: 26px tall maximized, 11px restored), so subtracting it would
-// understate the minimum the window will have in its slot -- and an
-// understated minimum is the harmful direction: the slot comes out too
-// small, the window refuses it, and it overlaps its neighbour. This was
-// the cause of a four-pixel overlap, and then a refusal on the next press,
-// because the numbers changed once the window was no longer maximized.
-// Leaving the border in overstates the minimum by about ten pixels, which
-// only ever gives the window a little extra room.
-SIZE MinimumVisibleSizeFor(HWND hwnd) {
-    MINMAXINFO info{};
-    DWORD_PTR ignored = 0;
-    if (SendMessageTimeoutW(hwnd, WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&info),
-                             SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &ignored) == 0) {
-        return SIZE{0, 0};
-    }
-    RECT inset{};
-    MoveModeVisibleRectFor(hwnd, inset);
-    // windowRect = visible + inset, so visible size = window size - (right - left) etc.
-    const bool maximized = IsZoomed(hwnd) != FALSE;
-    const LONG borderX = maximized ? 0 : inset.right - inset.left;
-    const LONG borderY = maximized ? 0 : inset.bottom - inset.top;
-    return SIZE{std::max<LONG>(0, info.ptMinTrackSize.x - borderX),
-                std::max<LONG>(0, info.ptMinTrackSize.y - borderY)};
-}
-
 // A window's title, shortened for use in a message.
 std::wstring ShortWindowTitle(HWND hwnd, size_t maxChars) {
     wchar_t title[256] = L"";
@@ -5845,7 +5721,7 @@ void ArrangeWindows(polish::ArrangeKind kind) {
     std::map<HWND, SIZE> minimumsByWindow;
     std::vector<SIZE> mruMinimums;
     for (size_t i = 0; i < slotCount; ++i) {
-        const SIZE m = MinimumVisibleSizeFor(candidates[i]);
+        const SIZE m = polish::MinimumVisibleSizeFor(candidates[i]);
         minimumsByWindow[candidates[i]] = m;
         mruMinimums.push_back(m);
     }
@@ -5938,8 +5814,8 @@ void ArrangeWindows(polish::ArrangeKind kind) {
 
 constexpr UINT kMenuIdRestoreSync = 1;
 constexpr UINT kMenuIdAltTab = 2;
-constexpr UINT kMenuIdNewGroup = 3;
-constexpr UINT kMenuIdChangeGroupHotkey = 4;
+constexpr UINT kMenuIdNewStack = 3;
+constexpr UINT kMenuIdChangeStackHotkey = 4;
 constexpr UINT kMenuIdStartAtLogin = 5;
 constexpr UINT kMenuIdAbout = 6;
 constexpr UINT kMenuIdExit = 7;
@@ -5960,10 +5836,10 @@ constexpr wchar_t kAboutUrl[] = L"https://www.linkedin.com/in/davidlenihan/";
 // enough not to need one of its own, unlike Alt+Tab's WH_KEYBOARD_LL
 // hook (there's no native OS behavior to suppress here, just one
 // combination to claim). The actual combination is user-configurable
-// (Settings::groupHotkeyModifiers/groupHotkeyVirtualKey, default
-// Win+Alt+G) -- confirmed necessary, not just nice-to-have: something
-// else on the dev machine itself already claims Win+Alt+G.
-constexpr int kNewGroupHotkeyId = 1;
+// (Settings::stackHotkeyModifiers/stackHotkeyVirtualKey, default
+// Ctrl+Alt+1) -- confirmed necessary, not just nice-to-have: the old
+// default, Win+Alt+G, was already claimed on the dev machine itself.
+constexpr int kNewStackHotkeyId = 1;
 // Three more of the same, for the tiling commands. Separate ids rather
 // than one id with a modifier test, because RegisterHotKey is what
 // decides which combination fired and a failed registration has to be
@@ -5972,18 +5848,18 @@ constexpr int kArrangeTwoWayHotkeyId = 2;
 constexpr int kArrangeThreeWayHotkeyId = 3;
 constexpr int kArrangeFourWayHotkeyId = 4;
 
-// (Re-)registers the group hotkey from g_settings' current combination,
+// (Re-)registers the stack hotkey from g_settings' current combination,
 // unregistering any previous one first (harmless no-op if none was
 // registered). Returns whether registration succeeded. Called at
-// startup and again from ChangeGroupHotkey after the user picks a new
+// startup and again from ChangeStackHotkey after the user picks a new
 // combination.
-bool RegisterGroupHotkeyFromSettings() {
-    UnregisterHotKey(g_messageWindow, kNewGroupHotkeyId);
-    return RegisterHotKey(g_messageWindow, kNewGroupHotkeyId, g_settings.groupHotkeyModifiers | MOD_NOREPEAT,
-                           g_settings.groupHotkeyVirtualKey) != FALSE;
+bool RegisterStackHotkeyFromSettings() {
+    UnregisterHotKey(g_messageWindow, kNewStackHotkeyId);
+    return RegisterHotKey(g_messageWindow, kNewStackHotkeyId, g_settings.stackHotkeyModifiers | MOD_NOREPEAT,
+                           g_settings.stackHotkeyVirtualKey) != FALSE;
 }
 // Formats a hotkey combination the way the tray menu / dialogs show it,
-// e.g. "Win+Alt+G".
+// e.g. "Ctrl+Alt+1".
 std::wstring FormatHotkey(UINT modifiers, UINT virtualKey) {
     std::wstring text;
     if (modifiers & MOD_WIN) text += L"Win+";
@@ -5994,16 +5870,16 @@ std::wstring FormatHotkey(UINT modifiers, UINT virtualKey) {
     return text;
 }
 
-// Triggered by the tray menu's "Change Group Hotkey..." item: shows
-// GroupHotkeyDialog pre-filled with the current combination, and on
+// Triggered by the tray menu's "Change Stack Hotkey..." item: shows
+// StackHotkeyDialog pre-filled with the current combination, and on
 // Save actually attempts to register it -- a combination can be
 // syntactically valid (the dialog's own job) but still already claimed
 // by something else on the machine (confirmed real, see
-// kNewGroupHotkeyId's comment), so this loops back to the same dialog
+// kNewStackHotkeyId's comment), so this loops back to the same dialog
 // with an inline error instead of silently leaving no hotkey active.
 
 // The three tiling hotkeys, registered the same way. Failure is reported
-// rather than swallowed: the group hotkey's own history is that a
+// rather than swallowed: the stack hotkey's own history is that a
 // perfectly reasonable default was already taken on this very machine,
 // so "the key does nothing" has to be diagnosable from the log.
 void RegisterArrangeHotkeysFromSettings() {
@@ -6029,23 +5905,23 @@ void RegisterArrangeHotkeysFromSettings() {
         g_settings.arrangeFourWayHotkeyVirtualKey, L"tile 4-way");
 }
 
-void ChangeGroupHotkey() {
-    polish::HotkeyChoice current{g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey};
+void ChangeStackHotkey() {
+    polish::HotkeyChoice current{g_settings.stackHotkeyModifiers, g_settings.stackHotkeyVirtualKey};
     for (;;) {
-        polish::GroupHotkeyDialog dialog(GetModuleHandleW(nullptr));
+        polish::StackHotkeyDialog dialog(GetModuleHandleW(nullptr));
         const auto choice = dialog.ShowModal(nullptr, current);
         if (!choice.has_value()) {
-            polish::LogDebug(L"[Polish] ChangeGroupHotkey: cancelled");
+            polish::LogDebug(L"[Polish] ChangeStackHotkey: cancelled");
             return;
         }
 
-        const UINT previousModifiers = g_settings.groupHotkeyModifiers;
-        const UINT previousVirtualKey = g_settings.groupHotkeyVirtualKey;
-        g_settings.groupHotkeyModifiers = choice->modifiers;
-        g_settings.groupHotkeyVirtualKey = choice->virtualKey;
-        if (RegisterGroupHotkeyFromSettings()) {
+        const UINT previousModifiers = g_settings.stackHotkeyModifiers;
+        const UINT previousVirtualKey = g_settings.stackHotkeyVirtualKey;
+        g_settings.stackHotkeyModifiers = choice->modifiers;
+        g_settings.stackHotkeyVirtualKey = choice->virtualKey;
+        if (RegisterStackHotkeyFromSettings()) {
             polish::SaveSettings(g_settings);
-            polish::LogDebug(std::format(L"[Polish] ChangeGroupHotkey: now {}",
+            polish::LogDebug(std::format(L"[Polish] ChangeStackHotkey: now {}",
                                           FormatHotkey(choice->modifiers, choice->virtualKey)));
             return;
         }
@@ -6053,10 +5929,10 @@ void ChangeGroupHotkey() {
         // Failed -- most likely already claimed by something else.
         // Restore the previous combination (so the app isn't left with
         // no working hotkey at all) and let the user try again.
-        g_settings.groupHotkeyModifiers = previousModifiers;
-        g_settings.groupHotkeyVirtualKey = previousVirtualKey;
-        RegisterGroupHotkeyFromSettings();
-        polish::LogDebug(std::format(L"[Polish] ChangeGroupHotkey: {} is already in use, GetLastError={}",
+        g_settings.stackHotkeyModifiers = previousModifiers;
+        g_settings.stackHotkeyVirtualKey = previousVirtualKey;
+        RegisterStackHotkeyFromSettings();
+        polish::LogDebug(std::format(L"[Polish] ChangeStackHotkey: {} is already in use, GetLastError={}",
                                       FormatHotkey(choice->modifiers, choice->virtualKey), GetLastError()));
         MessageBoxW(nullptr,
                     std::format(L"{} is already in use by another program on this PC. Pick a different combination.",
@@ -6067,489 +5943,804 @@ void ChangeGroupHotkey() {
     }
 }
 
-// True only while a ReflowGroupTo call is actively running its own
-// GrowContentAreaTo step -- guards against the reentrant onResized_
-// callback that step itself triggers (see below).
-bool g_reflowGrowInProgress = false;
+// ---------------------------------------------------------------------------
+// Stacks.
+//
+// A stack is one rectangle (StackState::Rect), N ordinary top-level windows
+// sharing the content part of it, and a tab strip window beside them. See
+// windowtracking/StackLayout.h and hook/StackStripWindow.h. Nothing is
+// reparented and there is no container window.
+// ---------------------------------------------------------------------------
 
-// Fired by kThumbnailRefreshTimerId, some time after the last reflow --
-// re-captures every currently-hidden member's thumbnail across every
-// group (GroupManager::RefreshThumbnail already no-ops for a
-// visible/active member, so this is cheap/safe to call broadly rather
-// than needing to track exactly which group/members just changed).
-void RefreshAllHiddenThumbnails() {
-    for (const polish::GroupState& group : g_groupManager.Groups()) {
-        for (const polish::GroupMember& member : group.Members()) {
-            if (member.kind == polish::GroupMemberKind::Window && member.window != nullptr) {
-                g_groupManager.RefreshThumbnail(member.window);
-            }
+// True while ReflowStackTo is moving members. The moves are asynchronous
+// (SWP_ASYNCWINDOWPOS, so a hung member cannot stall the hooks), so the
+// location events they cause arrive *after* this has been cleared; the
+// quiet window below covers those.
+bool g_reflowInProgress = false;
+ULONGLONG g_stackQuietUntilTick = 0;
+
+// True while a strip's right-click menu (or the picker it can open) is up.
+// Both run their own nested message loops, which dispatch Polish's *posted*
+// messages -- including kCloseStackMessage -- while the strip's own
+// WM_RBUTTONUP handler is still on the stack. Destroying the strip there
+// would pull the object out from under that handler. So while this is set
+// the close is parked, and re-posted once the handler has finished.
+bool g_stackMenuOpen = false;
+std::vector<polish::StackId> g_parkedStackCloses;
+
+// Message id for the deferred removal of a stack's strip and state (WM_APP+1
+// and WM_APP+10 are TrayIcon's and AltTabHook's, +30 is MoveModeHook's).
+constexpr UINT kCloseStackMessage = WM_APP + 20;
+constexpr ULONGLONG kStackQuietMs = 600;
+
+// The member whose rect is waiting to be adopted by the debounce timer, and
+// the stack it belongs to is found again at fire time (it may be gone).
+HWND g_pendingAdoptMember = nullptr;
+constexpr UINT_PTR kStackAdoptTimerId = 2;
+constexpr UINT kStackAdoptDelayMs = 300;
+
+// How far a dragged tab goes beyond the strip before it counts as leaving
+// the stack is the strip's own business (StackStripWindow); this is the
+// size a window gets when it is torn out and put down, as a fraction of the
+// stack's content -- the same size, so it does not visibly jump.
+
+UINT StackDpiForRect(const RECT& rect) {
+    const HMONITOR monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST);
+    return MoveModeDpiForMonitor(monitor);
+}
+
+std::vector<polish::StripTab> CollectStripTabs(const polish::StackState& stack) {
+    std::vector<polish::StripTab> tabs;
+    for (const polish::StackMember& member : stack.Members()) {
+        polish::StripTab tab;
+        wchar_t title[256] = L"";
+        GetWindowTextW(member.window, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+        tab.title = title;
+        tab.icon = polish::GetWindowIconHandle(member.window);
+        tab.minimized = IsIconic(member.window) != FALSE;
+        tabs.push_back(std::move(tab));
+    }
+    return tabs;
+}
+
+// Pushes the stack's current members, order and active tab into its strip.
+void SyncStrip(polish::StackId id) {
+    const polish::StackState* stack = g_stackManager.FindStack(id);
+    const auto stripIt = g_stackStrips.find(id);
+    if (stack == nullptr || stripIt == g_stackStrips.end()) {
+        return;
+    }
+    stripIt->second->SetTitle(stack->Name());
+    stripIt->second->SetAlignment(stack->Alignment());
+    stripIt->second->SetTabs(CollectStripTabs(*stack), stack->ActiveIndex().value_or(0));
+}
+
+// The strip is shown while one of its stack's members is the foreground
+// window, and hidden otherwise.
+//
+// It has to be topmost to be usable (a strip behind its own windows is no
+// use), and a topmost window floats over unrelated apps even when its stack
+// is buried -- which looks broken. Hiding it when no member is in front is
+// the compromise: you do not see your stacks at a glance, but you never see
+// a stray strip either. The way back to a hidden stack is the ordinary one:
+// Alt+Tab, or the taskbar, onto any member.
+void UpdateStripVisibility() {
+    const HWND foreground = GetForegroundWindow();
+    const polish::StackState* active = foreground != nullptr ? g_stackManager.FindStackContaining(foreground) : nullptr;
+    for (auto& [id, strip] : g_stackStrips) {
+        const bool strip_is_foreground = foreground == strip->Handle();
+        // Every strip while a window is being dragged toward one: the dragged
+        // window is the foreground window, so without this the strips would
+        // all vanish just when they are wanted as drop targets.
+        if ((active != nullptr && active->Id() == id) || strip_is_foreground || g_joinSubject != nullptr) {
+            strip->Show();
+        } else {
+            strip->Hide();
         }
     }
 }
 
-// Reparents (if not already) and positions/shows group id's members --
-// the single path both the initial layout (TriggerNewGroup) and every
-// later reflow (a tab click, a resize, an edit) go through, so they can
-// never drift out of sync with each other. Takes no rect -- members are
-// real children of the chrome now, so this always just asks the chrome
-// for its own current content area (client-relative coordinates) rather
-// than being handed one; a plain drag doesn't even need to call this at
-// all any more (children move for free with their parent).
+// Brings `hwnd` to the front and gives it focus, restoring it first if it is
+// minimized. Best effort: a background process is not always allowed to take
+// the foreground, and the raise works regardless.
+void ActivateMemberWindow(HWND hwnd) {
+    if (!IsWindow(hwnd)) {
+        return;
+    }
+    if (IsIconic(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    }
+    polish::PromoteWindowToFront(hwnd);
+    SetForegroundWindow(hwnd);
+}
+
+// Moves the stack's strip and members to match its rect. The single funnel
+// every change goes through -- creation, a tab click that restores a
+// minimized member, a move, a resize, an edit -- so they cannot drift.
 //
-// If ApplyLayout reports that some member wouldn't fit -- a real,
-// confirmed case: a window's own declared minimum size (Outlook is a
-// real example a user hit) can be larger than the content area, and
-// SetWindowPos silently clamps to it rather than failing -- the chrome
-// is grown to fit and layout is re-applied once, so that member ends up
-// correctly filling its (now larger) share of the group instead of
-// visibly spilling outside it.
-void ReflowGroupTo(polish::GroupId id) {
-    if (g_reflowGrowInProgress) {
-        // GrowContentAreaTo's own SetWindowPos call below fires WM_SIZE
-        // synchronously, which re-enters here via GroupChromeWindow's
-        // onResized_ callback *before* the outer call below has made
-        // its own follow-up ApplyLayout call. Without this guard, that
-        // reentrant call would run its own layout pass (against a
-        // content rect that's still momentarily out of sync with what
-        // the outer call is about to apply), and if its own measurement
-        // differs by even a little, grow again, re-entering again -- a
-        // cascade of resize/show/hide cycles a real user saw as visible
-        // window flashing. The outer call always finishes the job
-        // itself right after GrowContentAreaTo returns, so a reentrant
-        // call here has nothing useful left to do.
+// The strip has no position of its own: it is derived here, every time,
+// from the stack rect and the monitor's DPI.
+void ReflowStackTo(polish::StackId id) {
+    if (g_reflowInProgress) {
         return;
     }
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    auto chromeIt = g_groupChromeWindows.find(id);
-    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    const auto stripIt = g_stackStrips.find(id);
+    if (stack == nullptr || stripIt == g_stackStrips.end() || !stack->HasRect()) {
         return;
     }
-    // A member's position is fully owned by GroupManager now -- but
-    // nothing else proactively notices when a window that restore-sync
-    // was already tracking (g_trackedWindow, from before it joined a
-    // group) becomes a member, since reparenting doesn't fire
-    // EVENT_SYSTEM_FOREGROUND. Left alone, every position change
-    // GroupManager makes to that member keeps re-triggering restore-
-    // sync's own settle-and-SetWindowPlacement logic on it -- two
-    // systems fighting over the same window's position, which is
-    // exactly what a real, confirmed flashing report traced back to.
-    // Cleared here (same reset as EVENT_OBJECT_DESTROY's cleanup)
-    // rather than only in OnForegroundChanged, since that path is never
-    // reached for this transition at all.
-    //
-    // This must run *before* ApplyLayout below, not after: membership
-    // itself doesn't depend on ApplyLayout having run (CreateGroup/
-    // SetMembers already populate it), but ApplyLayout is what actually
-    // reparents/repositions a brand-new member for the first time --
-    // and if that member happened to be g_trackedWindow (e.g. it was
-    // the foreground window when "New Group" was triggered, a common
-    // real case), its own EnsureReparented/PositionMember calls could
-    // fire the very location-change events this clear is meant to
-    // guard against, in the gap where tracking was still live. Clearing
-    // first closes that race regardless of how those events end up
-    // getting delivered.
-    if (g_trackedWindow != nullptr && group->Contains(g_trackedWindow)) {
+    // Restore-position sync tracks the foreground window; a member's
+    // position is the stack's to decide, and two systems repositioning one
+    // window is how a real, reported flashing bug happened before. Clear it
+    // *before* anything moves, so the events our own moves cause cannot be
+    // mistaken for the user dragging.
+    if (g_trackedWindow != nullptr && stack->Contains(g_trackedWindow)) {
         g_trackedWindow = nullptr;
         g_inMoveSizeLoop = false;
         g_pendingSettleRect.reset();
         KillTimer(g_messageWindow, kSettleTimerId);
     }
 
-    const HWND chromeHandle = chromeIt->second->Handle();
-    const RECT contentRect = chromeIt->second->ContentRectInClientCoords();
-    const size_t memberCountBefore = group->MemberCount();
-    const SIZE needed = g_groupManager.ApplyLayout(*group, chromeHandle, contentRect);
-    // ApplyLayout can drop a member that turned out to be unreparentable
-    // (see its own comment) -- when it does, the chrome's tab strip
-    // still shows the stale, now-too-long title/icon list until
-    // something resyncs it, so do that here rather than leaving a
-    // ghost tab behind.
-    if (group->MemberCount() != memberCountBefore) {
-        chromeIt->second->SetMemberTitles(CollectMemberTitles(*group));
-        chromeIt->second->SetMemberIcons(CollectMemberIcons(*group));
-        if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
-            chromeIt->second->SetActiveIndex(*activeIndex);
+    const UINT dpi = StackDpiForRect(stack->Rect());
+    const int thickness = polish::StackStripWindow::ThicknessPx(stack->Alignment(), dpi);
+    polish::StackFrame frame = polish::ComputeStackFrame(stack->Rect(), stack->Alignment(), thickness);
+
+    // A member will not go below its own minimum (Outlook is a real case).
+    // Grow the stack to fit, once, before placing anything, rather than
+    // placing and finding out: it is the stack that has to be big enough,
+    // not the member that can be made to shrink.
+    const SIZE minimum = g_stackManager.MinimumContentSize(*stack);
+    const int contentWidth = frame.content.right - frame.content.left;
+    const int contentHeight = frame.content.bottom - frame.content.top;
+    if (minimum.cx > contentWidth || minimum.cy > contentHeight) {
+        RECT grown = stack->Rect();
+        grown.right += std::max<LONG>(0, minimum.cx - contentWidth);
+        grown.bottom += std::max<LONG>(0, minimum.cy - contentHeight);
+        stack->SetRect(grown);
+        frame = polish::ComputeStackFrame(grown, stack->Alignment(), thickness);
+        polish::LogDebug(std::format(L"[Polish] Stack: member(s) need {}x{}, stack id={} grown to fit", minimum.cx,
+                                      minimum.cy, id));
+    }
+
+    g_reflowInProgress = true;
+    g_stackManager.PlaceMembers(*stack, frame.content);
+    stripIt->second->PlaceAt(frame.strip);
+    g_reflowInProgress = false;
+    g_stackQuietUntilTick = GetTickCount64() + kStackQuietMs;
+    SyncStrip(id);
+    UpdateStripVisibility();
+}
+
+// Minimizes every member: the title bar's minimize button, and what
+// clicking the taskbar button of the stack you are in does.
+// When members were last all minimized by us. Windows hands focus to the next
+// window that is up, and for a stack that is its own taskbar stand-in; that
+// activation is not a click on its button and must not bring the stack
+// straight back (see OnStackTaskbarForeground).
+ULONGLONG g_stackMinimizedAtTick = 0;
+
+void MinimizeStackMembers(polish::StackId id) {
+    g_stackMinimizedAtTick = GetTickCount64();
+    polish::LogDebug(std::format(L"[Polish] Stack: minimizing every member of stack id={}", id));
+    const polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr) {
+        return;
+    }
+    for (const polish::StackMember& member : stack->Members()) {
+        if (IsWindow(member.window) && !IsIconic(member.window)) {
+            ShowWindow(member.window, SW_MINIMIZE);
         }
     }
-    // Re-arm (not just start) the delayed thumbnail-refresh sweep on
-    // every reflow -- see kThumbnailRefreshTimerId's own comment for
-    // why a single synchronous capture isn't always enough.
-    SetTimer(g_messageWindow, kThumbnailRefreshTimerId, kThumbnailRefreshDelayMs, nullptr);
-
-    const int requestedWidth = contentRect.right - contentRect.left;
-    const int requestedHeight = contentRect.bottom - contentRect.top;
-    if (needed.cx > requestedWidth || needed.cy > requestedHeight) {
-        polish::LogDebug(std::format(
-            L"[Polish] Group: member(s) wouldn't fit group id={} (requested {}x{}, needed {}x{}) -- growing chrome",
-            id, requestedWidth, requestedHeight, needed.cx, needed.cy));
-        g_reflowGrowInProgress = true;
-        chromeIt->second->GrowContentAreaTo(needed);
-        g_reflowGrowInProgress = false;
-        g_groupManager.ApplyLayout(*group, chromeHandle, chromeIt->second->ContentRectInClientCoords());
-    }
-
 }
 
-// Current window titles for group's members, in membership order --
-// shared by the initial chrome creation, a live title-change sync, a
-// tab reorder, and an edit-membership confirm, so the chrome's tab
-// labels are always rebuilt the same way regardless of what triggered
-// the refresh.
-std::vector<std::wstring> CollectMemberTitles(const polish::GroupState& group) {
-    std::vector<std::wstring> titles;
-    for (const polish::GroupMember& member : group.Members()) {
-        if (member.kind != polish::GroupMemberKind::Window || member.window == nullptr) {
-            continue;  // nested-group case -- v1 never populates this
+// Restores every minimized member, lays the stack out again, and activates
+// the active tab.
+void BringStackForward(polish::StackId id) {
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr) {
+        return;
+    }
+    for (const polish::StackMember& member : stack->Members()) {
+        if (IsWindow(member.window) && IsIconic(member.window)) {
+            ShowWindow(member.window, SW_RESTORE);
         }
-        wchar_t title[256] = L"";
-        GetWindowTextW(member.window, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
-        titles.emplace_back(title);
     }
-    return titles;
+    ReflowStackTo(id);
+    if (const auto active = stack->ActiveWindow(); active.has_value()) {
+        ActivateMemberWindow(*active);
+    }
 }
 
-// Current member icons, in the same membership order as
-// CollectMemberTitles -- shared by every call site that refreshes tab
-// labels, so titles and icons never drift out of sync with each other.
-std::vector<HICON> CollectMemberIcons(const polish::GroupState& group) {
-    std::vector<HICON> icons;
-    for (const polish::GroupMember& member : group.Members()) {
-        if (member.kind != polish::GroupMemberKind::Window || member.window == nullptr) {
-            continue;  // nested-group case -- v1 never populates this
+// The shell sent a stack's stand-in a minimize/restore command: its button was
+// clicked while the stand-in was already in front, which is where it stays
+// once the stack has been minimized. Toggle on the stack's own state: if
+// everything is minimized, bring it back; otherwise minimize it.
+void ToggleStackFromTaskbar(polish::StackId id) {
+    const polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr) {
+        return;
+    }
+    bool anyUp = false;
+    for (const polish::StackMember& member : stack->Members()) {
+        if (IsWindow(member.window) && !IsIconic(member.window)) {
+            anyUp = true;
         }
-        icons.push_back(polish::GetWindowIconHandle(member.window));
-    }
-    return icons;
-}
-
-// Called from OnWinEvent's EVENT_OBJECT_NAMECHANGE case (see the
-// forward declaration near the group globals for why): if hwnd is a
-// group member, refreshes its group's chrome tab labels from every
-// member's *current* title -- previously a tab's label was only ever
-// the title captured at creation/edit time, so e.g. a browser tab
-// changing page or an editor gaining an unsaved-changes marker never
-// showed up until something unrelated happened to repaint the chrome.
-void OnMemberTitleChanged(HWND hwnd) {
-    polish::GroupState* group = g_groupManager.FindGroupContaining(hwnd);
-    if (group == nullptr) {
-        return;
-    }
-    auto chromeIt = g_groupChromeWindows.find(group->Id());
-    if (chromeIt == g_groupChromeWindows.end()) {
-        return;
-    }
-    chromeIt->second->SetMemberTitles(CollectMemberTitles(*group));
-    chromeIt->second->SetMemberIcons(CollectMemberIcons(*group));
-}
-
-// Hides the tab hover-preview thumbnail (no-op if it isn't showing)
-// and refreshes just the tab strip -- not the whole chrome window (a
-// prior version of this fix used a plain InvalidateRect(..., nullptr,
-// ...), which also repaints the content-area band behind the active
-// member; that visibly overwrote it until something else forced it to
-// repaint itself again -- a real, confirmed regression: File Explorer's
-// content going blank after moving the mouse off a tab, until clicking
-// the tab again triggered ReflowGroupTo's own explicit redraw). The
-// thumbnail is a WS_EX_TOPMOST popup sitting right below the tab strip
-// -- hiding it doesn't reliably trigger the chrome to repaint whatever
-// sliver of the tab-strip/content boundary it was covering (same class
-// of stale-composited-surface issue RedrawWindow already had to fix for
-// member tab switches, see GroupManager's PositionMember), which left
-// the active tab's highlight looking stale until something unrelated
-// repainted it.
-void HideGroupTabThumbnail(polish::GroupId id) {
-    g_hoveredThumbnailMember = nullptr;
-    KillTimer(g_messageWindow, kThumbnailStabilizeTimerId);
-    if (!g_groupTabThumbnail) {
-        return;
-    }
-    g_groupTabThumbnail->Hide();
-    auto chromeIt = g_groupChromeWindows.find(id);
-    if (chromeIt != g_groupChromeWindows.end()) {
-        chromeIt->second->InvalidateTabStrip();
-    }
-}
-
-// Called from GroupChromeWindow's onTabHovered callback: shows (or
-// hides, if index is nullopt) a live thumbnail preview of the hovered
-// tab's member window, so the user can see which window it is before
-// committing to switch to it.
-void OnGroupTabHovered(polish::GroupId id, std::optional<size_t> index, const RECT& tabScreenRect) {
-    if (!index.has_value()) {
-        HideGroupTabThumbnail(id);
-        return;
-    }
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    if (group == nullptr || *index >= group->Members().size()) {
-        return;
-    }
-    // The active tab's content is already fully visible in the group --
-    // nothing useful to preview, so don't show a thumbnail for it.
-    if (group->ActiveIndex().has_value() && *group->ActiveIndex() == *index) {
-        HideGroupTabThumbnail(id);
-        return;
-    }
-    const polish::GroupMember& member = group->Members()[*index];
-    if (member.kind != polish::GroupMemberKind::Window || member.window == nullptr || !IsWindow(member.window)) {
-        return;
-    }
-    if (!g_groupTabThumbnail) {
-        g_groupTabThumbnail = std::make_unique<polish::GroupTabThumbnail>(GetModuleHandleW(nullptr));
-    }
-    // A fresh, synchronous re-capture right now -- not just whatever
-    // GroupManager's background sweep last cached -- so hovering
-    // immediately after a group is created (before that sweep has even
-    // fired) shows the best available snapshot right away, not a
-    // possibly-stale one. See GroupTabThumbnail.h's comment for why a
-    // *live* capture of an already-hidden member doesn't reliably work
-    // on its own -- CaptureThumbnail's own message-flush/redraw
-    // handling is still what makes this call meaningful.
-    const bool preferRight = group->Alignment() == polish::GroupAlignment::Vertical;
-    g_groupManager.RefreshThumbnail(member.window);
-    g_groupTabThumbnail->ShowFor(g_groupManager.CachedThumbnail(member.window), tabScreenRect, preferRight);
-
-    // Keep silently improving the shown preview for a bit in case its
-    // content was still mid-load -- see kThumbnailStabilizeTimerId's
-    // own comment for why (no universal "finished loading" signal
-    // exists to just check once instead).
-    g_hoveredThumbnailMember = member.window;
-    g_hoveredThumbnailTabRect = tabScreenRect;
-    g_hoveredThumbnailPreferRight = preferRight;
-    g_thumbnailStabilizeAttemptsLeft = kThumbnailStabilizeMaxAttempts;
-    SetTimer(g_messageWindow, kThumbnailStabilizeTimerId, kThumbnailStabilizeIntervalMs, nullptr);
-}
-
-// Fired by kThumbnailStabilizeTimerId while a tab's thumbnail is
-// actively being hovered: re-captures it once more and, if the content
-// actually changed, updates the already-shown popup with the newer
-// image. Stops (kills its own timer) once a capture comes back
-// unchanged -- content has settled -- or the attempt budget runs out;
-// also implicitly stopped by HideGroupTabThumbnail clearing
-// g_hoveredThumbnailMember whenever hover moves elsewhere first.
-void StabilizeHoveredThumbnail() {
-    if (g_hoveredThumbnailMember == nullptr || g_thumbnailStabilizeAttemptsLeft <= 0) {
-        KillTimer(g_messageWindow, kThumbnailStabilizeTimerId);
-        return;
-    }
-    --g_thumbnailStabilizeAttemptsLeft;
-    const bool changed = g_groupManager.RefreshThumbnail(g_hoveredThumbnailMember);
-    if (changed && g_groupTabThumbnail) {
-        g_groupTabThumbnail->ShowFor(g_groupManager.CachedThumbnail(g_hoveredThumbnailMember),
-                                      g_hoveredThumbnailTabRect, g_hoveredThumbnailPreferRight);
-    }
-    if (!changed || g_thumbnailStabilizeAttemptsLeft <= 0) {
-        KillTimer(g_messageWindow, kThumbnailStabilizeTimerId);
-        g_hoveredThumbnailMember = nullptr;
-    }
-}
-
-// Called when a group's tab strip is clicked (GroupChromeWindow's
-// onTabClicked callback): switches which member is active, both in the
-// pure GroupState and the chrome's own visual highlight, reflows (so
-// the newly active member is shown and every other one hidden), and
-// actually focuses it. Members are real children now, so "focus" means
-// SetFocus on the member after making sure the chrome itself is
-// foreground -- not SetForegroundWindow on the member directly, which
-// doesn't apply to a child window the way it does to a top-level one.
-void ActivateGroupTab(polish::GroupId id, size_t index) {
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    auto chromeIt = g_groupChromeWindows.find(id);
-    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
-        return;
-    }
-    // Clicking a tab commits to switching -- the hover preview (if
-    // still showing, e.g. the click landed before the mouse settled
-    // elsewhere) has nothing left to preview.
-    HideGroupTabThumbnail(id);
-    group->SetActiveIndex(index);
-    chromeIt->second->SetActiveIndex(index);
-    ReflowGroupTo(id);
-
-    if (const auto active = group->ActiveWindow(); active.has_value() && IsWindow(*active)) {
-        InjectForegroundUnlockKeystroke();
-        SetForegroundWindow(chromeIt->second->Handle());
-        SetFocus(*active);
-    }
-    polish::LogDebug(std::format(L"[Polish] Group: tab {} activated for group id={}", index, id));
-}
-
-// Called from GroupChromeWindow's onTabReordered callback, live during
-// a drag (once per tab crossed, not just once on drop -- see that
-// callback's own comment) -- reorders GroupState's membership to match
-// and rebuilds the chrome's tab labels from the new order, so the
-// chrome's own array of labels never has to be reordered independently
-// and risk drifting out of sync with GroupState.
-void ReorderGroupTab(polish::GroupId id, size_t fromIndex, size_t toIndex) {
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    auto chromeIt = g_groupChromeWindows.find(id);
-    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
-        return;
-    }
-    group->Reorder(fromIndex, toIndex);
-    chromeIt->second->SetMemberTitles(CollectMemberTitles(*group));
-    chromeIt->second->SetMemberIcons(CollectMemberIcons(*group));
-    if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
-        chromeIt->second->SetActiveIndex(*activeIndex);
     }
     polish::LogDebug(
-        std::format(L"[Polish] Group: tab reordered {} -> {} for group id={}", fromIndex, toIndex, id));
+        std::format(L"[Polish] Stack: taskbar button {} stack id={}", anyUp ? L"minimized" : L"restored", id));
+    if (anyUp) {
+        MinimizeStackMembers(id);
+    } else {
+        BringStackForward(id);
+    }
 }
 
-// Called from GroupChromeWindow's title-bar alignment button: flips the
-// one flag, mirrors it into the chrome's tab-strip axis, and reflows.
-void ToggleGroupAlignment(polish::GroupId id) {
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    auto chromeIt = g_groupChromeWindows.find(id);
-    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
+// The shell activated a stack's taskbar stand-in -- the user clicked its
+// button (or reached it with the native Alt+Tab). `previous` is the window
+// that was in front a moment before.
+//
+// This follows how a taskbar button behaves for any window: clicking the
+// button of the one you are already in minimizes it; clicking one you are
+// not in brings it back. So if a member was in front, minimize the whole
+// stack; otherwise bring it forward. Either way the stand-in itself is
+// never useful in front -- it is one offscreen pixel.
+void OnStackTaskbarForeground(HWND foreground, HWND previous) {
+    // Focus landing on the stand-in because we have just minimized the stack
+    // is the system finding something to activate, not a click on its button.
+    if (GetTickCount64() - g_stackMinimizedAtTick < 1000) {
         return;
     }
-    const polish::GroupAlignment newAlignment = (group->Alignment() == polish::GroupAlignment::Horizontal)
-                                                     ? polish::GroupAlignment::Vertical
-                                                     : polish::GroupAlignment::Horizontal;
-    group->SetAlignment(newAlignment);
-    chromeIt->second->SetAlignment(newAlignment);
-    ReflowGroupTo(id);
-    polish::LogDebug(std::format(L"[Polish] Group: alignment switched to {} for group id={}",
-                                  newAlignment == polish::GroupAlignment::Vertical ? L"Vertical" : L"Horizontal",
-                                  id));
+    for (const auto& [id, strip] : g_stackStrips) {
+        if (strip->TaskbarHandle() != foreground) {
+            continue;
+        }
+        const polish::StackState* stack = g_stackManager.FindStack(id);
+        if (stack == nullptr) {
+            return;
+        }
+        const bool wasInThisStack =
+            previous != nullptr && IsWindow(previous) && stack->Contains(previous) && !IsIconic(previous);
+        if (wasInThisStack) {
+            polish::LogDebug(std::format(L"[Polish] Stack: taskbar button minimized stack id={}", id));
+            MinimizeStackMembers(id);
+        } else {
+            polish::LogDebug(std::format(L"[Polish] Stack: taskbar button brought stack id={} forward", id));
+            BringStackForward(id);
+        }
+        return;
+    }
 }
 
-// Called from GroupChromeWindow's "Edit windows..." context-menu item:
-// reopens the picker pre-checked with the group's current membership
-// and mode, then diffs the confirmed selection against current
-// membership -- newly unchecked windows are removed (and released back
-// to top-level -- GroupState::Remove alone only updates bookkeeping,
-// it doesn't undo the reparenting), newly checked ones added
-// (GroupState::AddWindow already handles active-index bookkeeping and
-// duplicate/no-op safety; reparenting a newly-added member happens
-// automatically the next time ApplyLayout runs, via ReflowGroupTo
-// below).
-void EditGroupWindows(polish::GroupId id) {
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    auto chromeIt = g_groupChromeWindows.find(id);
-    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
+// Removes the stack's strip and state. Deferred to a posted message (see
+// kCloseStackMessage) because this is reached from inside the strip's own
+// mouse handling or a window event, and destroying a window from within one
+// of its own message handlers is how objects get destroyed mid-unwind.
+// The strip is hidden at once so nothing lingers while the message waits.
+void DissolveStack(polish::StackId id) {
+    const auto stripIt = g_stackStrips.find(id);
+    if (stripIt != g_stackStrips.end()) {
+        stripIt->second->Hide();
+    }
+    polish::LogDebug(std::format(L"[Polish] Stack: dissolving stack id={}", id));
+    PostMessageW(g_messageWindow, kCloseStackMessage, static_cast<WPARAM>(id), 0);
+}
+
+// Takes a window out of a stack. If that leaves fewer than two members the
+// stack no longer means anything and is dissolved; otherwise the rest are
+// re-laid out.
+void RemoveMemberFromStack(polish::StackId id, HWND hwnd) {
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr) {
         return;
     }
+    stack->Remove(hwnd);
+    if (stack->MemberCount() < 2) {
+        DissolveStack(id);
+        return;
+    }
+    SyncStrip(id);
+    ReflowStackTo(id);
+}
 
+// A tab was clicked: make that member the active one and bring it forward.
+void ActivateStackTab(polish::StackId id, size_t index) {
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr || index >= stack->MemberCount()) {
+        return;
+    }
+    stack->SetActiveIndex(index);
+    const HWND member = stack->Members()[index].window;
+    const bool wasMinimized = IsIconic(member) != FALSE;
+    ActivateMemberWindow(member);
+    if (wasMinimized) {
+        // Coming back from minimized, it has to be placed into the stack's
+        // rect again; a raised window that was already in place needs
+        // nothing moved.
+        ReflowStackTo(id);
+    } else {
+        SyncStrip(id);
+        UpdateStripVisibility();
+    }
+}
+
+void ReorderStackTab(polish::StackId id, size_t from, size_t to) {
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr) {
+        return;
+    }
+    stack->Reorder(from, to);
+    SyncStrip(id);
+}
+
+void ToggleStackAlignment(polish::StackId id) {
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr) {
+        return;
+    }
+    // Flipping the strip from the top to the left (or back) changes how much
+    // of the rect the members get, but the *members* are what the user
+    // placed, so keep their rect and move the strip around it: the stack
+    // rect is recomputed from the content, not the other way round. Without
+    // this the content would shrink or grow every time the strip flipped.
+    const UINT dpi = StackDpiForRect(stack->Rect());
+    const polish::StackFrame before = polish::ComputeStackFrame(
+        stack->Rect(), stack->Alignment(), polish::StackStripWindow::ThicknessPx(stack->Alignment(), dpi));
+    const polish::StackAlignment next = stack->Alignment() == polish::StackAlignment::Horizontal
+                                            ? polish::StackAlignment::Vertical
+                                            : polish::StackAlignment::Horizontal;
+    stack->SetAlignment(next);
+    stack->SetRect(polish::StackRectFromContent(before.content, next, polish::StackStripWindow::ThicknessPx(next, dpi)));
+    ReflowStackTo(id);
+    polish::LogDebug(std::format(L"[Polish] Stack: strip moved to the {} for stack id={}",
+                                  next == polish::StackAlignment::Vertical ? L"left" : L"top", id));
+}
+
+// Adopts a member's current rect as the stack's: the user resized (or moved)
+// that window by hand, and the rest follow.
+//
+// This replaces what used to be enforcement -- pulling a drifting member
+// back into place -- and the two are opposite responses to the same event,
+// which is why enforcement had to go rather than be switched off. A
+// top-level member moving or resizing itself is the intended gesture now.
+//
+// Loop-free by construction: it acts only on a rect that *differs* from the
+// content, and the reflow it triggers makes every member's rect equal to it,
+// so the next pass finds nothing to do. The quiet window after any reflow
+// covers the late, asynchronous echo of our own moves.
+void AdoptMemberRect(HWND hwnd) {
+    polish::StackState* stack = g_stackManager.FindStackContaining(hwnd);
+    if (stack == nullptr || !stack->HasRect() || g_reflowInProgress || GetTickCount64() < g_stackQuietUntilTick) {
+        return;
+    }
+    if (IsIconic(hwnd) || IsZoomed(hwnd)) {
+        return;  // not a rect anyone chose
+    }
+    RECT inset{};
+    const RECT visible = polish::VisibleRectAndInset(hwnd, inset);
+    const UINT dpi = StackDpiForRect(stack->Rect());
+    const int thickness = polish::StackStripWindow::ThicknessPx(stack->Alignment(), dpi);
+    const polish::StackFrame current = polish::ComputeStackFrame(stack->Rect(), stack->Alignment(), thickness);
+    if (polish::RectsApproximatelyEqual(visible, current.content, 2)) {
+        return;
+    }
+    stack->SetRect(polish::StackRectFromContent(visible, stack->Alignment(), thickness));
+    polish::LogDebug(std::format(L"[Polish] Stack: adopted rect ({},{})-({},{}) from hwnd={} for stack id={}",
+                                  visible.left, visible.top, visible.right, visible.bottom,
+                                  reinterpret_cast<void*>(hwnd), stack->Id()));
+    ReflowStackTo(stack->Id());
+}
+
+// The user dragged the strip's empty area: the whole stack moves with it.
+void OnStripDragged(polish::StackId id, int dx, int dy) {
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr) {
+        return;
+    }
+    stack->Offset(dx, dy);
+    ReflowStackTo(id);
+}
+
+// A tab was dragged clear of the strip: the window leaves the stack and is
+// put down where the pointer is, at the size it already has, so it does not
+// jump. The pointer ends up on its top edge, where a title bar would be.
+void TearOutStackMember(polish::StackId id, size_t index, POINT screenPt) {
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr || index >= stack->MemberCount()) {
+        return;
+    }
+    const HWND member = stack->Members()[index].window;
+    RECT inset{};
+    const RECT visible = polish::VisibleRectAndInset(member, inset);
+    const int width = visible.right - visible.left;
+    const int height = visible.bottom - visible.top;
+    RECT target{screenPt.x - width / 2, screenPt.y - 12, screenPt.x - width / 2 + width, screenPt.y - 12 + height};
+    // Kept inside the work area of the monitor it was dropped on, so a tear
+    // near an edge cannot leave the title bar out of reach.
+    const HMONITOR monitor = MonitorFromPoint(screenPt, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (GetMonitorInfoW(monitor, &info)) {
+        const LONG maxLeft = std::max(info.rcWork.left, info.rcWork.right - width);
+        const LONG maxTop = std::max(info.rcWork.top, info.rcWork.bottom - height);
+        const LONG left = std::clamp<LONG>(target.left, info.rcWork.left, maxLeft);
+        const LONG top = std::clamp<LONG>(target.top, info.rcWork.top, maxTop);
+        target = RECT{left, top, left + width, top + height};
+    }
+    polish::LogDebug(std::format(L"[Polish] Stack: tore hwnd={} out of stack id={}", reinterpret_cast<void*>(member), id));
+    RemoveMemberFromStack(id, member);
+    polish::PlaceWindowVisible(member, target);
+    ActivateMemberWindow(member);
+    g_stackQuietUntilTick = GetTickCount64() + kStackQuietMs;
+}
+
+// "Edit windows...": reopens the picker pre-checked with the current
+// membership and name, and applies the confirmed selection. Windows
+// unchecked simply stop being members -- they are ordinary windows and stay
+// exactly where they are.
+void EditStackWindows(polish::StackId id) {
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr) {
+        return;
+    }
     std::vector<HWND> currentMembers;
-    for (const polish::GroupMember& member : group->Members()) {
-        if (member.kind == polish::GroupMemberKind::Window && member.window != nullptr) {
+    for (const polish::StackMember& member : stack->Members()) {
+        if (member.window != nullptr) {
             currentMembers.push_back(member.window);
         }
     }
-
-    polish::GroupPickerWindow picker(GetModuleHandleW(nullptr));
-    const auto result = picker.ShowModal(chromeIt->second->Handle(), currentMembers, group->Name(), true);
+    polish::StackPickerWindow picker(GetModuleHandleW(nullptr));
+    const auto result = picker.ShowModal(nullptr, currentMembers, stack->Name(), true);
     if (!result.has_value()) {
-        polish::LogDebug(L"[Polish] Group: edit-windows picker cancelled");
+        polish::LogDebug(L"[Polish] Stack: edit-windows picker cancelled");
         return;
     }
+    stack->SetMembers(result->windows);
+    stack->SetName(result->name);
+    polish::LogDebug(std::format(L"[Polish] Stack: edited stack id={}, now {} window(s), name=\"{}\"", id,
+                                  stack->MemberCount(), stack->Name()));
+    if (stack->MemberCount() < 2) {
+        DissolveStack(id);
+        return;
+    }
+    SyncStrip(id);
+    ReflowStackTo(id);
+}
 
-    // Anything dropped from the confirmed Group list must be released
-    // back to top-level (GroupState::SetMembers alone only updates
-    // bookkeeping, it doesn't undo the reparenting) -- computed against
-    // the old membership before SetMembers replaces it wholesale.
-    for (HWND hwnd : currentMembers) {
-        if (std::find(result->windows.begin(), result->windows.end(), hwnd) == result->windows.end()) {
-            g_groupManager.ReleaseMember(hwnd);
+// The strip's right-click menu. Owned by Polish's hidden message window, the
+// same way the tray menu is: the strip is NOACTIVATE, and a popup menu wants
+// a foreground owner to dismiss itself correctly.
+void ShowStackStripMenu(polish::StackId id, POINT screenPt, std::optional<size_t> tab) {
+    constexpr UINT kEdit = 1;
+    constexpr UINT kFlip = 2;
+    constexpr UINT kRemoveTab = 3;
+    constexpr UINT kClose = 4;
+    const polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr) {
+        return;
+    }
+    g_stackMenuOpen = true;
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING, kEdit, L"Edit windows...");
+    AppendMenuW(menu, MF_STRING, kFlip,
+                stack->Alignment() == polish::StackAlignment::Horizontal ? L"Move tabs to the left"
+                                                                         : L"Move tabs to the top");
+    if (tab.has_value()) {
+        AppendMenuW(menu, MF_STRING, kRemoveTab, L"Remove this window from the stack");
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kClose, L"Close stack");
+    polish::ApplyDarkModeToMenu(g_messageWindow);
+    SetForegroundWindow(g_messageWindow);
+    const UINT cmd = static_cast<UINT>(TrackPopupMenuEx(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, screenPt.x,
+                                                        screenPt.y, g_messageWindow, nullptr));
+    PostMessageW(g_messageWindow, WM_NULL, 0, 0);
+    DestroyMenu(menu);
+
+    // Looked up again: the stack can change while the menu was up.
+    switch (cmd) {
+        case kEdit:
+            EditStackWindows(id);
+            break;
+        case kFlip:
+            ToggleStackAlignment(id);
+            break;
+        case kRemoveTab:
+            if (const polish::StackState* s = g_stackManager.FindStack(id); s != nullptr && tab.has_value() &&
+                                                                               *tab < s->MemberCount()) {
+                RemoveMemberFromStack(id, s->Members()[*tab].window);
+            }
+            break;
+        case kClose:
+            DissolveStack(id);
+            break;
+        default:
+            break;
+    }
+
+    // Closes that arrived while the menu or picker was up were parked; post
+    // them now, from outside the nested loop, so they run after the strip's
+    // own handler has returned.
+    g_stackMenuOpen = false;
+    for (const polish::StackId parked : g_parkedStackCloses) {
+        PostMessageW(g_messageWindow, kCloseStackMessage, static_cast<WPARAM>(parked), 0);
+    }
+    g_parkedStackCloses.clear();
+}
+
+// A member's title changed (browser tab, unsaved-changes marker, ...).
+void OnMemberTitleChanged(HWND hwnd) {
+    const polish::StackState* stack = g_stackManager.FindStackContaining(hwnd);
+    if (stack != nullptr) {
+        SyncStrip(stack->Id());
+    }
+}
+
+// Focus landed somewhere. If it is inside a stack member, that member is the
+// stack's active tab now -- however it got there (Alt+Tab, the taskbar, a
+// click), not only through the strip.
+void OnObjectFocusChanged(HWND hwnd) {
+    if (hwnd == nullptr || !IsWindow(hwnd) || g_stackManager.StackCount() == 0) {
+        return;
+    }
+    const HWND root = GetAncestor(hwnd, GA_ROOT);
+    polish::StackState* stack = root != nullptr ? g_stackManager.FindStackContaining(root) : nullptr;
+    if (stack == nullptr) {
+        UpdateStripVisibility();
+        return;
+    }
+    if (stack->ActiveWindow() != root) {
+        stack->SetActiveWindow(root);
+        SyncStrip(stack->Id());
+    }
+    UpdateStripVisibility();
+}
+
+// A member was minimized or restored. Posted to ourselves rather than
+// handled in the WinEvent callback: MINIMIZESTART arrives before the window
+// is actually iconic, and by the time this runs it is.
+//
+// Policy, and why:
+//  - A minimized member stays a member and its tab is dimmed. Its rect is
+//    not remembered: a minimized window's placeholder rect is not a place
+//    anyone chose.
+//  - If the minimized one was the active tab, the next window that is still
+//    up becomes active, so the strip is never pointing at nothing.
+//  - A restored member goes back into the stack's rect and becomes active.
+
+void OnMemberMinimizeChanged(HWND hwnd) {
+    polish::StackState* stack = IsWindow(hwnd) ? g_stackManager.FindStackContaining(hwnd) : nullptr;
+    if (stack == nullptr) {
+        return;
+    }
+    const polish::StackId id = stack->Id();
+    if (IsIconic(hwnd)) {
+        if (stack->ActiveWindow() == hwnd) {
+            const size_t count = stack->MemberCount();
+            const size_t from = stack->ActiveIndex().value_or(0);
+            for (size_t step = 1; step < count; ++step) {
+                const HWND candidate = stack->Members()[(from + step) % count].window;
+                if (IsWindow(candidate) && !IsIconic(candidate)) {
+                    stack->SetActiveWindow(candidate);
+                    ActivateMemberWindow(candidate);
+                    break;
+                }
+            }
+        }
+        SyncStrip(id);
+        UpdateStripVisibility();
+        return;
+    }
+    stack->SetActiveWindow(hwnd);
+    ReflowStackTo(id);
+}
+
+// A member went away (its app closed it). Without this a stack would keep a
+// tab for a window that no longer exists: with members reparented this was
+// masked, but top-level windows are destroyed on their own.
+void OnMemberDestroyed(HWND hwnd) {
+    polish::StackState* stack = g_stackManager.FindStackContaining(hwnd);
+    if (stack == nullptr) {
+        return;
+    }
+    polish::LogDebug(std::format(L"[Polish] Stack: member hwnd={} closed, leaving stack id={}",
+                                  reinterpret_cast<void*>(hwnd), stack->Id()));
+    RemoveMemberFromStack(stack->Id(), hwnd);
+}
+
+// A member's rect changed on its own: wait for it to settle, then adopt it.
+void OnMemberLocationChanged(HWND hwnd) {
+    if (g_reflowInProgress || GetTickCount64() < g_stackQuietUntilTick) {
+        return;
+    }
+    g_pendingAdoptMember = hwnd;
+    SetTimer(g_messageWindow, kStackAdoptTimerId, kStackAdoptDelayMs, nullptr);
+}
+
+// Builds a stack from `windows`: creates its state, its strip, and lays it
+// out. Shared by the picker (TriggerNewStack) and the test hook. Returns the
+// new id, or 0 if there was nothing worth making a stack of.
+//
+// The stack's rect starts as the first window's own visible rect, clamped
+// to its monitor's work area. Every other choice is worse: the union of the
+// members' rects is routinely bigger than the screen and spans monitors, and
+// a default centred rect resizes and moves the very window the user was
+// looking at. With the first window's rect, nothing about it changes except
+// that the strip takes its band of the rect.
+polish::StackId CreateStackFromWindows(const std::vector<HWND>& windows, const std::wstring& name) {
+    // An elevated window cannot be moved by an unelevated process (UIPI makes
+    // SetWindowPos a silent no-op), so it would sit stubbornly outside its
+    // stack forever. Refused up front rather than joined and left behind.
+    std::vector<HWND> usable;
+    for (HWND hwnd : windows) {
+        if (!IsWindow(hwnd)) {
+            continue;
+        }
+        if (polish::IsElevatedWindow(hwnd)) {
+            polish::LogDebug(std::format(L"[Polish] New Stack: skipping elevated hwnd={}", reinterpret_cast<void*>(hwnd)));
+            continue;
+        }
+        usable.push_back(hwnd);
+    }
+    if (usable.size() < 2) {
+        polish::LogDebug(L"[Polish] New Stack: fewer than two movable windows, nothing to stack");
+        return 0;
+    }
+
+    const polish::StackId id = g_stackManager.CreateStack(usable);
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    stack->SetName(name);
+
+    RECT inset{};
+    RECT rect = polish::VisibleRectAndInset(usable.front(), inset);
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &info)) {
+        IntersectRect(&rect, &rect, &info.rcWork);
+    }
+    // Never smaller than a usable window: a tiny first window should not
+    // make a tiny stack.
+    constexpr LONG kMinStackWidth = 480;
+    constexpr LONG kMinStackHeight = 320;
+    rect.right = std::max(rect.right, rect.left + kMinStackWidth);
+    rect.bottom = std::max(rect.bottom, rect.top + kMinStackHeight);
+    stack->SetRect(rect);
+    polish::LogDebug(std::format(L"[Polish] New Stack: created stack id={} with {} window(s), name=\"{}\"", id,
+                                  usable.size(), name));
+
+    auto strip = std::make_unique<polish::StackStripWindow>(GetModuleHandleW(nullptr));
+    strip->SetOnTabClicked([id](size_t index) { ActivateStackTab(id, index); });
+    strip->SetOnTabReordered([id](size_t from, size_t to) { ReorderStackTab(id, from, to); });
+    strip->SetOnTabTornOut([id](size_t index, POINT pt) { TearOutStackMember(id, index, pt); });
+    strip->SetOnStripDragged([id](int dx, int dy) { OnStripDragged(id, dx, dy); });
+    strip->SetOnContextMenu([id](POINT pt, std::optional<size_t> tab) { ShowStackStripMenu(id, pt, tab); });
+    strip->SetOnMinimizeAll([id]() { MinimizeStackMembers(id); });
+    strip->SetOnTitleDoubleClicked([id]() { EditStackWindows(id); });
+    strip->SetOnTaskbarCloseRequested([id]() { DissolveStack(id); });
+    strip->SetOnTaskbarToggle([id]() { ToggleStackFromTaskbar(id); });
+    g_stackStrips[id] = std::move(strip);
+
+    ReflowStackTo(id);
+    // The first window becomes the foreground one, which is what makes the
+    // strip visible (see UpdateStripVisibility).
+    ActivateMemberWindow(usable.front());
+    UpdateStripVisibility();
+    return id;
+}
+
+// ---------------------------------------------------------------------------
+// Dragging a window onto a strip to join the stack.
+//
+// Polish already watches every window's move/size loop (MOVESIZESTART/END),
+// so this needs no new hook: while a non-member window is being dragged, the
+// strip under the pointer (if any) shows an insertion caret, and releasing
+// over it adds the window there.
+//
+// The cursor decides, not window overlap -- it is how every tab bar behaves,
+// and the dragged window's rect would overlap strips it was merely passing.
+// ---------------------------------------------------------------------------
+
+
+bool CanJoinStack(HWND hwnd) {
+    return IsWindow(hwnd) && !IsOwnProcessWindow(hwnd) && polish::IsCandidateWindow(hwnd) &&
+           !polish::IsElevatedWindow(hwnd) && g_stackManager.FindStackContaining(hwnd) == nullptr;
+}
+
+bool StripUnderPoint(POINT pt, polish::StackId& idOut, size_t& indexOut) {
+    for (const auto& [id, strip] : g_stackStrips) {
+        if (strip->ContainsScreenPoint(pt)) {
+            idOut = id;
+            indexOut = strip->InsertionIndexAtScreenPoint(pt);
+            return true;
         }
     }
-    group->SetMembers(result->windows);
-    group->SetName(result->name);
-
-    chromeIt->second->SetMemberTitles(CollectMemberTitles(*group));
-    chromeIt->second->SetMemberIcons(CollectMemberIcons(*group));
-    if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
-        chromeIt->second->SetActiveIndex(*activeIndex);
-    }
-    SetWindowTextW(chromeIt->second->Handle(), group->Name().c_str());
-    ReflowGroupTo(id);
-    polish::LogDebug(std::format(L"[Polish] Group: edited group id={}, now {} window(s), name=\"{}\"", id,
-                                  group->MemberCount(), group->Name()));
+    return false;
 }
 
-// Message id for the deferred close-group cleanup below (WM_APP+1 and
-// WM_APP+10 are already taken by TrayIcon/AltTabHook).
-constexpr UINT kCloseGroupMessage = WM_APP + 20;
+void ClearDropCarets() {
+    for (auto& [id, strip] : g_stackStrips) {
+        strip->SetDropCaret(std::nullopt);
+    }
+}
 
-// Called from GroupChromeWindow's onClosing callback (WM_CLOSE, before
-// the window is actually destroyed): releases every member back to an
-// independent top-level window so none of them are destroyed along with
-// the chrome (see WindowReparenting.h). Does *not* touch
-// g_groupChromeWindows here -- this runs from inside the very chrome
-// window's own WM_CLOSE handling, so erasing its map entry now would
-// delete the GroupChromeWindow object (running its DestroyWindow-calling
-// destructor) while still unwinding that object's own call stack.
-// Posting kCloseGroupMessage instead defers the actual erase to a clean,
-// top-level point in the message loop, once WM_CLOSE/WM_DESTROY have
-// both already fully finished.
-void CloseGroup(polish::GroupId id) {
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    if (group == nullptr) {
+void JoinStack(polish::StackId id, HWND hwnd, size_t index) {
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr || !CanJoinStack(hwnd)) {
         return;
     }
-    g_groupManager.ReleaseGroup(*group);
-    polish::LogDebug(std::format(L"[Polish] Group: closed group id={}, {} member(s) released to top-level", id,
-                                  group->MemberCount()));
-    PostMessageW(g_messageWindow, kCloseGroupMessage, static_cast<WPARAM>(id), 0);
+    stack->AddWindow(hwnd);
+    const size_t last = stack->MemberCount() - 1;
+    if (index < last) {
+        stack->Reorder(last, index);
+    }
+    stack->SetActiveWindow(hwnd);
+    polish::LogDebug(std::format(L"[Polish] Stack: hwnd={} joined stack id={} at slot {}",
+                                  reinterpret_cast<void*>(hwnd), id, index));
+    SyncStrip(id);
+    ReflowStackTo(id);
+    ActivateMemberWindow(hwnd);
 }
 
-// Triggered by both the tray menu's "New Group" item and the Win+Alt+G
-// hotkey: shows the window picker, and on confirm hands the selection
-// straight to GroupManager. `owner` centers the picker and is passed
-// through as its Win32 owner window -- may be nullptr (e.g. triggered
-// via the hotkey with no natural owner), which GroupPickerWindow
-// already falls back on (primary monitor).
-void TriggerNewGroup(HWND owner) {
-    polish::GroupPickerWindow picker(GetModuleHandleW(nullptr));
-    const auto selection = picker.ShowModal(owner, {}, L"New Group", false);
+void OnJoinDragStart(HWND hwnd) {
+    if (g_stackStrips.empty() || !CanJoinStack(hwnd)) {
+        return;
+    }
+    g_joinSubject = hwnd;
+    GetWindowRect(hwnd, &g_joinSubjectStartRect);
+    UpdateStripVisibility();  // show every strip as a drop target
+}
+
+void OnJoinDragMove(HWND hwnd) {
+    if (hwnd != g_joinSubject) {
+        return;
+    }
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    polish::StackId overId = 0;
+    size_t index = 0;
+    const bool over = StripUnderPoint(cursor, overId, index);
+    for (auto& [id, strip] : g_stackStrips) {
+        strip->SetDropCaret(over && id == overId ? std::optional<size_t>(index) : std::nullopt);
+    }
+}
+
+void OnJoinDragEnd(HWND hwnd) {
+    if (hwnd != g_joinSubject) {
+        return;
+    }
+    // Decided before anything is hidden: the hit test needs the strips still
+    // showing, and hiding them is part of ending the drag.
+    //
+    // A drag cancelled with Escape ends the loop with the window back where
+    // it started; that must not join anything just because the pointer
+    // happens to be over a strip.
+    RECT now{};
+    GetWindowRect(hwnd, &now);
+    const bool moved = !polish::RectsApproximatelyEqual(now, g_joinSubjectStartRect, 1);
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    polish::StackId id = 0;
+    size_t index = 0;
+    const bool overStrip = moved && StripUnderPoint(cursor, id, index);
+
+    g_joinSubject = nullptr;
+    ClearDropCarets();
+    if (overStrip) {
+        JoinStack(id, hwnd, index);  // reflows, which also updates strip visibility
+    } else {
+        UpdateStripVisibility();  // back to showing only the foreground stack's strip
+    }
+}
+
+// Triggered by both the tray menu's "New Stack" item and the hotkey: shows
+// the window picker, and on confirm builds the stack.
+void TriggerNewStack(HWND owner) {
+    polish::StackPickerWindow picker(GetModuleHandleW(nullptr));
+    const auto selection = picker.ShowModal(owner, {}, L"New Stack", false);
     if (!selection.has_value()) {
-        polish::LogDebug(L"[Polish] New Group: picker cancelled");
+        polish::LogDebug(L"[Polish] New Stack: picker cancelled");
         return;
     }
-    // Mode is no longer chosen in the picker (moving to the chrome's
-    // own title-bar controls) -- every new group starts in Tab mode,
-    // matching GroupState's own default; the existing context-menu
-    // toggle can still switch it afterward.
-    const polish::GroupId id = g_groupManager.CreateGroup(selection->windows);
-    polish::GroupState* newGroup = g_groupManager.FindGroup(id);
-    if (newGroup != nullptr) {
-        newGroup->SetName(selection->name);
-    }
-    polish::LogDebug(std::format(L"[Polish] New Group: created group id={} with {} window(s), name=\"{}\"", id,
-                                  selection->windows.size(), selection->name));
-    std::vector<std::wstring> memberTitles;
-    for (HWND hwnd : selection->windows) {
-        wchar_t title[256] = L"";
-        GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
-        polish::LogDebug(
-            std::format(L"[Polish] New Group: member hwnd={} title=\"{}\"", reinterpret_cast<void*>(hwnd), title));
-        memberTitles.emplace_back(title);
-    }
-
-    std::vector<HICON> memberIcons;
-    for (HWND hwnd : selection->windows) {
-        memberIcons.push_back(polish::GetWindowIconHandle(hwnd));
-    }
-
-    auto chrome = std::make_unique<polish::GroupChromeWindow>(GetModuleHandleW(nullptr));
-    chrome->Show(memberTitles);
-    SetWindowTextW(chrome->Handle(), selection->name.c_str());
-    chrome->SetMemberIcons(memberIcons);
-    chrome->SetOnTabClicked([id](size_t index) { ActivateGroupTab(id, index); });
-    chrome->SetOnTabReordered([id](size_t from, size_t to) { ReorderGroupTab(id, from, to); });
-    chrome->SetOnAlignmentToggleRequested([id]() { ToggleGroupAlignment(id); });
-    chrome->SetOnEditWindowsRequested([id]() { EditGroupWindows(id); });
-    chrome->SetOnResized([id]() { ReflowGroupTo(id); });
-    chrome->SetOnMemberClicked([id](POINT pt) { OnGroupMemberClicked(id, pt); });
-    chrome->SetOnClosing([id]() { CloseGroup(id); });
-    chrome->SetOnTabHovered(
-        [id](std::optional<size_t> index, const RECT& tabScreenRect) { OnGroupTabHovered(id, index, tabScreenRect); });
-    polish::LogDebug(std::format(L"[Polish] New Group: chrome window created hwnd={} for group id={}",
-                                  reinterpret_cast<void*>(chrome->Handle()), id));
-
-    g_groupChromeWindows[id] = std::move(chrome);
-    ReflowGroupTo(id);
+    CreateStackFromWindows(selection->windows, selection->name);
 }
 
 // One tiling command's menu item.
@@ -6630,7 +6821,7 @@ void PopulateTrayMenu(HMENU menu) {
     std::vector<SIZE> recentMinimums;
     if (haveWorkArea) {
         for (size_t i = 0; i < arrangeCandidates.size() && i < 4; ++i) {
-            recentMinimums.push_back(MinimumVisibleSizeFor(arrangeCandidates[i]));
+            recentMinimums.push_back(polish::MinimumVisibleSizeFor(arrangeCandidates[i]));
         }
     }
     // Empty when the first N windows can be fitted without overlap, or
@@ -6661,10 +6852,10 @@ void PopulateTrayMenu(HMENU menu) {
                           g_settings.arrangeFourWayHotkeyVirtualKey, arrangeCandidateCount,
                           misfitFor(polish::ArrangeKind::FourWay));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, kMenuIdNewGroup,
-                (L"New Group...\t" + FormatHotkey(g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey))
+    AppendMenuW(menu, MF_STRING, kMenuIdNewStack,
+                (L"New Stack...\t" + FormatHotkey(g_settings.stackHotkeyModifiers, g_settings.stackHotkeyVirtualKey))
                     .c_str());
-    AppendMenuW(menu, MF_STRING, kMenuIdChangeGroupHotkey, L"Change Group Hotkey...");
+    AppendMenuW(menu, MF_STRING, kMenuIdChangeStackHotkey, L"Change Stack Hotkey...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (polish::IsStartAtLoginEnabled() ? MF_CHECKED : MF_UNCHECKED),
                 kMenuIdStartAtLogin, L"Start with Windows");
@@ -6757,11 +6948,11 @@ void HandleTrayCommand(UINT commandId) {
         case kMenuIdArrangeFourWay:
             ArrangeWindows(polish::ArrangeKind::FourWay);
             break;
-        case kMenuIdNewGroup:
-            TriggerNewGroup(nullptr);
+        case kMenuIdNewStack:
+            TriggerNewStack(nullptr);
             break;
-        case kMenuIdChangeGroupHotkey:
-            ChangeGroupHotkey();
+        case kMenuIdChangeStackHotkey:
+            ChangeStackHotkey();
             break;
         case kMenuIdAbout:
             ShellExecuteW(nullptr, L"open", kAboutUrl, nullptr, nullptr, SW_SHOWNORMAL);
@@ -6804,11 +6995,12 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             } else if (wParam == kSettleTimerId) {
                 KillTimer(hwnd, kSettleTimerId);
                 CheckSettledRectAndRecord();
-            } else if (wParam == kThumbnailRefreshTimerId) {
-                KillTimer(hwnd, kThumbnailRefreshTimerId);
-                RefreshAllHiddenThumbnails();
-            } else if (wParam == kThumbnailStabilizeTimerId) {
-                StabilizeHoveredThumbnail();
+            } else if (wParam == kStackAdoptTimerId) {
+                KillTimer(hwnd, kStackAdoptTimerId);
+                if (g_pendingAdoptMember != nullptr && IsWindow(g_pendingAdoptMember)) {
+                    AdoptMemberRect(g_pendingAdoptMember);
+                }
+                g_pendingAdoptMember = nullptr;
             } else if (wParam == kArrangeSyncTimerId) {
                 KillTimer(hwnd, kArrangeSyncTimerId);
                 for (HWND arranged : g_arrangeSyncPending) {
@@ -6966,8 +7158,8 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             return 0;
 
         case WM_HOTKEY:
-            if (wParam == kNewGroupHotkeyId) {
-                TriggerNewGroup(nullptr);
+            if (wParam == kNewStackHotkeyId) {
+                TriggerNewStack(nullptr);
             } else if (wParam == kArrangeTwoWayHotkeyId) {
                 ArrangeWindows(polish::ArrangeKind::TwoWay);
             } else if (wParam == kArrangeThreeWayHotkeyId) {
@@ -7007,21 +7199,45 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             }
             return 0;
 
-        case kCloseGroupMessage: {
-            // Deferred from CloseGroup -- see its own comment for why
-            // this can't safely happen synchronously from within the
-            // closing chrome's own WM_CLOSE handling. By now WM_CLOSE/
-            // WM_DESTROY have both fully finished and members have
-            // already been released, so erasing (and thereby
-            // destroying, via ~GroupChromeWindow) is safe here.
-            const auto id = static_cast<polish::GroupId>(wParam);
-            // Erase the ring *before* the chrome: the ring is owned by
-            // the chrome window (see AltTabHighlightBorder's `owner`),
-            // so destroying the chrome first would destroy the ring
-            // along with it as a side effect (harmless -- the ring's own
-            // destructor guards with IsWindow -- but erasing our side
-            // first is the more predictable order).
-            g_groupChromeWindows.erase(id);
+        case kStackMinimizeMessage:
+            OnMemberMinimizeChanged(reinterpret_cast<HWND>(wParam));
+            return 0;
+
+        case WM_COPYDATA: {
+            // A test-only way to drive Polish from a script: create a stack
+            // from a list of windows without going through the picker
+            // dialog, which has no automation surface. Off unless the
+            // environment variable POLISH_TEST_HOOKS is set when Polish
+            // starts, so it is inert in normal use.
+            //
+            // dwData 'STAK': lpData is an array of 64-bit window handles.
+            static const bool testHooks = GetEnvironmentVariableW(L"POLISH_TEST_HOOKS", nullptr, 0) > 0;
+            const auto* data = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+            if (testHooks && data != nullptr && data->dwData == 0x4B415453) {  // "STAK"
+                std::vector<HWND> windows;
+                const auto* handles = static_cast<const unsigned long long*>(data->lpData);
+                for (DWORD i = 0; i < data->cbData / sizeof(unsigned long long); ++i) {
+                    windows.push_back(reinterpret_cast<HWND>(static_cast<UINT_PTR>(handles[i])));
+                }
+                const polish::StackId id = CreateStackFromWindows(windows, L"Test stack");
+                return static_cast<LRESULT>(id);
+            }
+            return 0;
+        }
+
+        case kCloseStackMessage: {
+            // Deferred from DissolveStack -- see its own comment for why
+            // the strip cannot be destroyed synchronously from inside the
+            // handler of one of its own mouse events.
+            const auto id = static_cast<polish::StackId>(wParam);
+            if (g_stackMenuOpen) {
+                // A nested menu/picker loop is dispatching this while the
+                // strip's own handler is still running: see g_stackMenuOpen.
+                g_parkedStackCloses.push_back(id);
+                return 0;
+            }
+            g_stackStrips.erase(id);
+            g_stackManager.RemoveStack(id);
             return 0;
         }
 
@@ -7029,7 +7245,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             RemoveClipboardFormatListener(hwnd);
             KillTimer(hwnd, kBullseyeFrameTimerId);
             KillTimer(hwnd, kMoveModeDimTimerId);
-            UnregisterHotKey(hwnd, kNewGroupHotkeyId);
+            UnregisterHotKey(hwnd, kNewStackHotkeyId);
             UnregisterHotKey(hwnd, kArrangeTwoWayHotkeyId);
             UnregisterHotKey(hwnd, kArrangeThreeWayHotkeyId);
             UnregisterHotKey(hwnd, kArrangeFourWayHotkeyId);
@@ -7071,23 +7287,10 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             g_altTabOverlays.clear();
             g_activeWindowHalo.reset();
             g_bullseye.reset();
-            // Before g_groupChromeWindows.clear() below -- each ring is
-            // owned by its group's chrome (see AltTabHighlightBorder's
-            // `owner`), so clearing this first is the same predictable-
-            // order reasoning as kCloseGroupMessage's own erase order.
-            // Every remaining group's members must be released back to
-            // top-level *before* their chrome windows are destroyed
-            // below -- unlike a single group's own WM_CLOSE path
-            // (GroupChromeWindow::SetOnClosing/CloseGroup), destroying
-            // this message window directly never sends WM_CLOSE to any
-            // chrome at all, so nothing else does this for app exit.
-            // Skipping it would destroy every still-grouped real window
-            // (Outlook, VS Code, etc.) along with its chrome.
-            for (const polish::GroupState& group : g_groupManager.Groups()) {
-                g_groupManager.ReleaseGroup(group);
-            }
-            g_groupChromeWindows.clear();
-            g_groupTabThumbnail.reset();
+            // Strips are destroyed with the map. Members are ordinary windows
+            // and are left exactly where they are -- there is nothing to
+            // release, which is the point of no longer reparenting them.
+            g_stackStrips.clear();
             PostQuitMessage(0);
             return 0;
 
@@ -7215,15 +7418,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     RegisterArrangeHotkeysFromSettings();
 
-    if (!RegisterGroupHotkeyFromSettings()) {
+    if (!RegisterStackHotkeyFromSettings()) {
         polish::LogDebug(std::format(
             L"[Polish] WARNING: failed to register the {} hotkey (already in use by something else on this "
-            L"PC?). GetLastError={}. Use the tray menu's \"Change Group Hotkey...\" to pick a different one.",
-            FormatHotkey(g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey), GetLastError()));
+            L"PC?). GetLastError={}. Use the tray menu's \"Change Stack Hotkey...\" to pick a different one.",
+            FormatHotkey(g_settings.stackHotkeyModifiers, g_settings.stackHotkeyVirtualKey), GetLastError()));
     } else {
         polish::LogDebug(std::format(
-            L"[Polish] {} (New Group) hotkey registered successfully",
-            FormatHotkey(g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey)));
+            L"[Polish] {} (New Stack) hotkey registered successfully",
+            FormatHotkey(g_settings.stackHotkeyModifiers, g_settings.stackHotkeyVirtualKey)));
     }
 
     // Started before the hook: AltTabEligibility consults it synchronously

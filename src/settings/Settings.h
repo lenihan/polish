@@ -39,7 +39,7 @@ struct Settings {
     UINT moveModeSnapThresholdPx = 12;
 
     // The "Tile 2-way", "Tile 3-way" and "Tile 4-way" global hotkeys, in
-    // the same RegisterHotKey form as the group one below. Stored rather
+    // the same RegisterHotKey form as the stack one below. Stored rather
     // than fixed for the reason that one documents: a combination can
     // already be claimed by something else on a given machine, which was
     // confirmed happening here. No picker dialog for these yet -- change
@@ -47,7 +47,7 @@ struct Settings {
     //
     // The digit matches the number of windows, which makes three hotkeys
     // as easy to remember as one. Ctrl+Alt rather than Win+Alt, which
-    // would have matched the group hotkey below: every Win-based pair
+    // would have matched the stack hotkey below: every Win-based pair
     // tried had at least one half already claimed on the dev machine
     // (Win+Alt+T, Win+Shift+T, Win+Shift+C and Win+Ctrl+C were all
     // taken), and a pair that does not share its modifiers is worse than
@@ -65,14 +65,20 @@ struct Settings {
     UINT arrangeFourWayHotkeyModifiers = MOD_CONTROL | MOD_ALT;
     UINT arrangeFourWayHotkeyVirtualKey = '4';
 
-    // The "New Group" global hotkey -- RegisterHotKey's own modifier
+    // The "New Stack" global hotkey -- RegisterHotKey's own modifier
     // flags (MOD_ALT/MOD_CONTROL/MOD_SHIFT/MOD_WIN, OR'd together) and
-    // a single virtual-key code. Default Win+Alt+G. User-configurable
-    // (see GroupHotkeyDialog) because a machine can already have that
-    // combination claimed by something else -- confirmed happening on
-    // the dev machine itself.
-    UINT groupHotkeyModifiers = MOD_WIN | MOD_ALT;
-    UINT groupHotkeyVirtualKey = 'G';
+    // a single virtual-key code. Default Ctrl+Alt+1: the tiling commands are
+    // Ctrl+Alt+2/3/4, so the whole family sits together, and the digit is
+    // the number you would tile by -- stacks are the "one place, many
+    // windows" end of it. User-configurable (see StackHotkeyDialog) because
+    // a machine can already have a combination claimed by something else.
+    //
+    // It used to be Win+Alt+G, which was already claimed on the dev machine
+    // (RegisterHotKey failed with error 1409), so the shipped default never
+    // worked there. LoadSettings treats a stored Win+Alt+G as "never
+    // changed" and moves it to the new default; see there.
+    UINT stackHotkeyModifiers = MOD_CONTROL | MOD_ALT;
+    UINT stackHotkeyVirtualKey = '1';
 };
 
 Settings LoadSettings();

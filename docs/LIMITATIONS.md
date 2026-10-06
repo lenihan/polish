@@ -49,27 +49,56 @@ gets a full pass in Phase 3; today it records what's already known.
    still shows checked even though Windows won't actually run Polish at
    login.
 
-7. **A UWP/Store app window (Calculator, Settings, Photos, ...) can never
-   join a group** — confirmed live, `SetParent` fails outright with
-   `ERROR_INVALID_PARAMETER` for the `ApplicationFrameWindow` class every
-   time, mixed-DPI hosting opt-in or not. Rather than attempt it and fail
-   silently, such a window is refused up front: the group picker lists it
-   greyed out (`WindowFilters::IsUnreparentableWindow`), with a tooltip
-   explaining why, and its Add button/click/double-click/keyboard-add are
-   all disabled. `GroupManager::ApplyLayout` also drops one defensively if
-   it ever ends up a member some other way (e.g. a window that changes
-   class after joining), the same path used for any member that turns out
-   to be unreparentable.
+7. **Stacks are ordinary windows sharing a rectangle, not a container, and
+   that has consequences Polish cannot hide.**
 
-   An earlier version of Polish instead let such a window join as a
-   top-level "attached" member, hand-driving its position, Z-order,
-   minimize/restore and candidate filtering. That approach was abandoned:
-   its taskbar button could not be hidden by any mechanism tried
-   (`WS_EX_TOOLWINDOW`, `ITaskbarList::DeleteTab`,
-   `IApplicationView::SetShowInSwitchers` all reported success and did
-   nothing — an OS-level restriction, not a Polish bug), and there was an
-   unresolved sizing glitch switching Tile/Stack alignment with such a
-   member.
+   - **The stack's own taskbar button is a stand-in.** It is a 1px
+     off-screen window with its own AppUserModelID, so its hover thumbnail
+     is blank and Windows labels it "polish.exe" rather than the stack name
+     (the name shows in the title bar and in Polish's Alt+Tab). Closing it
+     from the taskbar dissolves the stack and leaves the windows alone.
+   - **The real taskbar and native Alt+Tab still list every member.**
+     Polish's own switcher folds a stack down to one entry (named for the
+     stack, with its member count), but it does not control the taskbar or
+     the native list, so the two disagree. Accepted: the only way to hide a
+     window from them is to stop it being a top-level window, which is
+     exactly what the old design did and what did not work.
+   - **Nothing keeps a stack's members together in Z-order.** Members used
+     to be children of a container, so they came forward as one. Now only
+     the active member is raised; the others sit behind it in the same
+     rect, which looks the same as tabs, but an unrelated window can end up
+     *between* two members. The obvious fix, raising every member whenever
+     one is, does not work: a background process cannot reliably raise
+     another process's window (`HWND_TOP` reports success and does
+     nothing).
+   - **The tab strip is only shown while one of its stack's members is the
+     foreground window** (or while a window is being dragged toward one).
+     It is topmost, and a topmost strip floating over unrelated apps while
+     its stack is buried looks broken. The way back to a hidden stack is
+     the ordinary one: Alt+Tab or the taskbar onto any member.
+   - **An elevated window cannot join a stack.** UIPI makes `SetWindowPos`
+     a silent no-op against it, so it would sit outside its stack forever;
+     the picker leaves it out and dragging one onto a strip does nothing.
+   - **A window with a large minimum size grows the whole stack.** Windows
+     refuse to go below their own minimum, so the stack rect is enlarged
+     once, up front, to fit the largest minimum among its members.
+   - **Mixed-DPI monitors are untested for stacks.** Dragging a stack across
+     a DPI boundary delivers `WM_DPICHANGED` to each member and the strip
+     independently; the strip ignores its own suggested rect and re-derives
+     from the stack rect, but this has not been tried on real mixed-DPI
+     hardware.
+   - **The strip has no hover tooltips or previews.** Long titles are
+     truncated with an ellipsis. The old design's hover thumbnails relied on
+     a screenshot pipeline that only existed to work around members being
+     child windows; showing a live preview of a top-level member with
+     `DwmRegisterThumbnail` is possible and is in the backlog.
+
+   An earlier design reparented members into a container window. That is
+   gone: many windows refuse `SetParent` outright (a UWP frame fails with
+   `ERROR_INVALID_PARAMETER` every time), and the ones that accept it needed
+   resize-band overlays and a screenshot pipeline to paper over being a
+   child. UWP windows (Calculator, Settings, Photos) can now be stacked like
+   any other.
 
 8. **The active-window halo (`ActiveWindowHalo`) sits in the normal
    (`HWND_TOP`) Z-order band, not `WS_EX_TOPMOST`, so any always-on-top

@@ -12,7 +12,7 @@ namespace polish {
 // actually activated; the brief topmost pulse does. First proven by
 // Alt+Tab's ApplyAltTabDimming (src/main.cpp) for bringing the
 // highlighted candidate to front over other candidates/dim overlays;
-// reused here (M4) for a group's active member. Returns false if the
+// reused here (M4) for a stack's active member. Returns false if the
 // initial promote failed (most likely UIPI blocking a more-privileged
 // target window -- see docs/LIMITATIONS.md #1), in which case the
 // demote is skipped since there'd be nothing to undo.

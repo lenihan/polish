@@ -127,7 +127,7 @@ AltTabHighlightBorder::AltTabHighlightBorder(HINSTANCE instance, bool alwaysOnTo
 
 AltTabHighlightBorder::~AltTabHighlightBorder() {
     // An owned window can already be gone by the time this destructor
-    // runs -- if `owner` (the group's chrome) was destroyed first,
+    // runs -- if `owner` was destroyed first,
     // Windows destroys this window along with it (see the constructor's
     // `owner` comment), so window_ may be a stale, no-longer-valid
     // handle here. DestroyWindow on an invalid handle is harmless

@@ -1,4 +1,4 @@
-#include "windowtracking/GroupState.h"
+#include "windowtracking/StackState.h"
 
 #include <doctest/doctest.h>
 
@@ -10,22 +10,22 @@ namespace {
 HWND AsHwnd(uintptr_t value) { return reinterpret_cast<HWND>(value); }
 }  // namespace
 
-TEST_CASE("GroupState: new group has an id and no members") {
-    GroupState state(42);
+TEST_CASE("StackState: new stack has an id and no members") {
+    StackState state(42);
     CHECK(state.Id() == 42);
     CHECK(state.MemberCount() == 0);
     CHECK(state.ActiveIndex() == std::nullopt);
     CHECK(state.ActiveWindow() == std::nullopt);
 }
 
-TEST_CASE("GroupState: new group defaults to Horizontal alignment and an auto-generated name") {
-    GroupState state(42);
-    CHECK(state.Alignment() == GroupAlignment::Horizontal);
-    CHECK(state.Name() == L"Group 42");
+TEST_CASE("StackState: new stack defaults to Horizontal alignment and an auto-generated name") {
+    StackState state(42);
+    CHECK(state.Alignment() == StackAlignment::Horizontal);
+    CHECK(state.Name() == L"Stack 42");
 }
 
-TEST_CASE("GroupState: AddWindow appends and the first window becomes active") {
-    GroupState state(1);
+TEST_CASE("StackState: AddWindow appends and the first window becomes active") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     CHECK(state.MemberCount() == 1);
     CHECK(state.Contains(AsHwnd(1)));
@@ -33,8 +33,8 @@ TEST_CASE("GroupState: AddWindow appends and the first window becomes active") {
     CHECK(state.ActiveWindow() == AsHwnd(1));
 }
 
-TEST_CASE("GroupState: AddWindow of a second window doesn't change which is active") {
-    GroupState state(1);
+TEST_CASE("StackState: AddWindow of a second window doesn't change which is active") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     CHECK(state.MemberCount() == 2);
@@ -42,16 +42,16 @@ TEST_CASE("GroupState: AddWindow of a second window doesn't change which is acti
     CHECK(state.ActiveWindow() == AsHwnd(1));
 }
 
-TEST_CASE("GroupState: AddWindow of an already-present window is a no-op") {
-    GroupState state(1);
+TEST_CASE("StackState: AddWindow of an already-present window is a no-op") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.AddWindow(AsHwnd(1));  // already present
     CHECK(state.MemberCount() == 2);
 }
 
-TEST_CASE("GroupState: SetActiveIndex changes the active member") {
-    GroupState state(1);
+TEST_CASE("StackState: SetActiveIndex changes the active member") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.SetActiveIndex(1);
@@ -59,15 +59,15 @@ TEST_CASE("GroupState: SetActiveIndex changes the active member") {
     CHECK(state.ActiveWindow() == AsHwnd(2));
 }
 
-TEST_CASE("GroupState: SetActiveIndex out of range is a no-op") {
-    GroupState state(1);
+TEST_CASE("StackState: SetActiveIndex out of range is a no-op") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.SetActiveIndex(5);
     CHECK(state.ActiveIndex() == 0);
 }
 
-TEST_CASE("GroupState: SetActiveWindow finds and activates the matching member") {
-    GroupState state(1);
+TEST_CASE("StackState: SetActiveWindow finds and activates the matching member") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.AddWindow(AsHwnd(3));
@@ -76,15 +76,15 @@ TEST_CASE("GroupState: SetActiveWindow finds and activates the matching member")
     CHECK(state.ActiveWindow() == AsHwnd(3));
 }
 
-TEST_CASE("GroupState: SetActiveWindow of a non-member is a no-op") {
-    GroupState state(1);
+TEST_CASE("StackState: SetActiveWindow of a non-member is a no-op") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.SetActiveWindow(AsHwnd(99));
     CHECK(state.ActiveIndex() == 0);
 }
 
-TEST_CASE("GroupState: Remove of a non-active member shifts a later active index down") {
-    GroupState state(1);
+TEST_CASE("StackState: Remove of a non-active member shifts a later active index down") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.AddWindow(AsHwnd(3));
@@ -95,8 +95,8 @@ TEST_CASE("GroupState: Remove of a non-active member shifts a later active index
     CHECK(state.ActiveWindow() == AsHwnd(3));
 }
 
-TEST_CASE("GroupState: Remove of a non-active member after the active index doesn't move it") {
-    GroupState state(1);
+TEST_CASE("StackState: Remove of a non-active member after the active index doesn't move it") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.AddWindow(AsHwnd(3));
@@ -106,8 +106,8 @@ TEST_CASE("GroupState: Remove of a non-active member after the active index does
     CHECK(state.ActiveWindow() == AsHwnd(1));
 }
 
-TEST_CASE("GroupState: removing the active member (not last) promotes whatever shifted into its slot") {
-    GroupState state(1);
+TEST_CASE("StackState: removing the active member (not last) promotes whatever shifted into its slot") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.AddWindow(AsHwnd(3));
@@ -118,8 +118,8 @@ TEST_CASE("GroupState: removing the active member (not last) promotes whatever s
     CHECK(state.ActiveWindow() == AsHwnd(3));
 }
 
-TEST_CASE("GroupState: removing the active member when it's last falls back to the new last member") {
-    GroupState state(1);
+TEST_CASE("StackState: removing the active member when it's last falls back to the new last member") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.AddWindow(AsHwnd(3));
@@ -130,8 +130,8 @@ TEST_CASE("GroupState: removing the active member when it's last falls back to t
     CHECK(state.ActiveWindow() == AsHwnd(2));
 }
 
-TEST_CASE("GroupState: removing the only member leaves no active member") {
-    GroupState state(1);
+TEST_CASE("StackState: removing the only member leaves no active member") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.Remove(AsHwnd(1));
     CHECK(state.MemberCount() == 0);
@@ -139,31 +139,31 @@ TEST_CASE("GroupState: removing the only member leaves no active member") {
     CHECK(state.ActiveWindow() == std::nullopt);
 }
 
-TEST_CASE("GroupState: Remove of a window not in the group is a no-op") {
-    GroupState state(1);
+TEST_CASE("StackState: Remove of a window not in the stack is a no-op") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.Remove(AsHwnd(99));
     CHECK(state.MemberCount() == 1);
     CHECK(state.Contains(AsHwnd(1)));
 }
 
-TEST_CASE("GroupState: SetAlignment changes the alignment without touching membership") {
-    GroupState state(1);
+TEST_CASE("StackState: SetAlignment changes the alignment without touching membership") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
-    state.SetAlignment(GroupAlignment::Vertical);
-    CHECK(state.Alignment() == GroupAlignment::Vertical);
+    state.SetAlignment(StackAlignment::Vertical);
+    CHECK(state.Alignment() == StackAlignment::Vertical);
     CHECK(state.MemberCount() == 1);
     CHECK(state.ActiveWindow() == AsHwnd(1));
 }
 
-TEST_CASE("GroupState: SetName replaces the auto-generated name") {
-    GroupState state(1);
+TEST_CASE("StackState: SetName replaces the auto-generated name") {
+    StackState state(1);
     state.SetName(L"projA");
     CHECK(state.Name() == L"projA");
 }
 
-TEST_CASE("GroupState: Reorder moves a member forward, shifting others back") {
-    GroupState state(1);
+TEST_CASE("StackState: Reorder moves a member forward, shifting others back") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.AddWindow(AsHwnd(3));
@@ -174,8 +174,8 @@ TEST_CASE("GroupState: Reorder moves a member forward, shifting others back") {
     CHECK(state.Members()[2].window == AsHwnd(1));
 }
 
-TEST_CASE("GroupState: Reorder moves a member backward, shifting others forward") {
-    GroupState state(1);
+TEST_CASE("StackState: Reorder moves a member backward, shifting others forward") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.AddWindow(AsHwnd(3));
@@ -186,8 +186,8 @@ TEST_CASE("GroupState: Reorder moves a member backward, shifting others forward"
     CHECK(state.Members()[2].window == AsHwnd(2));
 }
 
-TEST_CASE("GroupState: Reorder keeps the active member correctly tracked when it's the one moved") {
-    GroupState state(1);
+TEST_CASE("StackState: Reorder keeps the active member correctly tracked when it's the one moved") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.AddWindow(AsHwnd(3));
@@ -197,8 +197,8 @@ TEST_CASE("GroupState: Reorder keeps the active member correctly tracked when it
     CHECK(state.ActiveWindow() == AsHwnd(1));
 }
 
-TEST_CASE("GroupState: Reorder keeps the active member correctly tracked when a different member moves") {
-    GroupState state(1);
+TEST_CASE("StackState: Reorder keeps the active member correctly tracked when a different member moves") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.AddWindow(AsHwnd(3));
@@ -208,8 +208,8 @@ TEST_CASE("GroupState: Reorder keeps the active member correctly tracked when a 
     CHECK(state.ActiveWindow() == AsHwnd(2));
 }
 
-TEST_CASE("GroupState: Reorder with equal indices is a no-op") {
-    GroupState state(1);
+TEST_CASE("StackState: Reorder with equal indices is a no-op") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.Reorder(0, 0);
@@ -217,8 +217,8 @@ TEST_CASE("GroupState: Reorder with equal indices is a no-op") {
     CHECK(state.Members()[1].window == AsHwnd(2));
 }
 
-TEST_CASE("GroupState: Reorder with an out-of-range index is a no-op") {
-    GroupState state(1);
+TEST_CASE("StackState: Reorder with an out-of-range index is a no-op") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.Reorder(0, 5);
@@ -226,8 +226,8 @@ TEST_CASE("GroupState: Reorder with an out-of-range index is a no-op") {
     CHECK(state.Members()[1].window == AsHwnd(2));
 }
 
-TEST_CASE("GroupState: SetMembers replaces membership wholesale, dropping and adding as needed") {
-    GroupState state(1);
+TEST_CASE("StackState: SetMembers replaces membership wholesale, dropping and adding as needed") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.SetMembers({AsHwnd(2), AsHwnd(3)});  // 1 dropped, 2 kept, 3 added
@@ -236,8 +236,8 @@ TEST_CASE("GroupState: SetMembers replaces membership wholesale, dropping and ad
     CHECK(state.Members()[1].window == AsHwnd(3));
 }
 
-TEST_CASE("GroupState: SetMembers keeps the previously active member active by identity") {
-    GroupState state(1);
+TEST_CASE("StackState: SetMembers keeps the previously active member active by identity") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.SetActiveIndex(1);  // AsHwnd(2) is active
@@ -246,8 +246,8 @@ TEST_CASE("GroupState: SetMembers keeps the previously active member active by i
     CHECK(state.ActiveWindow() == AsHwnd(2));
 }
 
-TEST_CASE("GroupState: SetMembers falls back to the first member when the active one is dropped") {
-    GroupState state(1);
+TEST_CASE("StackState: SetMembers falls back to the first member when the active one is dropped") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.AddWindow(AsHwnd(2));
     state.SetActiveIndex(1);  // AsHwnd(2) is active
@@ -256,11 +256,39 @@ TEST_CASE("GroupState: SetMembers falls back to the first member when the active
     CHECK(state.ActiveWindow() == AsHwnd(3));
 }
 
-TEST_CASE("GroupState: SetMembers with an empty list clears membership and the active member") {
-    GroupState state(1);
+TEST_CASE("StackState: SetMembers with an empty list clears membership and the active member") {
+    StackState state(1);
     state.AddWindow(AsHwnd(1));
     state.SetMembers({});
     CHECK(state.MemberCount() == 0);
     CHECK(state.ActiveIndex() == std::nullopt);
     CHECK(state.ActiveWindow() == std::nullopt);
+}
+
+TEST_CASE("StackState: a new stack has no rect until it is placed") {
+    StackState state(1);
+    CHECK_FALSE(state.HasRect());
+    state.SetRect(RECT{100, 200, 1300, 900});
+    CHECK(state.HasRect());
+    CHECK(state.Rect().left == 100);
+    CHECK(state.Rect().bottom == 900);
+}
+
+TEST_CASE("StackState: Offset slides the rect without resizing it") {
+    StackState state(1);
+    state.SetRect(RECT{100, 200, 1300, 900});
+    state.Offset(50, -20);
+    CHECK(state.Rect().left == 150);
+    CHECK(state.Rect().top == 180);
+    CHECK(state.Rect().right - state.Rect().left == 1200);
+    CHECK(state.Rect().bottom - state.Rect().top == 700);
+}
+
+TEST_CASE("StackState: the rect is independent of membership") {
+    StackState state(1);
+    state.SetRect(RECT{0, 0, 800, 600});
+    state.AddWindow(AsHwnd(1));
+    state.AddWindow(AsHwnd(2));
+    state.Remove(AsHwnd(1));
+    CHECK(state.Rect().right == 800);
 }

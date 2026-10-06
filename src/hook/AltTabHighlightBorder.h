@@ -30,7 +30,7 @@ public:
     // needs to stay above literally every other window for the life of
     // the switcher session, matching Windows' own Alt+Tab -- this is
     // what WS_EX_TOPMOST is for. Pass false for any other reuse of this
-    // class (e.g. a group's active-tile ring), where the highlight
+    // class (e.g. a stack's active-tile ring), where the highlight
     // should behave like an ordinary window: covered by whatever the
     // user brings to the front, not floating above unrelated apps
     // forever.
@@ -38,7 +38,7 @@ public:
     // `owner`: passed straight through as CreateWindowExW's hWndParent
     // -- for a WS_POPUP window that makes this an *owned* window rather
     // than an unrelated top-level one, and Windows itself then maintains
-    // everything a group's per-tile ring needs for free: always above
+    // everything a stack's per-tile ring needs for free: always above
     // its owner in Z order (no code here has to re-assert that -- a real,
     // confirmed bug in an earlier unowned version, where activating the
     // owner buried the ring behind it with nothing to bring it back),
@@ -76,7 +76,7 @@ private:
     // -- when a new call's target is the same size, ShowAroundTarget
     // skips the DIB/GDI+/premultiply work entirely and just moves the
     // existing content, so a target that's only moving (e.g. the whole
-    // group being dragged by its title bar, which re-renders the ring on
+    // stack being dragged by its title bar, which re-renders the ring on
     // every WM_MOVE) stays cheap.
     SIZE lastRenderedSize_{-1, -1};
 };

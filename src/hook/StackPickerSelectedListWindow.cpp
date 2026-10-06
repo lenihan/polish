@@ -1,4 +1,4 @@
-#include "hook/GroupPickerSelectedListWindow.h"
+#include "hook/StackPickerSelectedListWindow.h"
 
 #include <commctrl.h>
 #include <windowsx.h>
@@ -14,10 +14,10 @@ namespace polish {
 
 namespace {
 
-constexpr wchar_t kWindowClassName[] = L"PolishGroupPickerSelectedListWindow";
+constexpr wchar_t kWindowClassName[] = L"PolishStackPickerSelectedListWindow";
 
 // Logical (96 DPI) px -- same row-height/padding/icon/button values
-// GroupPickerListWindow uses for its own rows, so a row looks identical
+// StackPickerListWindow uses for its own rows, so a row looks identical
 // whether it's currently in this pane or the "Available windows" one.
 constexpr int kRowHeight = 40;
 constexpr int kPaddingX = 14;
@@ -33,7 +33,7 @@ constexpr int kGripLineWidth = 14;
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
-// See GroupPickerListWindow's identical helper -- distinguishes a
+// See StackPickerListWindow's identical helper -- distinguishes a
 // selected row's fill from a merely-hovered one.
 COLORREF BlendColor(COLORREF base, COLORREF tint, double amount) {
     const int r = static_cast<int>(GetRValue(base) * (1 - amount) + GetRValue(tint) * amount);
@@ -42,7 +42,7 @@ COLORREF BlendColor(COLORREF base, COLORREF tint, double amount) {
     return RGB(std::clamp(r, 0, 255), std::clamp(g, 0, 255), std::clamp(b, 0, 255));
 }
 
-// See GroupPickerListWindow's identical helper -- powers the title
+// See StackPickerListWindow's identical helper -- powers the title
 // tooltip UpdateTooltip shows only when a row's own text is actually
 // clipped by DT_END_ELLIPSIS.
 bool IsTitleTruncated(HWND window, const std::wstring& title, int availableWidth, UINT dpi) {
@@ -85,13 +85,13 @@ RECT ComputeRemoveButtonRect(const RECT& rowRect, UINT dpi) {
 
 }  // namespace
 
-GroupPickerSelectedListWindow::GroupPickerSelectedListWindow(HINSTANCE instance) : instance_(instance) {
+StackPickerSelectedListWindow::StackPickerSelectedListWindow(HINSTANCE instance) : instance_(instance) {
     static bool commonControlsInitialized = false;
     if (!commonControlsInitialized) {
         // ICC_TAB_CLASSES, not the more obviously-named ICC_*TOOLTIP*
-        // flag -- comctl32 groups the tooltip common control in with tab
-        // controls historically; see GroupPickerListWindow's own
-        // constructor (and GroupChromeWindow's before it) for the same
+        // flag -- comctl32 stacks the tooltip common control in with tab
+        // controls historically; see StackPickerListWindow's own
+        // constructor (and StackStripWindow's before it) for the same
         // call -- an independent copy per class, not shared state,
         // since calling this more than once is harmless.
         INITCOMMONCONTROLSEX icc{};
@@ -102,13 +102,13 @@ GroupPickerSelectedListWindow::GroupPickerSelectedListWindow(HINSTANCE instance)
     }
 }
 
-GroupPickerSelectedListWindow::~GroupPickerSelectedListWindow() {
+StackPickerSelectedListWindow::~StackPickerSelectedListWindow() {
     if (window_ != nullptr) {
         DestroyWindow(window_);
     }
 }
 
-HWND GroupPickerSelectedListWindow::Create(HWND parent) {
+HWND StackPickerSelectedListWindow::Create(HWND parent) {
     static bool classRegistered = false;
     if (!classRegistered) {
         WNDCLASSEXW windowClass{};
@@ -128,8 +128,8 @@ HWND GroupPickerSelectedListWindow::Create(HWND parent) {
 
     // One manually-tracked tool covering both Remove and the grip --
     // text and position are set fresh in UpdateTooltip on every hover
-    // change, same shape GroupPickerListWindow's own single-button
-    // tooltip uses (see GroupChromeWindow::UpdateTooltip for the
+    // change, same shape StackPickerListWindow's own single-button
+    // tooltip uses (see AltTabListWindow's tooltip handling for the
     // original TTF_TRACK-based technique this mirrors).
     tooltipWindow_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
                                       WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP, CW_USEDEFAULT, CW_USEDEFAULT,
@@ -147,15 +147,15 @@ HWND GroupPickerSelectedListWindow::Create(HWND parent) {
     return window_;
 }
 
-LRESULT CALLBACK GroupPickerSelectedListWindow::WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam,
+LRESULT CALLBACK StackPickerSelectedListWindow::WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam,
                                                                  LPARAM lParam) {
-    GroupPickerSelectedListWindow* self = nullptr;
+    StackPickerSelectedListWindow* self = nullptr;
     if (message == WM_NCCREATE) {
         auto* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        self = static_cast<GroupPickerSelectedListWindow*>(createStruct->lpCreateParams);
+        self = static_cast<StackPickerSelectedListWindow*>(createStruct->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
     } else {
-        self = reinterpret_cast<GroupPickerSelectedListWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        self = reinterpret_cast<StackPickerSelectedListWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     }
     if (self != nullptr) {
         return self->HandleMessage(hwnd, message, wParam, lParam);
@@ -163,15 +163,15 @@ LRESULT CALLBACK GroupPickerSelectedListWindow::WindowProcThunk(HWND hwnd, UINT 
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
-LRESULT GroupPickerSelectedListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+LRESULT StackPickerSelectedListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_ERASEBKGND:
             return 1;
 
         case WM_NCDESTROY:
-            // See GroupPickerListWindow's identical handler for why this
+            // See StackPickerListWindow's identical handler for why this
             // matters: this object (and this HWND slot) is reused across
-            // multiple GroupPickerWindow::ShowModal calls.
+            // multiple StackPickerWindow::ShowModal calls.
             window_ = nullptr;
             return DefWindowProcW(hwnd, message, wParam, lParam);
 
@@ -204,7 +204,7 @@ LRESULT GroupPickerSelectedListWindow::HandleMessage(HWND hwnd, UINT message, WP
 
         case WM_SETFOCUS:
             hasFocus_ = true;
-            // See GroupPickerListWindow's identical handler for why an
+            // See StackPickerListWindow's identical handler for why an
             // otherwise-unselected list selects its first row here.
             if (!selectedIndex_.has_value() && !rows_.empty() && onRowSelected_) {
                 onRowSelected_(rows_[0].hwnd);
@@ -222,7 +222,7 @@ LRESULT GroupPickerSelectedListWindow::HandleMessage(HWND hwnd, UINT message, WP
             // keyboard equivalent of clicking the row's own Remove
             // button. Space does the same, matching the sibling list's
             // own Space (the conventional "act on the focused row" key).
-            // Right does nothing here: a Group member can only move
+            // Right does nothing here: a Stack member can only move
             // left, back into Open windows (see the sibling list's own
             // VK_RIGHT case for the other half).
             if (wParam == VK_LEFT || wParam == VK_SPACE) {
@@ -244,7 +244,7 @@ LRESULT GroupPickerSelectedListWindow::HandleMessage(HWND hwnd, UINT message, WP
             // gesture in this dialog with no keyboard path at all. Alt
             // as the modifier, rather than overloading bare arrows,
             // keeps "move the selection down" from silently rearranging
-            // the group -- the exact ambiguity the old comment here
+            // the stack -- the exact ambiguity the old comment here
             // warned about.
             if ((wParam == VK_UP || wParam == VK_DOWN) && (GetKeyState(VK_MENU) & 0x8000) != 0) {
                 if (!selectedIndex_.has_value()) {
@@ -259,12 +259,12 @@ LRESULT GroupPickerSelectedListWindow::HandleMessage(HWND hwnd, UINT message, WP
                 std::swap(rows_[current], rows_[target]);
                 selectedIndex_ = target;
                 // Same "report the whole new order upward" contract
-                // EndDrag uses -- GroupPickerWindow owns selectedOrder_
+                // EndDrag uses -- StackPickerWindow owns selectedOrder_
                 // and pushes the result back down.
                 if (onReordered_) {
                     std::vector<HWND> order;
                     order.reserve(rows_.size());
-                    for (const GroupPickerSelectedRow& row : rows_) {
+                    for (const StackPickerSelectedRow& row : rows_) {
                         order.push_back(row.hwnd);
                     }
                     onReordered_(std::move(order));
@@ -312,7 +312,7 @@ LRESULT GroupPickerSelectedListWindow::HandleMessage(HWND hwnd, UINT message, WP
         }
 
         case WM_LBUTTONDOWN: {
-            // See GroupPickerListWindow's identical call: keep keyboard
+            // See StackPickerListWindow's identical call: keep keyboard
             // focus with whichever panel the mouse last acted on.
             SetFocus(hwnd);
             POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -321,7 +321,7 @@ LRESULT GroupPickerSelectedListWindow::HandleMessage(HWND hwnd, UINT message, WP
             const RowLayout layout = ComputeLayout(dpi);
             // Only the selected-or-hovered row(s) ever draw Remove/the
             // grip (see Paint) -- mirror that same set here, same shape
-            // GroupPickerListWindow's own Add-button hit-test uses.
+            // StackPickerListWindow's own Add-button hit-test uses.
             for (std::optional<size_t> rowIndex : {selectedIndex_, hoveredIndex_}) {
                 if (!rowIndex.has_value() || *rowIndex >= layout.rowRects.size() || *rowIndex >= rows_.size()) {
                     continue;
@@ -356,7 +356,7 @@ LRESULT GroupPickerSelectedListWindow::HandleMessage(HWND hwnd, UINT message, WP
         }
 
         case WM_LBUTTONDBLCLK: {
-            // See GroupPickerListWindow's identical handler: a quick way
+            // See StackPickerListWindow's identical handler: a quick way
             // to move a window back out without needing to land the
             // first click precisely on the small Remove button (requires
             // CS_DBLCLKS on this class, see the constructor). Anywhere
@@ -474,7 +474,7 @@ LRESULT GroupPickerSelectedListWindow::HandleMessage(HWND hwnd, UINT message, WP
     }
 }
 
-GroupPickerSelectedListWindow::RowLayout GroupPickerSelectedListWindow::ComputeLayout(UINT dpi) const {
+StackPickerSelectedListWindow::RowLayout StackPickerSelectedListWindow::ComputeLayout(UINT dpi) const {
     RowLayout layout;
     RECT clientRect{};
     if (window_ != nullptr) {
@@ -492,7 +492,7 @@ GroupPickerSelectedListWindow::RowLayout GroupPickerSelectedListWindow::ComputeL
     return layout;
 }
 
-void GroupPickerSelectedListWindow::Paint(HDC hdc, const RECT& clientRect) const {
+void StackPickerSelectedListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     const UINT dpi = GetDpiForWindow(window_);
     const bool dark = IsDarkModeEnabled();
     const COLORREF backgroundColor = dark ? RGB(0x2B, 0x2B, 0x2B) : GetSysColor(COLOR_WINDOW);
@@ -503,7 +503,7 @@ void GroupPickerSelectedListWindow::Paint(HDC hdc, const RECT& clientRect) const
     const COLORREF removeGlyphColor = dark ? RGB(0xF0, 0x8C, 0x8C) : RGB(0xC4, 0x3E, 0x3E);
     const COLORREF gripColor = dark ? RGB(0x80, 0x80, 0x80) : RGB(0xA0, 0xA0, 0xA0);
     const COLORREF placeholderColor = dark ? RGB(0x80, 0x80, 0x80) : RGB(0x90, 0x90, 0x90);
-    // Distinct from hoverColor -- see GroupPickerListWindow's identical
+    // Distinct from hoverColor -- see StackPickerListWindow's identical
     // reasoning for why selected and merely-hovered need to look different.
     const COLORREF selectedColor = BlendColor(backgroundColor, GetAccentColor(), 0.35);
 
@@ -540,7 +540,7 @@ void GroupPickerSelectedListWindow::Paint(HDC hdc, const RECT& clientRect) const
 
         for (size_t i = 0; i < layout.rowRects.size() && i < rows_.size(); ++i) {
             const RECT& rowRect = layout.rowRects[i];
-            const GroupPickerSelectedRow& row = rows_[i];
+            const StackPickerSelectedRow& row = rows_[i];
             const bool hovered = hoveredIndex_.has_value() && *hoveredIndex_ == i;
             const bool selected = selectedIndex_.has_value() && *selectedIndex_ == i;
             const bool showButtons = selected || hovered;
@@ -583,7 +583,7 @@ void GroupPickerSelectedListWindow::Paint(HDC hdc, const RECT& clientRect) const
             // horizontal lines -- drag from anywhere in this zone to
             // reorder. Both only drawn (and only hit-testable, see
             // WM_LBUTTONDOWN) on the selected-or-hovered row, mirroring
-            // GroupPickerListWindow's own Add button -- the reserved
+            // StackPickerListWindow's own Add button -- the reserved
             // textRect width above stays constant regardless, so text
             // never reflows as these appear/disappear on different rows.
             if (showButtons) {
@@ -629,7 +629,7 @@ void GroupPickerSelectedListWindow::Paint(HDC hdc, const RECT& clientRect) const
     SelectObject(hdc, oldFont);
     DeleteObject(textFont);
 
-    // Accent border while focused -- see GroupPickerListWindow's
+    // Accent border while focused -- see StackPickerListWindow's
     // identical block.
     HPEN borderPen = hasFocus_ ? CreatePen(PS_SOLID, std::max(1, Scale(2, dpi)), GetAccentColor())
                                 : CreatePen(PS_SOLID, 1, borderColor);
@@ -641,10 +641,10 @@ void GroupPickerSelectedListWindow::Paint(HDC hdc, const RECT& clientRect) const
     DeleteObject(borderPen);
 }
 
-// See GroupPickerListWindow::EnsureRowVisible -- identical logic against
+// See StackPickerListWindow::EnsureRowVisible -- identical logic against
 // this class's own rows.
-size_t GroupPickerSelectedListWindow::RowsPerPage() const {
-    // See GroupPickerListWindow::RowsPerPage -- identical contract: one
+size_t StackPickerSelectedListWindow::RowsPerPage() const {
+    // See StackPickerListWindow::RowsPerPage -- identical contract: one
     // viewport's worth of rows for PageUp/PageDown, never 0.
     if (window_ == nullptr) {
         return 1;
@@ -658,7 +658,7 @@ size_t GroupPickerSelectedListWindow::RowsPerPage() const {
     return std::max<size_t>(1, static_cast<size_t>((clientRect.bottom - clientRect.top) / rowHeight));
 }
 
-void GroupPickerSelectedListWindow::EnsureRowVisible(size_t index) {
+void StackPickerSelectedListWindow::EnsureRowVisible(size_t index) {
     if (window_ == nullptr) {
         return;
     }
@@ -693,7 +693,7 @@ void GroupPickerSelectedListWindow::EnsureRowVisible(size_t index) {
     InvalidateRect(window_, nullptr, TRUE);
 }
 
-void GroupPickerSelectedListWindow::UpdateScrollInfo() {
+void StackPickerSelectedListWindow::UpdateScrollInfo() {
     if (window_ == nullptr) {
         return;
     }
@@ -715,7 +715,7 @@ void GroupPickerSelectedListWindow::UpdateScrollInfo() {
     SetScrollInfo(window_, SB_VERT, &si, TRUE);
 }
 
-void GroupPickerSelectedListWindow::SetHoveredIndex(std::optional<size_t> index) {
+void StackPickerSelectedListWindow::SetHoveredIndex(std::optional<size_t> index) {
     if (index.has_value() && *index >= rows_.size()) {
         index = std::nullopt;
     }
@@ -728,13 +728,13 @@ void GroupPickerSelectedListWindow::SetHoveredIndex(std::optional<size_t> index)
     }
 }
 
-void GroupPickerSelectedListWindow::BeginDrag(size_t index) {
+void StackPickerSelectedListWindow::BeginDrag(size_t index) {
     // Pressing the grip selects that row too, same as a plain body click
     // -- otherwise dragging a row that was only *hovered* (not yet
     // selected) would leave whichever row was previously selected still
     // marked selected while a different one is actually being dragged.
     // Reuses the exact same callback a body click already fires;
-    // GroupPickerWindow owns what "selected" means, this just reports
+    // StackPickerWindow owns what "selected" means, this just reports
     // the gesture.
     if (onRowSelected_ && index < rows_.size()) {
         onRowSelected_(rows_[index].hwnd);
@@ -763,7 +763,7 @@ void GroupPickerSelectedListWindow::BeginDrag(size_t index) {
     }
 }
 
-void GroupPickerSelectedListWindow::UpdateDrag(POINT clientPt) {
+void StackPickerSelectedListWindow::UpdateDrag(POINT clientPt) {
     if (!dragging_ || window_ == nullptr) {
         return;
     }
@@ -776,7 +776,7 @@ void GroupPickerSelectedListWindow::UpdateDrag(POINT clientPt) {
         }
         RECT r = layout.rowRects[i];
         if (PtInRect(&r, clientPt)) {
-            GroupPickerSelectedRow moved = rows_[dragIndex_];
+            StackPickerSelectedRow moved = rows_[dragIndex_];
             rows_.erase(rows_.begin() + static_cast<ptrdiff_t>(dragIndex_));
             rows_.insert(rows_.begin() + static_cast<ptrdiff_t>(i), moved);
             // The dragged row is always the selected one (BeginDrag
@@ -798,7 +798,7 @@ void GroupPickerSelectedListWindow::UpdateDrag(POINT clientPt) {
     }
 }
 
-void GroupPickerSelectedListWindow::EndDrag() {
+void StackPickerSelectedListWindow::EndDrag() {
     if (!dragging_) {
         return;
     }
@@ -809,21 +809,21 @@ void GroupPickerSelectedListWindow::EndDrag() {
     if (onReordered_) {
         std::vector<HWND> order;
         order.reserve(rows_.size());
-        for (const GroupPickerSelectedRow& row : rows_) {
+        for (const StackPickerSelectedRow& row : rows_) {
             order.push_back(row.hwnd);
         }
         onReordered_(std::move(order));
     }
 }
 
-void GroupPickerSelectedListWindow::SetSelected(const std::vector<HWND>& order) {
+void StackPickerSelectedListWindow::SetSelected(const std::vector<HWND>& order) {
     rows_.clear();
     rows_.reserve(order.size());
     for (HWND hwnd : order) {
-        rows_.push_back(GroupPickerSelectedRow{hwnd, GetWindowTitle(hwnd), GetWindowIconHandle(hwnd)});
+        rows_.push_back(StackPickerSelectedRow{hwnd, GetWindowTitle(hwnd), GetWindowIconHandle(hwnd)});
     }
     hoveredIndex_.reset();
-    // selectedIndex_ deliberately left untouched here -- GroupPickerWindow
+    // selectedIndex_ deliberately left untouched here -- StackPickerWindow
     // always follows a SetSelected call with SetSelectedHwnd, recomputing
     // it fresh against the new rows_ (see that method and this class's
     // own header comment on why selection isn't decided in here).
@@ -834,7 +834,7 @@ void GroupPickerSelectedListWindow::SetSelected(const std::vector<HWND>& order) 
     }
 }
 
-void GroupPickerSelectedListWindow::SetSelectedHwnd(std::optional<HWND> hwnd) {
+void StackPickerSelectedListWindow::SetSelectedHwnd(std::optional<HWND> hwnd) {
     std::optional<size_t> newIndex;
     if (hwnd.has_value()) {
         for (size_t i = 0; i < rows_.size(); ++i) {
@@ -853,7 +853,7 @@ void GroupPickerSelectedListWindow::SetSelectedHwnd(std::optional<HWND> hwnd) {
     }
 }
 
-void GroupPickerSelectedListWindow::UpdateTooltip() {
+void StackPickerSelectedListWindow::UpdateTooltip() {
     if (tooltipWindow_ == nullptr) {
         return;
     }
@@ -861,7 +861,7 @@ void GroupPickerSelectedListWindow::UpdateTooltip() {
     // Three tiers: Remove and the grip's own tooltips take priority;
     // otherwise, if the hovered row's title doesn't fit its column
     // (DT_END_ELLIPSIS truncated it), show the full title -- see
-    // GroupPickerListWindow::UpdateTooltip's identical reasoning.
+    // StackPickerListWindow::UpdateTooltip's identical reasoning.
     const wchar_t* text = nullptr;
     std::wstring hoveredTitle;
     if (hoveredIndex_.has_value() && window_ != nullptr && *hoveredIndex_ < rows_.size()) {
@@ -876,11 +876,11 @@ void GroupPickerSelectedListWindow::UpdateTooltip() {
             RECT removeRect = ComputeRemoveButtonRect(r, dpi);
             RECT gripRect = ComputeGripRect(r, dpi);
             if (PtInRect(&removeRect, cursor)) {
-                text = L"Remove from group";
+                text = L"Remove from stack";
             } else if (PtInRect(&gripRect, cursor)) {
                 text = L"Drag to reorder";
             } else {
-                const GroupPickerSelectedRow& row = rows_[*hoveredIndex_];
+                const StackPickerSelectedRow& row = rows_[*hoveredIndex_];
                 int x = Scale(kPaddingX, dpi);
                 if (row.icon != nullptr) {
                     x += Scale(kIconSize, dpi) + Scale(kIconTextGap, dpi);
@@ -905,7 +905,7 @@ void GroupPickerSelectedListWindow::UpdateTooltip() {
     }
     // Applied fresh on every show, not just once at creation, so a theme
     // change without restarting Polish still takes effect -- same
-    // reasoning as GroupChromeWindow::UpdateTooltip's own comment.
+    // reasoning as AltTabListWindow's tooltip handling's own comment.
     ApplyDarkModeToTooltip(tooltipWindow_);
     ti.lpszText = const_cast<LPWSTR>(text);
     SendMessageW(tooltipWindow_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));

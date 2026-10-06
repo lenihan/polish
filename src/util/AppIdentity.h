@@ -9,9 +9,9 @@ namespace polish {
 
 // The window class of the frame a packaged/Store app's real window is
 // hosted inside. Shared rather than re-spelled per call site: both
-// WindowFilters::IsUnreparentableWindow (SetParent categorically fails
-// for this class) and ResolveWindowAppIdentity (which must hop to the
-// CoreWindow child to find the app's real process) key off it.
+// WindowFilters (IsCandidateWindow and friends) and ResolveWindowAppIdentity
+// (which must hop to the CoreWindow child to find the app's real process)
+// both key off it.
 inline constexpr wchar_t kApplicationFrameWindowClass[] = L"ApplicationFrameWindow";
 
 // A UWP/Store app's real top-level window is hosted as a child of its

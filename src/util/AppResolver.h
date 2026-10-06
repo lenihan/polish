@@ -9,7 +9,7 @@
 
 namespace polish {
 
-// Resolves the AppUserModelID the *shell itself* groups a window under --
+// Resolves the AppUserModelID the *shell itself* stacks a window under --
 // the same string the taskbar puts in its button's UI Automation
 // AutomationId (which spells it with a literal "Appid: " prefix). Matching
 // on this is what makes "which windows does this taskbar button stand
@@ -59,13 +59,13 @@ public:
     // "2 running windows".
     //
     // IApplicationResolver is undocumented, but it has been present since
-    // Windows 7 and the shell consults it for every taskbar grouping
+    // Windows 7 and the shell consults it for every taskbar stacking
     // decision. The explicit window property is still tried first as a
     // cheap fast path when a window does set one.
     //
     // Deliberately no executable-path fallback. A path could never equal
     // the AUMID a taskbar button reports, so it would not help match a
-    // window to a button -- it would only invent a grouping key of our own
+    // window to a button -- it would only invent a stacking key of our own
     // that disagrees with the shell's.
     std::optional<std::wstring> AppIdForWindow(HWND hwnd) const;
 

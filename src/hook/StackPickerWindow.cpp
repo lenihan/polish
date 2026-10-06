@@ -1,4 +1,4 @@
-#include "hook/GroupPickerWindow.h"
+#include "hook/StackPickerWindow.h"
 
 #include <dwmapi.h>
 #include <shellscalingapi.h>
@@ -8,7 +8,6 @@
 #include <format>
 #include <iterator>
 
-#include "hook/GroupChromeWindow.h"
 #include "util/DarkMode.h"
 #include "util/DialogKeyboard.h"
 #include "util/Logging.h"
@@ -37,7 +36,7 @@ constexpr DWORD DWMWA_SYSTEMBACKDROP_TYPE = 38;
 constexpr DWORD DWMSBT_TRANSIENTWINDOW = 3;  // "Mica Alt" -- for short-lived flyout/dialog surfaces
 #endif
 
-constexpr wchar_t kWindowClassName[] = L"PolishGroupPickerWindow";
+constexpr wchar_t kWindowClassName[] = L"PolishStackPickerWindow";
 constexpr int kCreateButtonId = 1003;
 constexpr int kCancelButtonId = 1004;
 
@@ -45,15 +44,15 @@ constexpr int kCancelButtonId = 1004;
 // RefreshCandidates) -- no push-based hook for this exists anywhere in
 // this codebase to reuse instead (confirmed: no EVENT_OBJECT_CREATE/
 // SHOW/HIDE hook exists), so this mirrors the interval this codebase's
-// other idle polling timers already use (kThumbnailRefreshDelayMs = 1200
-// in main.cpp) rather than inventing an unrelated cadence.
+// other idle polling timers already use (about a second) rather than
+// inventing an unrelated cadence.
 constexpr UINT_PTR kCandidateRefreshTimerId = 1;
 constexpr UINT kCandidateRefreshIntervalMs = 1000;
 
 // Logical (96 DPI) layout constants -- scaled by the window's actual DPI
 // in LayoutControls/before CreateWindowExW. Wide and short, like this
 // dialog's original two-list side-by-side layout (see
-// GroupPickerWindow.h's own comment on the side-by-side split) -- not
+// StackPickerWindow.h's own comment on the side-by-side split) -- not
 // the narrow/tall shape a single stacked list needed; margin/button
 // height still match Windows 11's airier spacing versus this dialog's
 // original, denser layout.
@@ -81,7 +80,7 @@ constexpr int kNameCaptionGap = 6;
 constexpr int kNameFieldHeight = 36;
 constexpr int kNameFieldPaddingX = 12;
 
-// Available windows/Group column captions -- same small-muted-label
+// Available windows/Stack column captions -- same small-muted-label
 // convention as the Name field's own caption.
 constexpr int kSectionCaptionHeight = 16;
 constexpr int kSectionCaptionGap = 6;
@@ -113,29 +112,19 @@ int MeasureLineHeight(HWND hwnd, HFONT font) {
 }
 
 BOOL CALLBACK EnumPickerCandidatesProc(HWND hwnd, LPARAM lParam) {
-    // Other groups' chrome windows are deliberately *not* excluded here
-    // anymore. A chrome is a perfectly normal top-level window
-    // everywhere else in this app, and excluding every one of them (as
-    // an earlier version did, by class name) left a real hole:
-    // a window that's already a member of some group is WS_CHILD and
-    // therefore invisible to EnumWindows entirely (see
-    // WindowReparenting.h), so with its group's chrome filtered out too,
-    // an entire group's worth of windows had *no* representation in this
-    // list at all -- confirmed, human-reported, with a grouped Explorer
-    // window that simply couldn't be found anywhere. Listing the chrome
-    // gives that group a single visible entry standing in for all of it.
-    // Only the group currently being edited is excluded, and that
-    // happens in PopulateLists/RefreshCandidates (which know which one
-    // that is), not here.
+    // Every real window is listed, including ones already in some stack:
+    // members are ordinary top-level windows now, so nothing is hidden
+    // from this enumeration. Elevated windows are left out, because an
+    // unelevated process cannot move them (UIPI), so they could never
+    // follow their stack.
     //
     // IsCandidateWindowShape, not IsCandidateWindow -- this dialog has
     // no separate "minimized" section the way Alt+Tab does, so it can't
-    // afford to drop minimized windows from its one and only list the
-    // way Alt+Tab's main cycle does (confirmed, human-reported: Notepad/
-    // Explorer/Outlook windows minimized at the time "Open windows" was
-    // opened didn't appear at all). A minimized window is exactly as
-    // groupable as a restored one -- GroupManager::EnsureReparented
-    // restores it on add so it doesn't join as a blank tile.
+    // afford to drop minimized windows from its one and only list
+    // (confirmed, human-reported: windows minimized at the time "Open
+    // windows" was opened didn't appear at all). A minimized window is
+    // exactly as stackable as a restored one; it is placed when the stack
+    // is laid out.
     if (IsCandidateWindowShape(hwnd) && !IsElevatedWindow(hwnd)) {
         reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
     }
@@ -144,7 +133,7 @@ BOOL CALLBACK EnumPickerCandidatesProc(HWND hwnd, LPARAM lParam) {
 
 }  // namespace
 
-GroupPickerWindow::GroupPickerWindow(HINSTANCE instance) : instance_(instance), selected_(instance), available_(instance) {
+StackPickerWindow::StackPickerWindow(HINSTANCE instance) : instance_(instance), selected_(instance), available_(instance) {
     static bool classRegistered = false;
     if (!classRegistered) {
         WNDCLASSEXW windowClass{};
@@ -167,20 +156,20 @@ GroupPickerWindow::GroupPickerWindow(HINSTANCE instance) : instance_(instance), 
     }
 }
 
-GroupPickerWindow::~GroupPickerWindow() {
+StackPickerWindow::~StackPickerWindow() {
     if (window_ != nullptr) {
         DestroyWindow(window_);
     }
 }
 
-LRESULT CALLBACK GroupPickerWindow::WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    GroupPickerWindow* self = nullptr;
+LRESULT CALLBACK StackPickerWindow::WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    StackPickerWindow* self = nullptr;
     if (message == WM_NCCREATE) {
         auto* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        self = static_cast<GroupPickerWindow*>(createStruct->lpCreateParams);
+        self = static_cast<StackPickerWindow*>(createStruct->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
     } else {
-        self = reinterpret_cast<GroupPickerWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        self = reinterpret_cast<StackPickerWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     }
     if (self != nullptr) {
         return self->HandleMessage(hwnd, message, wParam, lParam);
@@ -188,7 +177,7 @@ LRESULT CALLBACK GroupPickerWindow::WindowProcThunk(HWND hwnd, UINT message, WPA
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
-LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+LRESULT StackPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_CREATE:
             CreateControls(hwnd);
@@ -200,7 +189,7 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             return 0;
 
         case WM_DPICHANGED: {
-            // Standard MSDN pattern (same as GroupChromeWindow/
+            // Standard MSDN pattern (same as StackStripWindow/
             // AltTabListWindow's own WM_DPICHANGED handlers), plus
             // rebuilding dialogFont_ -- unlike those two, this dialog's
             // text doesn't scale on its own via a per-paint DPI query,
@@ -331,7 +320,7 @@ LRESULT GroupPickerWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
     }
 }
 
-void GroupPickerWindow::CreateControls(HWND hwnd) {
+void StackPickerWindow::CreateControls(HWND hwnd) {
     // A small muted caption above the field, not a colon-suffixed
     // prompt beside it -- see kNameCaptionHeight's own comment on why.
     nameLabel_ =
@@ -345,7 +334,7 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
     nameEdit_ = CreateWindowExW(0, L"EDIT", initialName_.c_str(), WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 0, 0,
                                  hwnd, nullptr, instance_, nullptr);
 
-    selectedLabel_ = CreateWindowExW(0, L"STATIC", L"Group", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, hwnd,
+    selectedLabel_ = CreateWindowExW(0, L"STATIC", L"Stack", WS_CHILD | WS_VISIBLE | SS_LEFT, 0, 0, 0, 0, hwnd,
                                       nullptr, instance_, nullptr);
     selected_.Create(hwnd);
     // The single source of truth is selectedOrder_ (see class comment);
@@ -357,7 +346,7 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
     });
     selected_.SetOnRemoveRequested([this](HWND hwnd2) {
         const auto it = std::find(selectedOrder_.begin(), selectedOrder_.end(), hwnd2);
-        // Index within "Group" -- the list this window is *leaving* --
+        // Index within "Stack" -- the list this window is *leaving* --
         // captured before the erase so the row that slides into its old
         // slot can be worked out below.
         const size_t leavingIndex =
@@ -365,18 +354,18 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
         if (it != selectedOrder_.end()) {
             selectedOrder_.erase(it);
         }
-        // Selection stays in "Group" so a run of removes is one keypress
+        // Selection stays in "Stack" so a run of removes is one keypress
         // (or one click) each, rather than bouncing focus over to
         // "Available windows" after every single one -- an earlier
         // version followed the moved window into its new list instead,
-        // reported as needing a Tab/click back to "Group" before the
+        // reported as needing a Tab/click back to "Stack" before the
         // next removal could happen.
         if (!selectedOrder_.empty()) {
             selectedWindow_ = selectedOrder_[std::min(leavingIndex, selectedOrder_.size() - 1)];
             RefreshLists();
             SetFocus(selected_.WindowHandle());
         } else {
-            // Nothing left in "Group" to select -- fall back to the
+            // Nothing left in "Stack" to select -- fall back to the
             // window that just left, now sitting in "Available windows".
             selectedWindow_ = hwnd2;
             RefreshLists();
@@ -424,7 +413,7 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
             SetFocus(available_.WindowHandle());
         } else {
             // Nothing left in "Available windows" -- fall back to the
-            // window that just left, now sitting in "Group".
+            // window that just left, now sitting in "Stack".
             selectedWindow_ = hwnd2;
             RefreshLists();
             SetFocus(selected_.WindowHandle());
@@ -436,7 +425,7 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
     // SetWindowTheme alone (which does correctly theme the edit
     // field's chrome) does not reliably darken BS_PUSHBUTTON on this
     // Windows build; owner-drawing is the only guaranteed-correct path.
-    createButton_ = CreateWindowExW(0, L"BUTTON", editing_ ? L"Update Group" : L"Create Group",
+    createButton_ = CreateWindowExW(0, L"BUTTON", editing_ ? L"Update Stack" : L"Create Stack",
                                      WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 0, 0, 0, 0, hwnd,
                                      reinterpret_cast<HMENU>(static_cast<INT_PTR>(kCreateButtonId)), instance_,
                                      nullptr);
@@ -469,7 +458,7 @@ void GroupPickerWindow::CreateControls(HWND hwnd) {
 // The new font is created and pushed before the old one is freed: for
 // the moment in between, every control must keep holding a valid HFONT,
 // never a deleted one.
-void GroupPickerWindow::ApplyDialogFont(UINT dpi) {
+void StackPickerWindow::ApplyDialogFont(UINT dpi) {
     HFONT newFont = MakeUiFont(dpi);
     for (HWND control : {nameLabel_, nameEdit_, selectedLabel_, availableLabel_, createButton_, cancelButton_}) {
         if (control != nullptr) {
@@ -482,12 +471,12 @@ void GroupPickerWindow::ApplyDialogFont(UINT dpi) {
     dialogFont_ = newFont;
 }
 
-void GroupPickerWindow::CycleFocus(bool backward) {
+void StackPickerWindow::CycleFocus(bool backward) {
     // Order is the dialog's own reading order: the name field, then the
     // two panels left-to-right, then the two buttons. The ring mechanics
-    // (skipping disabled stops -- Create Group is disabled whenever the
-    // group is empty, see UpdateButtonStates -- and wrapping) live in
-    // util/DialogKeyboard, shared with GroupHotkeyDialog.
+    // (skipping disabled stops -- Create Stack is disabled whenever the
+    // stack is empty, see UpdateButtonStates -- and wrapping) live in
+    // util/DialogKeyboard, shared with StackHotkeyDialog.
     const HWND stops[] = {nameEdit_, available_.WindowHandle(), selected_.WindowHandle(), createButton_,
                           cancelButton_};
     polish::CycleFocus(stops, std::size(stops), backward);
@@ -499,7 +488,7 @@ void GroupPickerWindow::CycleFocus(bool backward) {
 // every themeable child control. Both list panels read
 // IsDarkModeEnabled() fresh at their own paint time, so they just need
 // a repaint here, not separate state pushed down to them.
-void GroupPickerWindow::ApplyDarkMode() {
+void StackPickerWindow::ApplyDarkMode() {
     // window_ isn't assigned yet the first time this runs (called from
     // CreateControls, itself called from WM_CREATE, which fires before
     // CreateWindowExW returns) -- nameEdit_'s parent is the same real
@@ -563,7 +552,7 @@ void GroupPickerWindow::ApplyDarkMode() {
 // ODS_DISABLED/ODS_FOCUS from the item state for pressed/disabled/
 // focus-rect feedback, so those still read correctly despite being
 // hand-painted instead of theme-drawn.
-void GroupPickerWindow::DrawOwnerButton(const DRAWITEMSTRUCT& item) {
+void StackPickerWindow::DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     const bool dark = IsDarkModeEnabled();
     const bool pressed = (item.itemState & ODS_SELECTED) != 0;
     const bool disabled = (item.itemState & ODS_DISABLED) != 0;
@@ -618,7 +607,7 @@ void GroupPickerWindow::DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     // rounded fill on top, guarantees those triangles read as
     // background instead of stray light gray, matching the same
     // full-bleed-then-rounded-fill-on-top order the row buttons in
-    // GroupPickerListWindow/GroupPickerSelectedListWindow already use.
+    // StackPickerListWindow/StackPickerSelectedListWindow already use.
     HBRUSH surroundingBrush = CreateSolidBrush(dark ? RGB(0x20, 0x20, 0x20) : GetSysColor(COLOR_3DFACE));
     FillRect(item.hDC, &item.rcItem, surroundingBrush);
     DeleteObject(surroundingBrush);
@@ -656,7 +645,7 @@ void GroupPickerWindow::DrawOwnerButton(const DRAWITEMSTRUCT& item) {
     }
 }
 
-void GroupPickerWindow::LayoutControls() {
+void StackPickerWindow::LayoutControls() {
     if (nameEdit_ == nullptr) {
         return;
     }
@@ -699,7 +688,7 @@ void GroupPickerWindow::LayoutControls() {
                (nameFieldRect_.right - nameFieldRect_.left) - 2 * fieldPaddingX, editHeight, TRUE);
 
     // Two side-by-side columns, equal width -- "Open windows" (left,
-    // available_) and "Group" (right, selected_) -- both the same
+    // available_) and "Stack" (right, selected_) -- both the same
     // height, filling whatever's left down to the button row. Neither
     // column's size depends on how many rows it currently holds (unlike
     // an earlier stacked version, where the Selected panel visibly
@@ -727,7 +716,7 @@ void GroupPickerWindow::LayoutControls() {
                TRUE);
 }
 
-void GroupPickerWindow::PopulateLists() {
+void StackPickerWindow::PopulateLists() {
     allCandidates_.clear();
     EnumWindows(EnumPickerCandidatesProc, reinterpret_cast<LPARAM>(&allCandidates_));
     // Not visible yet at this point (WM_CREATE fires before ShowWindow),
@@ -736,10 +725,9 @@ void GroupPickerWindow::PopulateLists() {
     // defensive symmetry with RefreshCandidates' own identical line,
     // where it's load-bearing (see that method's comment).
     std::erase(allCandidates_, window_);
-    std::erase(allCandidates_, editedGroupChrome_);
     LogCandidates(L"populate");
 
-    // Existing group members are always kept selected even if they'd
+    // Existing stack members are always kept selected even if they'd
     // normally be filtered out of allCandidates_ (e.g. currently
     // minimized) -- editing membership should never silently drop a
     // member just because of a transient state at edit time.
@@ -759,7 +747,7 @@ void GroupPickerWindow::PopulateLists() {
     RefreshLists();
 }
 
-void GroupPickerWindow::LogCandidates(const wchar_t* reason) const {
+void StackPickerWindow::LogCandidates(const wchar_t* reason) const {
     std::wstring dump;
     for (HWND hwnd : allCandidates_) {
         wchar_t title[128] = L"";
@@ -772,15 +760,14 @@ void GroupPickerWindow::LogCandidates(const wchar_t* reason) const {
         // Class name included for the same reason main.cpp's Alt+Tab
         // dump includes it: it's what distinguishes a real app window
         // from a UWP host frame (ApplicationFrameWindow,
-        // Windows.UI.Core.CoreWindow) and from another group's own
-        // chrome (PolishGroupChromeWindow), which is now a legitimate
-        // candidate rather than a filtered-out one.
+        // Windows.UI.Core.CoreWindow). A stack member is an ordinary window
+        // and appears here under its own class like any other.
         dump += std::format(L"{}:\"{}\"[{}]", reinterpret_cast<void*>(hwnd), title, className);
     }
     LogDebug(std::format(L"[Polish] Picker: {} -- {} candidate(s): {}", reason, allCandidates_.size(), dump));
 }
 
-std::vector<HWND> GroupPickerWindow::AvailableWindows() const {
+std::vector<HWND> StackPickerWindow::AvailableWindows() const {
     // Mutually exclusive: a window shows in exactly one of the two
     // panels (see class comment) -- available_ gets allCandidates_
     // minus whatever's currently in selectedOrder_, in allCandidates_'s
@@ -795,7 +782,7 @@ std::vector<HWND> GroupPickerWindow::AvailableWindows() const {
     return availableWindows;
 }
 
-void GroupPickerWindow::RefreshLists() {
+void StackPickerWindow::RefreshLists() {
     const std::vector<HWND> availableWindows = AvailableWindows();
     available_.SetWindows(availableWindows);
     selected_.SetSelected(selectedOrder_);
@@ -825,7 +812,7 @@ void GroupPickerWindow::RefreshLists() {
     selected_.SetSelectedHwnd(selectedWindow_);
 }
 
-void GroupPickerWindow::RefreshCandidates() {
+void StackPickerWindow::RefreshCandidates() {
     if (selected_.IsDragging()) {
         return;  // don't rebuild rows_ out from under an in-progress drag
     }
@@ -836,13 +823,12 @@ void GroupPickerWindow::RefreshCandidates() {
     // WM_CREATE, before ShowWindow makes window_ visible), this timer-
     // driven re-enumeration runs while the dialog is already shown --
     // window_ itself is by then a real, visible, WS_CAPTION-having,
-    // ownerless top-level window with non-empty text ("Edit Group
+    // ownerless top-level window with non-empty text ("Edit Stack
     // Windows"), satisfying every check IsCandidateWindowShape makes.
     // Confirmed, human-reported: without this, the dialog starts
     // listing itself as a candidate in its own "Open windows" a tick or
     // so after opening.
     std::erase(freshCandidates, window_);
-    std::erase(freshCandidates, editedGroupChrome_);
 
     // Order-preserving merge, the same way src/main.cpp's
     // UpdateAltTabCandidatesPreservingOrder reconciles Alt+Tab's own
@@ -880,38 +866,34 @@ void GroupPickerWindow::RefreshCandidates() {
     RefreshLists();
 }
 
-// Create Group needs at least one selected window; disabled otherwise
+// Create Stack needs at least one selected window; disabled otherwise
 // so the button's own state communicates whether clicking it would do
 // anything, rather than it being a silent no-op.
-void GroupPickerWindow::UpdateButtonStates() {
+void StackPickerWindow::UpdateButtonStates() {
     if (createButton_ == nullptr) {
         return;
     }
     EnableWindow(createButton_, !selectedOrder_.empty());
 }
 
-void GroupPickerWindow::Commit() {
+void StackPickerWindow::Commit() {
     wchar_t nameBuffer[256] = L"";
     GetWindowTextW(nameEdit_, nameBuffer, static_cast<int>(sizeof(nameBuffer) / sizeof(nameBuffer[0])));
     std::wstring name = nameBuffer;
     if (name.empty()) {
-        name = editing_ ? initialName_ : L"New Group";  // never confirm an empty name
+        name = editing_ ? initialName_ : L"New Stack";  // never confirm an empty name
     }
-    LogDebug(std::format(L"[Polish] GroupPicker: confirmed with {} window(s), name=\"{}\"", selectedOrder_.size(),
+    LogDebug(std::format(L"[Polish] StackPicker: confirmed with {} window(s), name=\"{}\"", selectedOrder_.size(),
                           name));
-    result_ = GroupPickerResult{selectedOrder_, name};
+    result_ = StackPickerResult{selectedOrder_, name};
     done_ = true;
 }
 
-std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const std::vector<HWND>& initialSelection,
+std::optional<StackPickerResult> StackPickerWindow::ShowModal(HWND owner, const std::vector<HWND>& initialSelection,
                                                                 const std::wstring& initialName, bool editing) {
     initialSelection_ = initialSelection;
     initialName_ = initialName;
     editing_ = editing;
-    // When editing, `owner` *is* the edited group's own chrome (main.cpp
-    // passes it); when creating a new group it's nullptr and nothing
-    // gets excluded. See editedGroupChrome_'s own comment.
-    editedGroupChrome_ = owner;
 
     HMONITOR monitor = (owner != nullptr && IsWindow(owner)) ? MonitorFromWindow(owner, MONITOR_DEFAULTTOPRIMARY)
                                                                : MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
@@ -920,9 +902,7 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
     // about to appear on monitor, which may not be the one system DPI
     // describes (e.g. owner sits on a different-DPI secondary display).
     // Same reasoning AltTabListWindow::Show already applies for its own
-    // per-monitor Reposition call, and the same create-time bug
-    // GroupChromeWindow's own constructor already found and fixed for
-    // itself.
+    // per-monitor Reposition call, and the same create-time bug.
     UINT dpiX = USER_DEFAULT_SCREEN_DPI;
     UINT dpiY = USER_DEFAULT_SCREEN_DPI;
     GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
@@ -939,10 +919,10 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
     const int y = monitorRect.top + ((monitorRect.bottom - monitorRect.top) - height) / 2;
 
     // Same title whether creating or editing -- both are the same
-    // underlying action (choose which windows belong to the group), so
+    // underlying action (choose which windows belong to the stack), so
     // one consistent name is used everywhere it's referenced (the
-    // taskbar menu, this title, the chrome's own context menu item).
-    window_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClassName, L"Edit Group Windows",
+    // taskbar menu, this title, the strip's own context menu item).
+    window_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClassName, L"Edit Stack Windows",
                                WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, width, height, owner, nullptr, instance_,
                                this);
     if (window_ == nullptr) {
@@ -953,7 +933,7 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
     SetForegroundWindow(window_);
     // Start on the name field -- the first of CycleFocus's five tab stops,
     // so the very first Tab press moves to "Open windows" rather than
-    // landing somewhere arbitrary, and typing a group name works without
+    // landing somewhere arbitrary, and typing a stack name works without
     // having to click the field first.
     SetFocus(nameEdit_);
 
@@ -980,7 +960,7 @@ std::optional<GroupPickerResult> GroupPickerWindow::ShowModal(HWND owner, const 
         // with no dialog manager behind it, so BS_DEFPUSHBUTTON would do
         // nothing and Enter was simply dead everywhere in the dialog --
         // including in the name field, where it's the most natural way
-        // to finish. Ignored while Create is disabled (an empty group),
+        // to finish. Ignored while Create is disabled (an empty stack),
         // matching what clicking the button would do.
         if (IsDialogKeyDown(msg, window_, VK_RETURN)) {
             if (createButton_ != nullptr && IsWindowEnabled(createButton_)) {

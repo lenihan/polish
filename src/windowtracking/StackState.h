@@ -9,26 +9,22 @@
 
 namespace polish {
 
-// A group's own opaque identifier -- distinct from HWND, since a
-// group's chrome window IS a real HWND but a nested-group member
-// (added in a later milestone) is not.
-using GroupId = uint64_t;
+// A stack's own opaque identifier. Distinct from HWND: a stack has no
+// window of its own that identifies it -- its tab strip is a separate
+// window that comes and goes with it.
+using StackId = uint64_t;
 
-// Which kind a member entry is. v1 only ever populates Window -- the
-// NestedGroup case exists so a later milestone (groups nested inside
-// groups) doesn't require reshaping this type, without implementing
-// the recursive layout logic it would need yet.
-enum class GroupMemberKind { Window, NestedGroup };
+// One member of a stack: an ordinary top-level window. (It used to carry a
+// kind, with a NestedStack case reserved for stacks inside stacks. That was
+// never populated, and the comment promising it was written for a design
+// -- members reparented into a container -- that no longer exists.)
+struct StackMember {
+    HWND window = nullptr;
 
-struct GroupMember {
-    GroupMemberKind kind = GroupMemberKind::Window;
-    HWND window = nullptr;       // valid when kind == Window
-    GroupId nestedGroup = 0;     // valid when kind == NestedGroup (unused in v1)
-
-    bool operator==(const GroupMember&) const = default;
+    bool operator==(const StackMember&) const = default;
 };
 
-// There is no display mode any more. A group used to be able to show its
+// There is no display mode any more. A stack used to be able to show its
 // members as a tile grid (Tile/Stack) as well as one at a time (Tab), with
 // splitters, per-column fractions and a per-tile maximize to go with it.
 // All of that is gone: tiling a fixed number of windows is its own feature
@@ -39,30 +35,30 @@ struct GroupMember {
 // Which edge the tab strip sits on: Horizontal (default) puts it across
 // the top, Vertical down the left. One setting rather than two so the
 // strip and anything positioned relative to it can never disagree.
-enum class GroupAlignment { Horizontal, Vertical };
+enum class StackAlignment { Horizontal, Vertical };
 
-// Pure state for one group: its ordered membership, which member is
+// Pure state for one stack: its ordered membership, which member is
 // "active" (tab mode: the one currently shown/promoted; tile mode:
 // still tracked, e.g. for keyboard focus, even though every member is
 // visible at once), and its display mode. No Win32 dependency beyond
 // HWND itself, so this is directly unit-testable -- same pattern as
 // ActivationHistory (and the deleted RectHistory before it).
-class GroupState {
+class StackState {
 public:
-    explicit GroupState(GroupId id);
+    explicit StackState(StackId id);
 
-    GroupId Id() const { return id_; }
-    GroupAlignment Alignment() const { return alignment_; }
+    StackId Id() const { return id_; }
+    StackAlignment Alignment() const { return alignment_; }
     const std::wstring& Name() const { return name_; }
 
     // Changes which edge the tab strip sits on. Pure bookkeeping --
     // membership and the active index are untouched, and the caller
-    // re-applies layout (GroupManager::ApplyLayout) and updates the
-    // chrome's own rendering afterward.
-    void SetAlignment(GroupAlignment alignment) { alignment_ = alignment; }
+    // re-applies layout (StackManager::ApplyLayout) and updates the
+    // strip's rendering afterward.
+    void SetAlignment(StackAlignment alignment) { alignment_ = alignment; }
 
-    // User-facing name (e.g. "projA"), shown in the chrome's title bar.
-    // Defaults to "Group <id>" at construction so it's never empty
+    // User-facing name (e.g. "projA"), shown in the stack's Alt+Tab entry.
+    // Defaults to "Stack <id>" at construction so it's never empty
     // before the user renames it via the management dialog.
     void SetName(std::wstring name) { name_ = std::move(name); }
 
@@ -72,13 +68,13 @@ public:
 
     // Removes hwnd if present. If it was the active member, the member
     // that shifted into its slot becomes active (or, if it was last,
-    // the new last member); the group has no active member if this was
+    // the new last member); the stack has no active member if this was
     // its only one.
     void Remove(HWND hwnd);
 
     // Moves the member currently at fromIndex to toIndex, shifting
     // everything between them over by one (erase+insert semantics, not
-    // a swap) -- used for drag-to-reorder in the chrome's tab strip.
+    // a swap) -- used for drag-to-reorder in the strip.
     // activeIndex_ is re-derived by identity afterward, so it keeps
     // pointing at the same logical member regardless of which direction
     // things shifted. No-op if fromIndex == toIndex or either is out of
@@ -88,7 +84,7 @@ public:
     // Replaces the entire membership list in one call: drops members no
     // longer present, appends new ones, and reorders survivors to match
     // `windows`'s order -- used by the management dialog's confirmed
-    // Group-list order (add/remove/drag-reorder all collapse into one
+    // Stack-list order (add/remove/drag-reorder all collapse into one
     // call here rather than being diffed against the old membership).
     // The previously active member stays active if it's still present
     // (by identity, regardless of its new index); otherwise the first
@@ -99,9 +95,9 @@ public:
 
     bool Contains(HWND hwnd) const;
     size_t MemberCount() const { return members_.size(); }
-    const std::vector<GroupMember>& Members() const { return members_; }
+    const std::vector<StackMember>& Members() const { return members_; }
 
-    // std::nullopt if the group currently has no members.
+    // std::nullopt if the stack currently has no members.
     std::optional<size_t> ActiveIndex() const { return activeIndex_; }
     std::optional<HWND> ActiveWindow() const;
 
@@ -110,16 +106,28 @@ public:
     void SetActiveIndex(size_t index);
 
     // Sets the active member by HWND -- used when a member becomes
-    // foreground via some path other than the group's own tab strip
+    // foreground via some path other than the stack's own tab strip
     // (e.g. Alt+Tab). No-op if hwnd isn't a member.
     void SetActiveWindow(HWND hwnd);
 
+    // The one rectangle that defines where this stack is, in screen pixels,
+    // including the strip's band (see StackLayout.h for how it divides into
+    // strip and content). Empty until the stack is first placed. Lives here
+    // rather than in the manager so the arithmetic that moves and resizes
+    // it is testable like the rest of the state.
+    const RECT& Rect() const { return rect_; }
+    void SetRect(const RECT& rect) { rect_ = rect; }
+    bool HasRect() const { return rect_.right > rect_.left && rect_.bottom > rect_.top; }
+    // Slides the whole stack by (dx, dy): what dragging the strip does.
+    void Offset(int dx, int dy) { OffsetRect(&rect_, dx, dy); }
+
 private:
-    GroupId id_;
-    GroupAlignment alignment_ = GroupAlignment::Horizontal;
+    StackId id_;
+    StackAlignment alignment_ = StackAlignment::Horizontal;
     std::wstring name_;
-    std::vector<GroupMember> members_;
+    std::vector<StackMember> members_;
     std::optional<size_t> activeIndex_;
+    RECT rect_{};
 };
 
 }  // namespace polish

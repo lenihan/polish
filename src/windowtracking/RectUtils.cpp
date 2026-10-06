@@ -3,6 +3,9 @@
 #include <dwmapi.h>
 
 #include <cstdlib>
+#include <format>
+
+#include "util/Logging.h"
 
 namespace polish {
 
@@ -12,9 +15,12 @@ bool RectsApproximatelyEqual(const RECT& a, const RECT& b, int epsilonPixels) {
 }
 
 bool GetVisibleWindowRect(HWND hwnd, RECT& rect) {
-    if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rect, sizeof(rect)))) {
+    const HRESULT hr = DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &rect, sizeof(rect));
+    if (SUCCEEDED(hr)) {
         return true;
     }
+    LogDebug(std::format(L"[Polish] DwmGetWindowAttribute failed for hwnd={} hr=0x{:08X}; using the raw window rect",
+                          reinterpret_cast<void*>(hwnd), static_cast<unsigned>(hr)));
     return GetWindowRect(hwnd, &rect) != FALSE;
 }
 

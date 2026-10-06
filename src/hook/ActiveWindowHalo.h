@@ -102,7 +102,7 @@ uint32_t ClampGlowLuminance(uint32_t colorref, int minLum, int maxLum);
 // Deliberately a *separate* class from AltTabHighlightBorder, not a
 // generalization of it. That class draws a thin, solid ring *inside* its
 // target's own edge with GDI+, alive only for the life of an Alt+Tab
-// session or a group's chrome, sized exactly to its target's current
+// session, sized exactly to its target's current
 // rect. This one draws a soft gradient glow *outside* its target,
 // continuously for this app's entire run, with its own rasterizer (a
 // direct per-pixel signed-distance-field fill -- see ShowAroundTarget --
@@ -118,8 +118,8 @@ uint32_t ClampGlowLuminance(uint32_t colorref, int minLum, int maxLum);
 // pixel buffer, and one-shared-instance vs. a fresh buffer per render --
 // and re-testing two already-shipped, load-bearing features to save one
 // class. This is Polish's first *continuously* rendering overlay --
-// every existing overlay is session-scoped (Alt+Tab) or owned by a
-// group's own chrome -- which is also why its perf regime has to be
+// every existing overlay is session-scoped (Alt+Tab) -- which is also
+// why its perf regime has to be
 // stricter than AltTabHighlightBorder's.
 //
 // Measured full-render cost: durationMs=0 (i.e. sub-tick, well under
@@ -153,8 +153,8 @@ public:
     // The halo's own window handle -- so callers can recognize and filter
     // out the WinEvent hooks this window's own SetWindowPos/
     // UpdateLayeredWindow calls generate (e.g. a LOCATIONCHANGE per
-    // rendered frame), the same way GroupChromeWindow::Handle() lets
-    // main.cpp recognize its own chrome windows.
+    // rendered frame), the same way the other overlays' Handle() lets
+    // main.cpp recognize its own windows.
     HWND Handle() const { return window_; }
 
     // The target-window size (not the glow's own, larger, inflated

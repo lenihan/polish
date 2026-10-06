@@ -1013,6 +1013,96 @@ current todo list.
     and restores it afterwards, since the command moves the real desktop
     and a test that leaves it scattered is not one worth running twice.
 
+- Stacks replace Groups: windows share one rectangle with a tab strip,
+  instead of being reparented into a container. This is the "Remove Groups:
+  too hacky, does not support UWP" backlog item, done by replacing the
+  mechanism rather than deleting the feature.
+  - **Why.** Groups made members `WS_CHILD` of a chrome window. Many windows
+    refuse `SetParent` outright (a UWP frame fails every time), and the
+    ones that accepted it needed ~180 lines of resize-band overlays and a
+    ~200-line screenshot pipeline to hide the consequences of being a
+    child. All of that is deleted, along with `WindowReparenting`,
+    `GroupChromeWindow` (2,400 lines) and the tab thumbnail window; about
+    4,000 lines in all.
+  - **The model.** A stack is one rect (`StackState::Rect`, outer, strip
+    included), N ordinary top-level windows positioned into its content
+    part, and a `StackStripWindow` (topmost, `WS_EX_NOACTIVATE`, tool
+    window). The strip has no position of its own: it is recomputed from the
+    stack rect and the monitor's DPI on every reflow (`ReflowStackTo`), so it
+    cannot drift from its stack. `StackLayout` (strip/content split and its
+    exact inverse), `StackStripLayout` (tab rects, hit-testing, reorder,
+    tear-out, insertion index), `StackCollapse` and `StackState` are pure and
+    tested; the Win32 pieces are not, and are covered by probes.
+  - **Created from the first window's visible rect**, clamped to its work
+    area. The alternatives are worse: the union of the members' rects is
+    often bigger than the screen, and a default centred rect moves and
+    resizes the very window the user was looking at.
+  - **Resize one member, the others follow.** Enforcement (pulling a
+    drifting member back) is gone; it and adoption are opposite responses
+    to the same event, so it had to be deleted, not conditioned. A member's
+    rect is adopted at `MOVESIZEEND` for a drag, or after a 300ms settle for
+    anything else (a keyboard snap, an app resizing itself). Loop-free
+    because it acts only on a rect that *differs* from the content, and the
+    reflow it causes makes every member equal to it; a 600ms quiet period
+    after any reflow covers the late echo of our own asynchronous moves.
+  - **Drag a window in / a tab out.** Dragging in rides the move-size events
+    Polish already watches; the cursor decides, not overlap. A strip would
+    vanish the moment the dragged window became foreground, so every strip
+    is shown for the duration of a join-drag. Tearing out and reordering
+    are one gesture decided by one function (`DragTearsOut`) with one
+    threshold, so they cannot disagree at the boundary.
+  - **A full strip cannot be grabbed.** The first drag probe pressed "the
+    empty area at the end of the strip" and tore a tab out instead, because
+    three tabs fill the whole strip. The strip now starts with a dotted drag
+    grip that is always empty.
+  - **Strip lifetime.** Destroying a strip from inside its own mouse handler
+    is how an object is destroyed mid-unwind, so dissolving a stack is a
+    posted message. The right-click menu and the picker run nested message
+    loops that dispatch posted messages while the strip's handler is still
+    on the stack, so a close that arrives then is parked and re-posted after
+    the handler returns (`g_stackMenuOpen`).
+  - **Minimize policy.** A minimized member stays, its tab dimmed; if it was
+    the active tab the next live window becomes active; a restored member
+    goes back into the stack rect. Closing a member removes it (this was
+    masked before, when members were children), and a stack under two
+    dissolves.
+  - **Alt+Tab folds a stack to one entry** at the position of its earliest
+    member (not the active one's: placing it by the active member made the
+    list reorder itself on every tab switch), named `Name (N)`. Verified
+    with the real switcher: 10 entries without a stack, 8 with a three-
+    window one. The taskbar and native Alt+Tab still list every member.
+  - **Stack hotkey and settings.** The registry values are renamed
+    `StackHotkey*`; the old `GroupHotkey*` values are read as the default, so
+    a combination the user chose survives. The default combination
+    (was Win+Alt+G, claimed by something else on this machine, error
+    1409), as it was before.
+  - **Title bar, taskbar button, Ctrl+Alt+1.** The strip is 64 DIP: a 28 DIP
+    title bar (name, minimize-all, double-click renames) over the 36 DIP tab
+    row. The taskbar presence is a `WS_EX_APPWINDOW` 1px off-screen stand-in
+    with a per-stack AppUserModelID; activating it toggles the stack, and
+    since it stays foreground after a minimize the shell sends SC_MINIMIZE
+    for the next click, handled as a toggle. Activations within 1000ms of our
+    own minimize are ignored (Windows focuses the stand-in then). Default
+    hotkey is Ctrl+Alt+1; a stored Win+Alt+G is migrated on load. Probed with
+    UI Automation: a taskbar button appears with the stack and goes when it
+    closes. Real taskbar clicks were simulated.
+  - **Verified with a probe** that drives real windows and a real mouse:
+    create, shared rect, strip flush above the members, click a tab,
+    programmatic resize, border-drag resize, strip drag, drag-in, tear-out,
+    close one member, close another (dissolves). A test hook
+    (`WM_COPYDATA`, only when `POLISH_TEST_HOOKS` is set in the environment)
+    creates a stack without the picker dialog, which has no automation
+    surface.
+  - **A trap in the probes themselves.** `Process.MainWindowHandle` for
+    Character Map sometimes returns the window's `SysShadow` helper instead of
+    the real `#32770` dialog; the shadow is destroyed whenever the real
+    window moves, so a probe holding it saw "windows vanishing" for hours of
+    apparent flakiness. Look the window up by class and title.
+  - **Backlog** (deliberately not done): hover previews on tabs via
+    `DwmRegisterThumbnail` (viable now that members are top-level), tooltips
+    for truncated tab titles, and a mixed-DPI test of dragging a stack
+    between monitors.
+
 
 ## v1.0 release -- Microsoft Store
 
@@ -1136,7 +1226,6 @@ release has to exist before the signing application can even go in.
   Can have different resolutions for each monitor. OS should think it is actually multiple
   monitors. Allows you to use ultra wide as two normal monitors. Maximize app fills virtual
   monitor, not entire wide monitor.
-- Remove Groups: Too hacky. Does not support UWP.
 - Halo: When an active app closes, it's halo stays
 - Taskbar: the shield tracks the strip via taskbar LOCATIONCHANGE events
   with a 120ms debounce, measured at 210ms from a window appearing to the

@@ -16,7 +16,7 @@ namespace {
 
 // The window class of a packaged app's own top-level window, hosted
 // inside its ApplicationFrameWindow. The same class name
-// GroupPickerWindow::LogCandidates already calls out when dumping
+// StackPickerWindow::LogCandidates already calls out when dumping
 // candidates.
 constexpr wchar_t kCoreWindowClassName[] = L"Windows.UI.Core.CoreWindow";
 

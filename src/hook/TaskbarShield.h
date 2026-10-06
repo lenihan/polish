@@ -27,7 +27,7 @@ namespace polish {
 // One window per taskbar, not one spanning them all: a union rect across
 // two monitors would cover the desktop between them. The buttons carry
 // the taskbar they came from (TaskbarButton::taskbar), which is what this
-// groups on.
+// stacks on.
 //
 // Two constraints that are not style choices -- each was a real failure:
 //

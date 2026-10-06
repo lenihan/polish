@@ -34,7 +34,7 @@ void ApplyRoundedCorners(HWND window) {
 }
 
 // Logical (96 DPI) px -- scaled fresh at every layout/paint via Scale(),
-// never cached, same convention GroupChromeWindow/GroupPickerWindow use.
+// never cached, same convention StackStripWindow/StackPickerWindow use.
 constexpr int kPanelWidth = 360;
 constexpr int kPanelPaddingX = 8;
 constexpr int kPanelPaddingY = 8;
@@ -182,9 +182,9 @@ AltTabListWindow::AltTabListWindow(HINSTANCE instance) : instance_(instance) {
     static bool commonControlsInitialized = false;
     if (!commonControlsInitialized) {
         // ICC_TAB_CLASSES, not the more obviously-named tooltip flag --
-        // comctl32 groups the tooltip common control in with tab controls
+        // comctl32 stacks the tooltip common control in with tab controls
         // historically, and this is the documented way to make
-        // TOOLTIPS_CLASSW available. Same note as GroupChromeWindow's.
+        // TOOLTIPS_CLASSW available. Same note as StackStripWindow's.
         INITCOMMONCONTROLSEX icc{};
         icc.dwSize = sizeof(icc);
         icc.dwICC = ICC_TAB_CLASSES;
@@ -265,7 +265,7 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
         case WM_ERASEBKGND:
             // Paint always fully repaints the client area itself (see
             // Paint) -- the default erase would just be a wasted extra
-            // fill, same reasoning GroupChromeWindow already documents
+            // fill, same reasoning StackStripWindow already documents
             // for its own tab strip.
             return 1;
 
@@ -295,7 +295,7 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
                 // never made it to the screen.
                 SelectClipRgn(hdc, nullptr);
 
-                // Double-buffered for the same reason as GroupChromeWindow's
+                // Double-buffered for the same reason as StackStripWindow's
                 // tab strip: many separate GDI calls straight to the live
                 // screen HDC is a classic flicker source.
                 HDC memDC = CreateCompatibleDC(hdc);
@@ -430,7 +430,7 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             return 0;
 
         case WM_DPICHANGED: {
-            // Standard MSDN pattern (same as GroupChromeWindow): resize to
+            // Standard MSDN pattern (same as StackStripWindow): resize to
             // the OS-suggested rect, then just repaint -- row layout is
             // recomputed fresh from the current DPI on every paint, no
             // separate relayout step needed.
@@ -1116,7 +1116,7 @@ void AltTabListWindow::UpdateActionTooltip() {
     }
     // Re-applied on every show rather than once at creation, so a theme
     // change without restarting Polish still takes effect (the same
-    // reasoning GroupChromeWindow::UpdateTooltip gives).
+    // reasoning AltTabListWindow's tooltip handling gives).
     ApplyDarkModeToTooltip(tooltipWindow_);
     ti.lpszText = const_cast<LPWSTR>(text.c_str());
     SendMessageW(tooltipWindow_, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));

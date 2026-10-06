@@ -22,7 +22,7 @@ namespace polish {
 // disabled ones: SetFocus on a disabled window is a silent no-op, which
 // would otherwise leave Tab stuck on whatever stop preceded it
 // (confirmed live, with the picker's Create button disabled on an empty
-// group). Bounded to one full lap, so an all-disabled ring terminates
+// stack). Bounded to one full lap, so an all-disabled ring terminates
 // instead of spinning.
 //
 // A focus that isn't in `stops` at all (or no focus yet) is treated as

@@ -14,8 +14,11 @@ add_executable(polish_tests
     WindowLayoutTests.cpp
     ActivationHistoryTests.cpp
     TabSwitchingTests.cpp
-    GroupStateTests.cpp
-    GroupManagerTests.cpp
+    StackCollapseTests.cpp
+    StackLayoutTests.cpp
+    StackStateTests.cpp
+    StackStripLayoutTests.cpp
+    StackManagerTests.cpp
     HaloFalloffTests.cpp
     BullseyeMathTests.cpp
     TaskbarButtonsTests.cpp

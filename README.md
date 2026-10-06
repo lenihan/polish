@@ -241,6 +241,44 @@ nothing. Change it under `HKCU\Software\Polish`
 (`ArrangeTwoWayHotkeyVirtualKey` and friends) — there is no picker for
 these yet.
 
+**Stack windows on top of each other, with tabs.** Pick two or more windows
+(tray menu → **New Stack…**, or **Ctrl+Alt+1**) and they all take the same
+rectangle, one on top of the others, with a title bar named for the stack
+and a tab strip above them. The title bar has a minimize button that
+minimizes the whole stack; double-click it to rename the stack. The stack
+also gets one taskbar button of its own (labelled "polish.exe"): click it
+to minimize or bring back the whole stack. Click a
+tab to bring that window forward. The strip is a small always-on-top window
+of its own — there is no container around your windows, so they stay
+ordinary windows, and any app can be stacked, including Store apps like
+Calculator and Settings.
+
+- **Move and resize.** Drag the dotted grip at the start of the strip to
+  move the whole stack. Resize or move any one member the normal way and the
+  rest follow when you let go.
+- **Drag a window in.** Drag any other window's title bar over the strip
+  and a caret shows where it will go; release to add it. (Win+drag does the
+  same.)
+- **Drag a tab out.** Drag a tab well clear of the strip and release: that
+  window leaves the stack at the size it had, where you dropped it. Drag a
+  tab along the strip to reorder. A stack that is down to one window
+  dissolves.
+- **Right-click the strip** to edit which windows are in the stack, move the
+  tabs from the top to the left edge, remove one window, or close the stack
+  (which leaves every window exactly where it is).
+- **Alt+Tab shows a stack as one entry**, named for the stack with its
+  window count. The taskbar and Windows' own Alt+Tab still list every
+  window, because Polish does not control those.
+- **A closed window leaves its stack on its own**; a minimized one stays,
+  its tab dimmed, and clicking the tab brings it back.
+- **Windows that insist on a minimum size** make the stack grow to fit them.
+
+The strip is only visible while one of the stack's windows is in front,
+because it floats above everything and would otherwise sit over unrelated
+apps. To get back to a hidden stack, switch to any of its windows. See
+[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) for what follows from stacks
+being ordinary windows.
+
 Every feature can be turned off independently from the tray icon's
 right-click menu, which also has a **Start with Windows** option and
 Exit.

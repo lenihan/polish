@@ -11,7 +11,7 @@ namespace polish {
 
 // One row in the panel -- icon and title are captured at Show() time
 // (borrowed HICON, same "never destroyed here" contract as
-// GroupChromeWindow::SetMemberIcons) since the underlying window could
+// StackStripWindow::SetTabs) since the underlying window could
 // close or its title could change while the row is still displayed.
 struct AltTabListRow {
     HWND hwnd = nullptr;
@@ -64,7 +64,7 @@ struct AltTabListRow {
 // decided by the caller, not this class), and only the one monitor whose
 // subset actually contains the globally-highlighted window shows a
 // highlighted row -- the rest show `std::nullopt` (no highlight). The
-// underlying candidate order groups the current monitor's windows first,
+// underlying candidate order stacks the current monitor's windows first,
 // then each other monitor's in turn (see GetMonitorsCurrentFirst in
 // main.cpp), so a plain Tab/Shift+Tab walking that single flat list
 // naturally finishes the current monitor before continuing onto the
@@ -77,10 +77,10 @@ struct AltTabListRow {
 // path that already caused a real first-show flash bug once, when a
 // different piece of this feature's UI was created lazily on first use
 // instead of pre-warmed. This deliberately does NOT follow
-// GroupPickerWindow's teardown-per-show/nested-message-loop pattern.
+// StackPickerWindow's teardown-per-show/nested-message-loop pattern.
 //
 // Rendering is plain, flat-opaque GDI (double-buffered WM_PAINT, the same
-// technique GroupChromeWindow's tab strip uses) -- not the DIB+GDI+
+// technique StackStripWindow's tab strip uses) -- not the DIB+GDI+
 // pipeline AltTabHighlightBorder uses, which exists specifically for a
 // translucent gradient this flat row content doesn't need. The panel's
 // own "frosted, see-through-but-legible" background is instead one
@@ -346,7 +346,7 @@ private:
     std::optional<ActionButton> hoveredAction_;
     // Tracked tooltip for the hovered action button (TTF_TRACK, driven
     // by this class rather than by the tooltip's own mouse relay -- the
-    // same approach GroupChromeWindow uses for its title-bar buttons).
+    // same approach StackStripWindow uses for its title-bar buttons).
     HWND tooltipWindow_ = nullptr;
 
     bool rowActionsEnabled_ = true;      // see SetRowActionsEnabled

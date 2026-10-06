@@ -48,8 +48,23 @@ Settings LoadSettings() {
         settings.arrangeFourWayHotkeyModifiers =
             ReadDword(key, L"ArrangeFourWayHotkeyModifiers", MOD_CONTROL | MOD_ALT);
         settings.arrangeFourWayHotkeyVirtualKey = ReadDword(key, L"ArrangeFourWayHotkeyVirtualKey", '4');
-        settings.groupHotkeyModifiers = ReadDword(key, L"GroupHotkeyModifiers", MOD_WIN | MOD_ALT);
-        settings.groupHotkeyVirtualKey = ReadDword(key, L"GroupHotkeyVirtualKey", 'G');
+        // The stack hotkey used to be the group hotkey, stored under the old
+        // names. Read those as the default, so a combination the user chose
+        // before the rename survives it; the new names win once saved.
+        settings.stackHotkeyModifiers = ReadDword(
+            key, L"StackHotkeyModifiers", ReadDword(key, L"GroupHotkeyModifiers", MOD_CONTROL | MOD_ALT));
+        settings.stackHotkeyVirtualKey =
+            ReadDword(key, L"StackHotkeyVirtualKey", ReadDword(key, L"GroupHotkeyVirtualKey", '1'));
+        // Win+Alt+G was the old shipped default, and SaveSettings writes the
+        // current value whenever *any* setting is saved -- so a user who never
+        // touched this hotkey still has it stored, and would be stuck on a
+        // combination that does not even register on some machines. Nothing
+        // distinguishes "left at the default" from "chose it", so a stored
+        // Win+Alt+G is treated as the former and moved to the new default.
+        if (settings.stackHotkeyModifiers == (MOD_WIN | MOD_ALT) && settings.stackHotkeyVirtualKey == 'G') {
+            settings.stackHotkeyModifiers = MOD_CONTROL | MOD_ALT;
+            settings.stackHotkeyVirtualKey = '1';
+        }
         RegCloseKey(key);
     }
     // If the key doesn't exist yet (first run), settings keeps its
@@ -76,8 +91,8 @@ void SaveSettings(const Settings& settings) {
     WriteDword(key, L"ArrangeThreeWayHotkeyVirtualKey", settings.arrangeThreeWayHotkeyVirtualKey);
     WriteDword(key, L"ArrangeFourWayHotkeyModifiers", settings.arrangeFourWayHotkeyModifiers);
     WriteDword(key, L"ArrangeFourWayHotkeyVirtualKey", settings.arrangeFourWayHotkeyVirtualKey);
-    WriteDword(key, L"GroupHotkeyModifiers", settings.groupHotkeyModifiers);
-    WriteDword(key, L"GroupHotkeyVirtualKey", settings.groupHotkeyVirtualKey);
+    WriteDword(key, L"StackHotkeyModifiers", settings.stackHotkeyModifiers);
+    WriteDword(key, L"StackHotkeyVirtualKey", settings.stackHotkeyVirtualKey);
     RegCloseKey(key);
 }
 

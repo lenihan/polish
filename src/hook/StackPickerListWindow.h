@@ -9,29 +9,20 @@
 
 namespace polish {
 
-// One row: a candidate window not currently a group member, its title,
+// One row: a candidate window not currently a stack member, its title,
 // and its icon. Icon is captured once (in SetWindows) and borrowed --
 // same "never destroyed here" contract as AltTabListRow::icon /
-// GroupChromeWindow::SetMemberIcons.
-struct GroupPickerRow {
+// StackStripWindow::SetTabs.
+struct StackPickerRow {
     HWND hwnd = nullptr;
     std::wstring title;
     HICON icon = nullptr;  // borrowed, may be nullptr (falls back to text-only)
-    // False for a window this app already knows can never actually join
-    // a group (see WindowFilters::IsUnreparentableWindow) -- a UWP frame
-    // window (Calculator, Settings, ...), whose SetParent fails outright
-    // every time. Such a row is still listed (so its absence doesn't
-    // read as a bug) but painted dimmed, never shows its Add button, and
-    // its tooltip explains why instead of showing the truncated-title
-    // fallback. Computed once in SetWindows, not re-checked per paint --
-    // this property of a window class doesn't change at runtime.
-    bool addable = true;
 };
 
-// The "Available windows" half of GroupPickerWindow's picker: every
+// The "Available windows" half of StackPickerWindow's picker: every
 // candidate window *not currently selected*, in a fixed, never-reordered
 // stable order -- a window disappears from this list the moment it's
-// added to the group (see the sibling GroupPickerSelectedListWindow) and
+// added to the stack (see the sibling StackPickerSelectedListWindow) and
 // reappears here if later removed, the same mutually-exclusive-lists
 // mechanics the dialog's original (pre-Windows-11-redesign) two-list
 // model had.
@@ -49,7 +40,7 @@ struct GroupPickerRow {
 // one thing it can do, or hits nothing.
 //
 // The Add button is only ever drawn/hit-testable on the currently
-// "selected" row (selectedIndex_, pushed down from GroupPickerWindow's
+// "selected" row (selectedIndex_, pushed down from StackPickerWindow's
 // own single cross-list selectedWindow_ via SetSelectedHwnd -- see that
 // class's own comment for why selection lives up there, not here)
 // and/or whichever row the mouse currently hovers (hoveredIndex_,
@@ -59,7 +50,7 @@ struct GroupPickerRow {
 // ComputeLayout/Paint/WM_LBUTTONDOWN for the shape being mirrored
 // here), rather than showing every row's button all the time. Clicking
 // a row's body (anywhere but the Add button) reports that row via
-// onRowSelected_ instead of doing nothing -- GroupPickerWindow is the
+// onRowSelected_ instead of doing nothing -- StackPickerWindow is the
 // one that actually updates selectedWindow_ and pushes it back down to
 // both this list and its sibling, so this class never decides selection
 // on its own.
@@ -77,24 +68,24 @@ struct GroupPickerRow {
 // shape (the closest existing precedent for a hand-rolled, DPI-aware,
 // scrollable icon+text list in this codebase), but a plain WS_CHILD --
 // opaque, normal z-order, created fresh in
-// GroupPickerWindow::CreateControls and destroyed with it -- not
+// StackPickerWindow::CreateControls and destroyed with it -- not
 // AltTabListWindow's WS_POPUP/WS_EX_LAYERED/topmost/created-once shape,
 // which solves a different (translucent overlay) problem.
 //
-// Keyboard: this panel is one of GroupPickerWindow's five Tab stops (see
+// Keyboard: this panel is one of StackPickerWindow's five Tab stops (see
 // that class's CycleFocus). While it holds focus it draws an accent
 // border of its own -- the only cue available when the list is empty and
 // has no selected row to highlight -- and Up/Down move the selection
 // within its own rows, reported up via the same onRowSelected_ callback a
 // row-body click uses. Still unimplemented (not needed so far): Space/
 // Enter to trigger the row's Add button, Home/End, PageUp/PageDown.
-class GroupPickerListWindow {
+class StackPickerListWindow {
 public:
-    explicit GroupPickerListWindow(HINSTANCE instance);
-    ~GroupPickerListWindow();
+    explicit StackPickerListWindow(HINSTANCE instance);
+    ~StackPickerListWindow();
 
-    GroupPickerListWindow(const GroupPickerListWindow&) = delete;
-    GroupPickerListWindow& operator=(const GroupPickerListWindow&) = delete;
+    StackPickerListWindow(const StackPickerListWindow&) = delete;
+    StackPickerListWindow& operator=(const StackPickerListWindow&) = delete;
 
     // Creates the child window against `parent`. Caller positions it via
     // MoveWindow, same as any other child control.
@@ -108,7 +99,7 @@ public:
     void SetOnAddRequested(std::function<void(HWND)> callback) { onAddRequested_ = std::move(callback); }
 
     // Fired when a row's body (anywhere but the Add button) is clicked,
-    // with that row's hwnd -- GroupPickerWindow owns what "selected"
+    // with that row's hwnd -- StackPickerWindow owns what "selected"
     // actually means across both lists; this just reports the gesture.
     void SetOnRowSelected(std::function<void(HWND)> callback) { onRowSelected_ = std::move(callback); }
 
@@ -137,9 +128,9 @@ private:
     RowLayout ComputeLayout(UINT dpi) const;
     void UpdateScrollInfo();
     void SetHoveredIndex(std::optional<size_t> index);
-    // Shows/repositions/hides the "Add to group" tooltip to match
+    // Shows/repositions/hides the "Add to stack" tooltip to match
     // whichever row (if any) currently has its Add button visible under
-    // the cursor -- see GroupChromeWindow::UpdateTooltip for the
+    // the cursor -- see AltTabListWindow's tooltip handling for the
     // identical TTF_TRACK-based technique this mirrors.
     void UpdateTooltip();
     // Scrolls just far enough to bring row `index` fully into view, if it
@@ -156,10 +147,10 @@ private:
     // accent border (see Paint) and nothing else; which row is selected
     // still lives in selectedIndex_, pushed down from the parent.
     bool hasFocus_ = false;
-    std::vector<GroupPickerRow> rows_;
+    std::vector<StackPickerRow> rows_;
     // The row whose Add button is visible even without the mouse over
     // it -- set only via SetSelectedHwnd, pushed down from
-    // GroupPickerWindow's shared selectedWindow_ (see this class's own
+    // StackPickerWindow's shared selectedWindow_ (see this class's own
     // comment on why). Independent of hoveredIndex_, same as
     // AltTabListWindow's highlightIndex_/hoveredIndex_ pair -- either
     // one alone is enough to reveal a row's button.

@@ -34,13 +34,16 @@ add_library(polish_core STATIC
     src/windowtracking/RectUtils.cpp
     src/windowtracking/MoveSnap.cpp
     src/windowtracking/ArrangeSelection.cpp
+    src/windowtracking/StackCollapse.cpp
+    src/windowtracking/StackLayout.cpp
+    src/windowtracking/StackStripLayout.cpp
     src/windowtracking/WindowLayout.cpp
+    src/windowtracking/WindowPlacement.cpp
     src/windowtracking/ActivationHistory.cpp
-    src/windowtracking/GroupState.cpp
-    src/windowtracking/GroupManager.cpp
+    src/windowtracking/StackState.cpp
+    src/windowtracking/StackManager.cpp
     src/windowtracking/WindowFilters.cpp
     src/windowtracking/WindowZOrder.cpp
-    src/windowtracking/WindowReparenting.cpp
     src/windowtracking/TaskbarButtons.cpp
     src/windowtracking/TaskbarReadPolicy.cpp
     src/tray/TrayIcon.cpp
@@ -53,12 +56,11 @@ add_library(polish_core STATIC
     src/hook/AltTabDimOverlay.cpp
     src/hook/AltTabHighlightBorder.cpp
     src/hook/AltTabListWindow.cpp
-    src/hook/GroupChromeWindow.cpp
-    src/hook/GroupPickerWindow.cpp
-    src/hook/GroupPickerListWindow.cpp
-    src/hook/GroupPickerSelectedListWindow.cpp
-    src/hook/GroupHotkeyDialog.cpp
-    src/hook/GroupTabThumbnail.cpp
+    src/hook/StackPickerWindow.cpp
+    src/hook/StackPickerListWindow.cpp
+    src/hook/StackPickerSelectedListWindow.cpp
+    src/hook/StackHotkeyDialog.cpp
+    src/hook/StackStripWindow.cpp
     src/hook/TaskbarShield.cpp
     src/hook/TaskbarHook.cpp
     src/settings/Settings.cpp
@@ -106,7 +108,7 @@ if(MSVC)
     # non-ASCII character inside a wide string literal (e.g. an em dash)
     # gets silently mis-decoded into garbage at compile time rather than
     # a build error -- confirmed the hard way via a garbled log line
-    # (GroupPickerWindow's title) before this flag was added.
+    # (StackPickerWindow's title) before this flag was added.
     target_compile_options(polish_core PRIVATE /W4 /permissive- /utf-8)
 endif()
 

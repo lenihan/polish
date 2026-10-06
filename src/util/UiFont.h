@@ -10,14 +10,14 @@ namespace polish {
 // which is a fixed, pre-DPI-awareness bitmap font that leaves text tiny
 // inside otherwise-correctly-scaled UI at high DPI. That has now been
 // confirmed, human-reported, twice: once in the picker's own lists, and
-// again in the group chrome's tab strip, which was still on the stock
+// again in the stack's tab strip, which was still on the stock
 // font after every *other* tab-strip dimension had already been
 // DPI-scaled.
 //
 // Every caller that draws its own text should use this rather than
 // re-deriving it -- there were six verbatim copies of the same four
 // lines across the picker, its two list panels, the Alt+Tab list and the
-// group chrome before this existed.
+// stack strip before this existed.
 //
 // The caller owns the returned HFONT and must DeleteObject it (unlike a
 // stock font, which must *not* be deleted -- a trap when converting a

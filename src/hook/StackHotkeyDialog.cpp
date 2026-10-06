@@ -1,4 +1,4 @@
-#include "hook/GroupHotkeyDialog.h"
+#include "hook/StackHotkeyDialog.h"
 
 #include <iterator>
 
@@ -9,7 +9,7 @@ namespace polish {
 
 namespace {
 
-constexpr wchar_t kWindowClassName[] = L"PolishGroupHotkeyDialog";
+constexpr wchar_t kWindowClassName[] = L"PolishStackHotkeyDialog";
 constexpr int kCtrlCheckId = 2001;
 constexpr int kAltCheckId = 2002;
 constexpr int kShiftCheckId = 2003;
@@ -33,7 +33,7 @@ int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USE
 
 }  // namespace
 
-GroupHotkeyDialog::GroupHotkeyDialog(HINSTANCE instance) : instance_(instance) {
+StackHotkeyDialog::StackHotkeyDialog(HINSTANCE instance) : instance_(instance) {
     static bool classRegistered = false;
     if (!classRegistered) {
         WNDCLASSEXW windowClass{};
@@ -48,20 +48,20 @@ GroupHotkeyDialog::GroupHotkeyDialog(HINSTANCE instance) : instance_(instance) {
     }
 }
 
-GroupHotkeyDialog::~GroupHotkeyDialog() {
+StackHotkeyDialog::~StackHotkeyDialog() {
     if (window_ != nullptr) {
         DestroyWindow(window_);
     }
 }
 
-LRESULT CALLBACK GroupHotkeyDialog::WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
-    GroupHotkeyDialog* self = nullptr;
+LRESULT CALLBACK StackHotkeyDialog::WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    StackHotkeyDialog* self = nullptr;
     if (message == WM_NCCREATE) {
         auto* createStruct = reinterpret_cast<CREATESTRUCTW*>(lParam);
-        self = static_cast<GroupHotkeyDialog*>(createStruct->lpCreateParams);
+        self = static_cast<StackHotkeyDialog*>(createStruct->lpCreateParams);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
     } else {
-        self = reinterpret_cast<GroupHotkeyDialog*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+        self = reinterpret_cast<StackHotkeyDialog*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     }
     if (self != nullptr) {
         return self->HandleMessage(hwnd, message, wParam, lParam);
@@ -69,7 +69,7 @@ LRESULT CALLBACK GroupHotkeyDialog::WindowProcThunk(HWND hwnd, UINT message, WPA
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
-LRESULT GroupHotkeyDialog::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+LRESULT StackHotkeyDialog::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_CREATE:
             CreateControls(hwnd);
@@ -112,16 +112,16 @@ LRESULT GroupHotkeyDialog::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
     }
 }
 
-void GroupHotkeyDialog::CycleFocus(bool backward) {
+void StackHotkeyDialog::CycleFocus(bool backward) {
     // Reading order: the four modifier checkboxes, the key field, then
     // the two buttons.
     const HWND stops[] = {ctrlCheck_, altCheck_, shiftCheck_, winCheck_, keyEdit_, saveButton_, cancelButton_};
     polish::CycleFocus(stops, std::size(stops), backward);
 }
 
-void GroupHotkeyDialog::CreateControls(HWND hwnd) {
+void StackHotkeyDialog::CreateControls(HWND hwnd) {
     // MakeUiFont, not GetStockObject(DEFAULT_GUI_FONT) -- the same
-    // fixed, pre-DPI-awareness font that left the group chrome's tab
+    // fixed, pre-DPI-awareness font that left the stack strip's tab
     // labels tiny at high DPI (see util/UiFont.h). Owned now, so
     // ShowModal's cleanup deletes it; the stock font it replaced must
     // never be deleted.
@@ -176,7 +176,7 @@ void GroupHotkeyDialog::CreateControls(HWND hwnd) {
     LayoutControls();
 }
 
-void GroupHotkeyDialog::LayoutControls() {
+void StackHotkeyDialog::LayoutControls() {
     if (ctrlCheck_ == nullptr) {
         return;
     }
@@ -208,7 +208,7 @@ void GroupHotkeyDialog::LayoutControls() {
                TRUE);
 }
 
-void GroupHotkeyDialog::Commit() {
+void StackHotkeyDialog::Commit() {
     UINT modifiers = 0;
     if (SendMessageW(ctrlCheck_, BM_GETCHECK, 0, 0) == BST_CHECKED) modifiers |= MOD_CONTROL;
     if (SendMessageW(altCheck_, BM_GETCHECK, 0, 0) == BST_CHECKED) modifiers |= MOD_ALT;
@@ -231,7 +231,7 @@ void GroupHotkeyDialog::Commit() {
     done_ = true;
 }
 
-std::optional<HotkeyChoice> GroupHotkeyDialog::ShowModal(HWND owner, const HotkeyChoice& current) {
+std::optional<HotkeyChoice> StackHotkeyDialog::ShowModal(HWND owner, const HotkeyChoice& current) {
     initialChoice_ = current;
 
     const UINT dpi = GetDpiForSystem();
@@ -249,7 +249,7 @@ std::optional<HotkeyChoice> GroupHotkeyDialog::ShowModal(HWND owner, const Hotke
     const int x = monitorRect.left + ((monitorRect.right - monitorRect.left) - width) / 2;
     const int y = monitorRect.top + ((monitorRect.bottom - monitorRect.top) - height) / 2;
 
-    window_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClassName, L"Change Group Hotkey",
+    window_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClassName, L"Change Stack Hotkey",
                                WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, width, height, owner, nullptr, instance_,
                                this);
     if (window_ == nullptr) {
@@ -287,7 +287,7 @@ std::optional<HotkeyChoice> GroupHotkeyDialog::ShowModal(HWND owner, const Hotke
         }
         // Swallowed before TranslateMessage so the key field never sees
         // a literal tab character -- same interception point and
-        // reasoning as GroupPickerWindow's own pump. This dialog is not
+        // reasoning as StackPickerWindow's own pump. This dialog is not
         // a real Win32 dialog either (custom class, own modal loop), so
         // BS_DEFPUSHBUTTON on Save and the checkboxes' own WS_TABSTOP-ish
         // expectations get no help from a dialog manager: every stop has

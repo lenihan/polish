@@ -6,28 +6,27 @@
 #include <string>
 #include <vector>
 
-#include "hook/GroupPickerListWindow.h"
-#include "hook/GroupPickerSelectedListWindow.h"
+#include "hook/StackPickerListWindow.h"
+#include "hook/StackPickerSelectedListWindow.h"
 
 namespace polish {
 
-struct GroupPickerResult {
-    std::vector<HWND> windows;  // final Group-list membership, in order
+struct StackPickerResult {
+    std::vector<HWND> windows;  // final Stack-list membership, in order
     std::wstring name;
 };
 
-// The unified "New Group"/"Manage windows..." dialog: two side-by-side,
+// The unified "New Stack"/"Manage windows..." dialog: two side-by-side,
 // mutually-exclusive lists -- "Available windows" on the left (every
 // *not yet selected* candidate, each row with an Add button pointing
-// right -- see GroupPickerListWindow) and "Group" on the right (current
+// right -- see StackPickerListWindow) and "Stack" on the right (current
 // membership, in order, each row with a Remove button pointing left
 // back toward Available plus a drag handle for reordering -- see
-// GroupPickerSelectedListWindow). A window lives in exactly one of the
+// StackPickerSelectedListWindow). A window lives in exactly one of the
 // two lists at a time; the Add/Remove arrows point toward whichever
 // side a window would move to, the same spatial convention this
 // dialog's original (pre-Windows-11-redesign) two-list layout used.
-// Order feeds directly into GroupChromeWindow's tab order and
-// GroupManager's tile fill order.
+// Order feeds directly into the strip's tab order.
 //
 // This shape went through several iterations before landing here: a
 // single flat checklist that sorted checked rows to the top (confirmed,
@@ -44,7 +43,7 @@ struct GroupPickerResult {
 // the row body itself does nothing) while bringing the drag handle back
 // for reordering, and returns to a side-by-side layout instead of
 // stacking one panel's dynamic height above the other. selectedOrder_
-// (below) is this class's own single source of truth for group
+// (below) is this class's own single source of truth for stack
 // membership/order; both child lists are pure renderers driven from it
 // (available_ shown ones are allCandidates_ minus selectedOrder_) and
 // report user gestures back up via callbacks, never holding their own
@@ -54,30 +53,30 @@ struct GroupPickerResult {
 // -- a plain WS_POPUP top-level window built the same from-scratch way
 // as this app's other custom windows, with its own nested message loop
 // run from ShowModal for the duration it's open.
-class GroupPickerWindow {
+class StackPickerWindow {
 public:
-    explicit GroupPickerWindow(HINSTANCE instance);
-    ~GroupPickerWindow();
+    explicit StackPickerWindow(HINSTANCE instance);
+    ~StackPickerWindow();
 
-    GroupPickerWindow(const GroupPickerWindow&) = delete;
-    GroupPickerWindow& operator=(const GroupPickerWindow&) = delete;
+    StackPickerWindow(const StackPickerWindow&) = delete;
+    StackPickerWindow& operator=(const StackPickerWindow&) = delete;
 
     // Shows the dialog, centered against `owner` (or the primary
     // monitor if owner isn't valid), and blocks -- pumping messages via
     // its own nested loop -- until the user confirms or cancels/closes
-    // it. Returns the final Group-list membership (in its final order)
+    // it. Returns the final Stack-list membership (in its final order)
     // and name on confirm, or std::nullopt on cancel.
     //
     // `initialSelection` pre-selects those rows (used for editing an
-    // existing group's membership -- an empty list is exactly
+    // existing stack's membership -- an empty list is exactly
     // creation); existing members are always kept selected even if
     // they'd normally be filtered out of "candidates" (e.g. currently
     // minimized) -- editing should never silently drop a member just
     // because of a transient state at edit time. `initialName`
     // pre-fills the name field. `editing` only affects the window
     // title/confirm-button wording.
-    std::optional<GroupPickerResult> ShowModal(HWND owner, const std::vector<HWND>& initialSelection = {},
-                                                const std::wstring& initialName = L"New Group",
+    std::optional<StackPickerResult> ShowModal(HWND owner, const std::vector<HWND>& initialSelection = {},
+                                                const std::wstring& initialName = L"New Stack",
                                                 bool editing = false);
 
 private:
@@ -93,7 +92,7 @@ private:
     // CreateControls and again on every WM_DPICHANGED.
     void ApplyDialogFont(UINT dpi);
     // Moves keyboard focus to the next (or previous) of this dialog's five
-    // tab stops, wrapping: Name, Open windows, Group, Create, Cancel. Done
+    // tab stops, wrapping: Name, Open windows, Stack, Create, Cancel. Done
     // by hand because this deliberately isn't a real Win32 dialog (see the
     // class comment) -- there's no IsDialogMessage/WS_TABSTOP machinery
     // here to defer to, and two of the five stops are custom-painted child
@@ -133,7 +132,7 @@ private:
     // a window (IsCandidateWindowShape's visible/owner/toolwindow/caption/
     // title-length/cloaked checks, plus this dialog's own fail-closed
     // IsElevatedWindow), and a window that's already a member of another
-    // group is WS_CHILD and so never reaches EnumWindows at all. Having
+    // stack is WS_CHILD and so never reaches EnumWindows at all. Having
     // the accepted set in the log turns "it's missing" into "it's
     // missing *and* here's everything that wasn't".
     void LogCandidates(const wchar_t* reason) const;
@@ -150,10 +149,10 @@ private:
     HWND availableLabel_ = nullptr;
     HWND createButton_ = nullptr;
     HWND cancelButton_ = nullptr;
-    GroupPickerSelectedListWindow selected_;
-    GroupPickerListWindow available_;
+    StackPickerSelectedListWindow selected_;
+    StackPickerListWindow available_;
 
-    // The single source of truth for group membership/order (see class
+    // The single source of truth for stack membership/order (see class
     // comment) -- both child panels are refreshed from this, never the
     // other way around. allCandidates_ is the fixed, never-reordered
     // universe available_ browses; built once per ShowModal in
@@ -172,16 +171,8 @@ private:
 
     std::vector<HWND> initialSelection_;
     std::wstring initialName_;
-    // The chrome window of the group being edited, or nullptr when
-    // creating a new group -- ShowModal's own `owner` argument, kept so
-    // PopulateLists/RefreshCandidates can drop exactly this one window
-    // from the candidate list. Every *other* group's chrome is a
-    // perfectly ordinary candidate (see EnumPickerCandidatesProc's own
-    // comment for why), but offering a group to itself as a member is
-    // nonsense -- and would reparent a window into itself.
-    HWND editedGroupChrome_ = nullptr;
     bool editing_ = false;
-    std::optional<GroupPickerResult> result_;
+    std::optional<StackPickerResult> result_;
     bool done_ = false;
 
     // The rounded-rect "card" LayoutControls positions nameEdit_ within

@@ -230,7 +230,7 @@ public:
     bool IsMovingWindow() const { return dragging_ || keyboardSession_; }
 
     // WM_APP+1 is TrayIcon's, +10 AltTabHook's, +20 the deferred
-    // close-group cleanup in main.cpp.
+    // close-stack cleanup in main.cpp.
     static constexpr UINT kMoveModeMessage = WM_APP + 30;
 
 private:

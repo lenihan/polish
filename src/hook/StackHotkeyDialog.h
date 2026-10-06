@@ -11,7 +11,7 @@ struct HotkeyChoice {
     UINT virtualKey = 0;     // a single VK code, e.g. 'G'
 };
 
-// The "Change Group Hotkey..." UI: four modifier checkboxes (Ctrl/Alt/
+// The "Change Stack Hotkey..." UI: four modifier checkboxes (Ctrl/Alt/
 // Shift/Win) plus a one-character edit box, not a live "press your
 // shortcut" capture -- the Win key in particular is unreliable to
 // detect via a live key-press (the shell often intercepts it first),
@@ -19,18 +19,18 @@ struct HotkeyChoice {
 // which checkboxes map onto directly.
 //
 // Purely a collection/validation UI, same division of responsibility
-// as GroupPickerWindow: this dialog doesn't itself call RegisterHotKey
+// as StackPickerWindow: this dialog doesn't itself call RegisterHotKey
 // -- the caller owns the actual hotkey id/message window and the
 // try-register-or-retry loop (a combination can be syntactically valid
 // here but still already claimed by something else on the machine,
 // which this dialog has no way to know).
-class GroupHotkeyDialog {
+class StackHotkeyDialog {
 public:
-    explicit GroupHotkeyDialog(HINSTANCE instance);
-    ~GroupHotkeyDialog();
+    explicit StackHotkeyDialog(HINSTANCE instance);
+    ~StackHotkeyDialog();
 
-    GroupHotkeyDialog(const GroupHotkeyDialog&) = delete;
-    GroupHotkeyDialog& operator=(const GroupHotkeyDialog&) = delete;
+    StackHotkeyDialog(const StackHotkeyDialog&) = delete;
+    StackHotkeyDialog& operator=(const StackHotkeyDialog&) = delete;
 
     // Shows the dialog pre-filled with `current`, centered against
     // `owner`, and blocks (its own nested message loop) until Save or
@@ -49,7 +49,7 @@ private:
     void LayoutControls();
     void Commit();
     // Moves focus to the next/previous control. By hand, like
-    // GroupPickerWindow's own identically-named method (both defer to
+    // StackPickerWindow's own identically-named method (both defer to
     // util/DialogKeyboard) -- this is a custom window class with its own
     // modal pump, not a real Win32 dialog, so there's no dialog manager
     // to walk WS_TABSTOP for us.
