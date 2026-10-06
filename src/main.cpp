@@ -5363,6 +5363,19 @@ void OnMoveModeDrop() {
                 overlay->ShowOverTarget(g_moveModeTarget);
             }
         }
+        // The outline has to follow the window to wherever the layout put
+        // it. Only the rect branch above moved it, because that goes
+        // through ApplyMoveModeRect which redraws the ring as part of its
+        // job; ShowWindow(SW_MAXIMIZE) does not, so a maximize left the
+        // ring sitting at the window's pre-snap rect until the Win key
+        // came up and the session tore everything down -- reported as
+        // still seeing the original outline of the window after the snap.
+        //
+        // Safe to do unconditionally: the geometry is readable straight
+        // away (checked -- DWM reports the maximized rect at this point,
+        // with no animation lag to wait out), and for the rect branch
+        // this is a no-op repeat that the ring's own size cache absorbs.
+        UpdateMoveModeOutline();
         if (g_moveModeZones) {
             // Back to the hover map: the drag is over, but the session
             // may well continue on this same window.

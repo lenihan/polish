@@ -744,6 +744,32 @@ current todo list.
     landed 11 times out of 12 -- the one failure was in a run where the
     probe itself had just been edited, and has not recurred since.
 
+- Move/resize mode: after a snap the window's outline ring was left
+  behind at the pre-snap position until the Win key came up. Only the
+  half/quarter branch moved it, because that goes through
+  `ApplyMoveModeRect`, which redraws the ring as part of its job;
+  `ShowWindow(SW_MAXIMIZE)` does not, so a maximize never repositioned
+  it. One `UpdateMoveModeOutline()` after the layout is applied, covering
+  both branches -- a no-op repeat for the rect one, which the ring's own
+  size cache absorbs.
+  - Checked before assuming an animation race: DWM reports the maximized
+    rect immediately at that point, identical at +250ms, so there is no
+    lag to wait out and no timer needed.
+  - Evidence is weaker than usual and worth saying so. The mechanism is
+    plain in the code and the fix is one line, and the ring does appear
+    at the maximized rect once it is applied (the screen edge reads pure
+    accent, (0,120,212) across 5px, against (13,107,179) from the zone
+    map alone with the fix disabled). But three attempts at a probe that
+    detects the *stale* ring at its old location all failed for probe
+    reasons, not product ones: the first sampled where the window had
+    been before the drag rather than where it was at release; the second
+    counted the zone map's hover fill, which legitimately covers the
+    maximized window, as a ring -- it read identically with the fix on
+    and off; the third died on PowerShell array and here-string quoting.
+    A detector has to separate the ring (near-raw accent, alpha ~200)
+    from that fill (same hue, alpha 70, around (44,76,102)), and scan
+    where the window sat *at the moment of release*.
+
 
 ## v1.0 release -- Microsoft Store
 
