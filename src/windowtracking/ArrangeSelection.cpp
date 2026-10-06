@@ -1,0 +1,81 @@
+#include "windowtracking/ArrangeSelection.h"
+
+#include <algorithm>
+
+namespace polish {
+
+int MinimumWindowsFor(ArrangeKind kind) {
+    return SlotsFor(kind);
+}
+
+ArrangeAvailability EvaluateArrange(ArrangeKind kind, int eligibleCount) {
+    if (eligibleCount >= MinimumWindowsFor(kind)) {
+        return ArrangeAvailability{true, L""};
+    }
+    // Spelled out per kind rather than built from the number, because
+    // these go in front of the user and "needs 2 windows" reads better
+    // than a sentence assembled from parts. Singular/plural matters at 2.
+    switch (kind) {
+        case ArrangeKind::TwoWay:
+            return ArrangeAvailability{false, L"needs 2 windows"};
+        case ArrangeKind::ThreeWay:
+            return ArrangeAvailability{false, L"needs 3 windows"};
+        case ArrangeKind::FourWay:
+            return ArrangeAvailability{false, L"needs 4 windows"};
+    }
+    return ArrangeAvailability{false, L"not available"};
+}
+
+ArrangeToggle::KindState& ArrangeToggle::StateFor(ArrangeKind kind) {
+    switch (kind) {
+        case ArrangeKind::TwoWay:
+            return twoWay_;
+        case ArrangeKind::ThreeWay:
+            return threeWay_;
+        case ArrangeKind::FourWay:
+            break;
+    }
+    return fourWay_;
+}
+
+void ArrangeToggle::Reset() {
+    twoWay_ = KindState{};
+    threeWay_ = KindState{};
+    fourWay_ = KindState{};
+}
+
+std::vector<HWND> ArrangeToggle::Next(ArrangeKind kind, const std::vector<HWND>& mruOrdered) {
+    const int slots = SlotsFor(kind);
+    if (static_cast<int>(mruOrdered.size()) < MinimumWindowsFor(kind)) {
+        return {};
+    }
+
+    // The most recent `slots` windows. Anything older is left exactly
+    // where it is: a tiling command is for the handful of windows actually
+    // being worked in, and rearranging the rest of the desktop as a side
+    // effect is how a convenience becomes something people stop using.
+    std::vector<HWND> chosen(mruOrdered.begin(), mruOrdered.begin() + slots);
+
+    std::vector<HWND> key = chosen;
+    std::sort(key.begin(), key.end());
+
+    KindState& state = StateFor(kind);
+    if (key != state.lastEligible) {
+        // A different set of windows: the user means something new, so
+        // start from MRU order again rather than inheriting a reversal
+        // they asked for about some other pair of windows.
+        state.reverseNext = false;
+        state.lastEligible = std::move(key);
+    }
+
+    if (state.reverseNext) {
+        // Reversing what was just chosen, not replaying a stored list:
+        // this way the reversal always applies to the windows that are
+        // eligible now, even if their order shifted since last time.
+        std::reverse(chosen.begin(), chosen.end());
+    }
+    state.reverseNext = !state.reverseNext;
+    return chosen;
+}
+
+}  // namespace polish

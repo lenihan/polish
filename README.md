@@ -141,6 +141,11 @@ to aim at in either gesture, and only one button to use.
   snap target in that direction. **Enter** keeps it, **Escape** puts it
   back exactly where it started, and a click anywhere keeps it and ends
   the session.
+- **Without the keyboard: the tray menu.** Both gestures above start with
+  the Win key, so there is also a **Move or resize a window** item in the
+  tray menu. It opens the same session on the window you were last in, and
+  from there the mouse finishes the job — drag to move, drag near an edge
+  to resize, click to keep it.
 - **Moving a window never raises it**, so you can tidy something in the
   background without bringing it to the front.
 - **Normal Win shortcuts are untouched.** Pressing any other key during
@@ -188,19 +193,26 @@ behave differently, and nothing on screen says which is which. The same
 line is written to the log at startup, so a log file identifies its own
 binary.
 
-**Tile or cascade everything on screen, in one go.** The gestures above
-act on one window; these act on all of them. **Ctrl+Alt+T** tiles every
-non-minimized window on the current monitor into a roughly square grid —
-two windows become a left/right split, four become the corners, and an
-odd count puts the leftovers in a full-width row rather than leaving a
-hole. **Ctrl+Alt+C** cascades them instead, all the same size and stepped
-down and right so every title bar stays readable; a long enough stack
-restarts from the top-left rather than walking off the screen.
+**Tile two, three or four windows, in one go.** The gestures above act on
+one window; these act on a handful. **Ctrl+Alt+2**, **Ctrl+Alt+3** and
+**Ctrl+Alt+4** split the current monitor between that many windows — the
+digit is the number of windows, so there is nothing to remember.
 
-Both are also in the tray menu, which shows the key beside each one —
-so the mouse way in teaches the keyboard way in. Windows are taken
-most-recently-used first, so the one you were just in gets the first
-slot.
+The split follows the shape of the monitor, using whichever dimension has
+more room: on an ordinary landscape monitor 2-way is a left/right pair and
+3-way is three columns, and on a monitor turned on its side both split the
+other way instead. 4-way is the four corners either way round.
+
+Windows are taken **most-recently-used first**, so the one you were just
+in gets the first slot, and anything older than the slots available is
+left exactly where it is — tiling two windows does not rearrange the rest
+of your desktop. **Press the same keys again to reverse the order**, which
+is usually a faster fix than dragging when the left and right ended up the
+wrong way round; a third press puts them back.
+
+All three are also in the tray menu, which shows the key beside each one,
+so the mouse way in teaches the keyboard way in. An item you do not have
+enough windows for is greyed out and says so.
 
 **Only normal windows take part.** A minimized window stays minimized,
 and a maximized one stays maximized and keeps its place — tiling works

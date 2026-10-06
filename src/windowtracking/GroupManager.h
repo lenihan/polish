@@ -10,22 +10,6 @@
 
 namespace polish {
 
-// The tile grid's column/row count for `count` simultaneously-visible
-// members. Tile: biased wide (cols >= rows, Horizontal) or tall
-// (rows >= cols, Vertical) -- ceil(sqrt(count)) in the biased dimension,
-// however many of the other dimension that leaves. Stack: forced to a
-// single row (Horizontal) or single column (Vertical) regardless of
-// count -- the "third layout mode" between Tab and full Tile. A free
-// function (not a GroupManager member) so it's unit-testable without a
-// live GroupManager/HWNDs -- everything downstream of the shape
-// (fractions, splitter gaps, positioning) still lives in
-// GroupManager::ApplyTileLayout, which calls this for the shape itself.
-struct GridShape {
-    int cols;
-    int rows;
-};
-GridShape ComputeGridShape(GroupMode mode, GroupAlignment alignment, int count);
-
 // Owns every group Polish currently knows about, and the logic that
 // actually reparents/positions/shows member windows -- unlike
 // GroupState itself, this is not pure/Win32-free, so it isn't unit
@@ -55,7 +39,7 @@ public:
     // group with no members yet). Does not reparent anything itself --
     // that happens the first time ApplyLayout runs for this group, once
     // its chrome window exists.
-    GroupId CreateGroup(const std::vector<HWND>& windows, GroupMode mode = GroupMode::Tab);
+    GroupId CreateGroup(const std::vector<HWND>& windows);
 
     size_t GroupCount() const { return groups_.size(); }
     const std::vector<GroupState>& Groups() const { return groups_; }
@@ -81,21 +65,11 @@ public:
     // `contentRectClientCoords` -- *client-area-relative* coordinates
     // (a child window's SetWindowPos x/y are relative to its parent's
     // client origin, not the screen) -- unlike the old reposition-only
-    // design's screen coordinates. Behavior depends on group.Mode():
-    //  - Tab: every member occupies the identical rect and stays shown;
-    //    only the active one is Z-ordered on top (see ApplyTabLayout's
-    //    own comment for why nothing is ever hidden).
-    //  - Tile/Stack: contentRectClientCoords is divided into a grid (see
-    //    ComputeGridShape -- Tile roughly square, Stack a single row/
-    //    column), user-resizable via TileColumnBoundaries/
-    //    TileRowBoundaries/SetTileBoundary, and every member is
-    //    positioned into its own slot and shown simultaneously.
-    //    `tileSplitterWidthPx` (ignored in Tab mode) reserves that many
-    //    real pixels between adjacent columns/rows for the chrome's
-    //    draggable splitter -- members never overlap it, unlike an
-    //    earlier version of this where the splitter was drawn *over*
-    //    the members' shared edge and could visibly race with their
-    //    own repaints.
+    // design's screen coordinates.
+    //
+    // Every member occupies the identical rect and stays shown; only the
+    // active one is Z-ordered on top -- see the implementation's own
+    // comment for why nothing is ever hidden.
     //
     // Returns the smallest content-area size that would fit every
     // member without any of them being clamped by their own declared
@@ -107,8 +81,7 @@ public:
     // compare and, if it's larger, grow the chrome to at least this
     // size and call ApplyLayout again, rather than leaving a member
     // visibly overflowing the group.
-    SIZE ApplyLayout(GroupState& group, HWND chromeWindow, const RECT& contentRectClientCoords,
-                      int tileSplitterWidthPx = 0);
+    SIZE ApplyLayout(GroupState& group, HWND chromeWindow, const RECT& contentRectClientCoords);
 
     // Restores every member of `group` back to an independent top-level
     // window (WindowReparenting::RestoreTopLevel) -- must be called
@@ -149,42 +122,11 @@ public:
     // kThumbnailStabilizeTimerId).
     bool RefreshThumbnail(HWND hwnd);
 
-    // Tile/Stack only: the last-computed column/row boundaries from the
-    // most recent ApplyLayout call -- content-rect-relative pixel
-    // positions, *excluding* the two outer edges (N columns have N-1
-    // of these), each the *center* of that column/row pair's reserved
-    // splitter gap (see ApplyLayout's own comment on
-    // tileSplitterWidthPx). Empty if the group is in Tab mode, has 0-1
-    // members, or ApplyLayout hasn't run for it yet. Used by the chrome
-    // to render/hit-test the resize splitters between tiles.
-    std::vector<int> TileColumnBoundaries(GroupId id) const;
-    std::vector<int> TileRowBoundaries(GroupId id) const;
-
-    // Tile/Stack only: moves the boundary between column (or row, if
-    // `column` is false) `index` and `index + 1` to `newPixelPosition`
-    // -- content-rect-relative, in the *same* real/gap-reserved pixel
-    // space as TileColumnBoundaries/TileRowBoundaries (a splitter gap
-    // center), not the content-only space ApplyLayout's fractions
-    // divide up internally; this converts between the two itself.
-    // `totalSize` is the content area's current real width (columns)
-    // or height (rows); `splitterWidthPx` must match whatever was
-    // passed to the ApplyLayout call that produced the boundaries
-    // being dragged. Only the two adjacent cells' stored fractions
-    // change, every other column/row is untouched, matching standard
-    // splitter behavior. Clamps within the pair's own combined span as
-    // a safety net; the primary minimum-visible-size enforcement
-    // happens in pixel space in the chrome, before this is even called
-    // (see GroupChromeWindow's own splitter-drag handling). No-op if
-    // `index + 1` is out of range for the group's current column/row
-    // count.
-    void SetTileBoundary(GroupState& group, bool column, size_t index, int newPixelPosition, int totalSize,
-                          int splitterWidthPx);
-
     // Puts hwnd back into the rect the last ApplyLayout pass positioned
     // it into, if it has since drifted -- a user dragging or resizing a
-    // member inside the group (confirmed real: Tab mode's member fills
-    // the whole content area but nothing stopped it being resized
-    // smaller, revealing the members Z-ordered behind it). A member's
+    // member inside the group (confirmed real: a member fills the whole
+    // content area but nothing stopped it being resized smaller,
+    // revealing the members Z-ordered behind it). A member's
     // geometry is owned entirely by this class; nothing else is allowed
     // to move one. No-op for a window that isn't a currently laid-out
     // member (memberRects_ has no entry for it), or one already where it
@@ -197,8 +139,6 @@ public:
     bool EnforceMemberRect(HWND hwnd);
 
 private:
-    SIZE ApplyTabLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRect);
-    SIZE ApplyTileLayout(GroupState& group, HWND chromeWindow, const RECT& contentRect, int splitterWidthPx);
     // Tries to embed hwnd (ReparentIntoGroup). Returns false if hwnd is
     // a known-unreparentable window (WindowFilters::IsUnreparentableWindow)
     // or ReparentIntoGroup itself fails, which ApplyLayout uses to drop a
@@ -314,14 +254,9 @@ private:
         bool suspended = false;
     };
     std::map<HWND, CorrectionThrottle> correctionThrottles_;
-    // Populated by ApplyTileLayout each time it runs. See
-    // TileColumnBoundaries/TileRowBoundaries.
-    std::map<GroupId, std::vector<int>> tileColumnBoundaries_;
-    std::map<GroupId, std::vector<int>> tileRowBoundaries_;
     // Per-chrome pool of resize-band overlay windows (see
-    // kResizeBandOverlayClassName's own comment) -- Tab mode needs at
-    // most one (only the active member is visible), Tile/Stack one per
-    // member whose own frame claims a band. They're children of the
+    // kResizeBandOverlayClassName's own comment) -- at most one is
+    // needed, since only the active member is visible. They're children of the
     // chrome, so Windows destroys them along with it; the map entry is
     // dropped in ReleaseGroup.
     std::map<HWND, std::vector<HWND>> resizeBandOverlays_;

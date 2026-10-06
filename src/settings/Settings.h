@@ -38,21 +38,32 @@ struct Settings {
     // tuned on one machine. No UI for it yet -- registry only.
     UINT moveModeSnapThresholdPx = 12;
 
-    // The "Tile windows" and "Cascade windows" global hotkeys, in the
-    // same RegisterHotKey form as the group one below. Stored rather
+    // The "Tile 2-way", "Tile 3-way" and "Tile 4-way" global hotkeys, in
+    // the same RegisterHotKey form as the group one below. Stored rather
     // than fixed for the reason that one documents: a combination can
     // already be claimed by something else on a given machine, which was
     // confirmed happening here. No picker dialog for these yet -- change
     // them in HKCU\Software\Polish if they collide.
-    // Ctrl+Alt rather than Win+Alt, which would have matched the group
-    // hotkey below: every Win-based pair tried had at least one half
-    // already claimed on the dev machine (Win+Alt+T, Win+Shift+T,
-    // Win+Shift+C and Win+Ctrl+C were all taken), and a pair that does
-    // not share its modifiers is worse than one that is not Win-based.
-    UINT arrangeTileHotkeyModifiers = MOD_CONTROL | MOD_ALT;
-    UINT arrangeTileHotkeyVirtualKey = 'T';
-    UINT arrangeCascadeHotkeyModifiers = MOD_CONTROL | MOD_ALT;
-    UINT arrangeCascadeHotkeyVirtualKey = 'C';
+    //
+    // The digit matches the number of windows, which makes three hotkeys
+    // as easy to remember as one. Ctrl+Alt rather than Win+Alt, which
+    // would have matched the group hotkey below: every Win-based pair
+    // tried had at least one half already claimed on the dev machine
+    // (Win+Alt+T, Win+Shift+T, Win+Shift+C and Win+Ctrl+C were all
+    // taken), and a pair that does not share its modifiers is worse than
+    // one that is not Win-based.
+    //
+    // These are new value names rather than the old ArrangeTile*/
+    // ArrangeCascade* ones, with no fallback to them on purpose: the
+    // stored values there are 'T' and 'C', which are the wrong keys for
+    // these commands, so inheriting them would silently leave a user on a
+    // hotkey that no longer matches anything the menu says.
+    UINT arrangeTwoWayHotkeyModifiers = MOD_CONTROL | MOD_ALT;
+    UINT arrangeTwoWayHotkeyVirtualKey = '2';
+    UINT arrangeThreeWayHotkeyModifiers = MOD_CONTROL | MOD_ALT;
+    UINT arrangeThreeWayHotkeyVirtualKey = '3';
+    UINT arrangeFourWayHotkeyModifiers = MOD_CONTROL | MOD_ALT;
+    UINT arrangeFourWayHotkeyVirtualKey = '4';
 
     // The "New Group" global hotkey -- RegisterHotKey's own modifier
     // flags (MOD_ALT/MOD_CONTROL/MOD_SHIFT/MOD_WIN, OR'd together) and

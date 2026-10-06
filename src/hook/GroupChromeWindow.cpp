@@ -134,13 +134,8 @@ constexpr COLORREF kTitleBarCloseHoverColor = RGB(0xE8, 0x11, 0x23);
 constexpr int kTitleBarSeparatorInset = 8;  // logical px
 
 // Local to this window's own context menu -- TrackPopupMenu's returned
-// command isn't routed through WM_COMMAND, so these don't need to be
-// unique app-wide. The three mode ids are contiguous (kContextMenuModeTab
-// first) so CheckMenuRadioItem can address them as one radio group by
-// range.
-constexpr UINT kContextMenuModeTab = 1;
-constexpr UINT kContextMenuModeTile = 2;
-constexpr UINT kContextMenuModeStack = 3;
+// command isn't routed through WM_COMMAND, so this doesn't need to be
+// unique app-wide.
 constexpr UINT kContextMenuEditWindows = 4;
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
@@ -400,16 +395,6 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                 if (PtInRect(&r, clientPt)) {
                     return HTCLIENT;
                 }
-                r = ModeToggleButtonRect(clientRect, dpi);
-                if (PtInRect(&r, clientPt)) {
-                    return HTCLIENT;
-                }
-                if (TileMaximizeButtonVisible()) {
-                    r = TileMaximizeButtonRect(clientRect, dpi);
-                    if (PtInRect(&r, clientPt)) {
-                        return HTCLIENT;
-                    }
-                }
                 r = AlignmentButtonRect(clientRect, dpi);
                 if (PtInRect(&r, clientPt)) {
                     return HTCLIENT;
@@ -532,20 +517,6 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                 SetCursor(LoadCursorW(nullptr, IDC_ARROW));
                 return TRUE;
             }
-            // Only for hovering a splitter -- everything else (the
-            // window's own resize border, etc.) still needs its normal
-            // default handling, so only intercept the plain client-area
-            // case and only when a splitter is actually under the
-            // cursor.
-            if (IsTiledMode(mode_) && LOWORD(lParam) == HTCLIENT) {
-                POINT pt;
-                GetCursorPos(&pt);
-                ScreenToClient(hwnd, &pt);
-                if (const auto hit = HitTestSplitter(pt)) {
-                    SetCursor(LoadCursorW(nullptr, hit->first ? IDC_SIZEWE : IDC_SIZENS));
-                    return TRUE;
-                }
-            }
             return DefWindowProcW(hwnd, message, wParam, lParam);
         }
 
@@ -619,49 +590,16 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                     UpdateTooltip();
                     return 0;
                 }
-                r = ModeToggleButtonRect(clientRect, dpi);
-                if (PtInRect(&r, pt)) {
-                    if (onModeToggleRequested_) {
-                        onModeToggleRequested_();
-                    }
-                    // onModeToggleRequested_ calls SetMode back
-                    // synchronously, so mode_ (and therefore the
-                    // tooltip's Switch-to-Tile/Switch-to-Tab text) is
-                    // already up to date here.
-                    UpdateTooltip();
-                    return 0;
-                }
-                if (TileMaximizeButtonVisible()) {
-                    r = TileMaximizeButtonRect(clientRect, dpi);
-                    if (PtInRect(&r, pt)) {
-                        if (onTileMaximizeToggleRequested_) {
-                            onTileMaximizeToggleRequested_();
-                        }
-                        // Same reasoning as mode-toggle above --
-                        // onTileMaximizeToggleRequested_ calls
-                        // SetTileMaximized back synchronously.
-                        UpdateTooltip();
-                        return 0;
-                    }
-                }
                 r = AlignmentButtonRect(clientRect, dpi);
                 if (PtInRect(&r, pt)) {
                     if (onAlignmentToggleRequested_) {
                         onAlignmentToggleRequested_();
                     }
-                    // Same reasoning as mode-toggle above --
-                    // onAlignmentToggleRequested_ calls SetAlignment
-                    // back synchronously.
+                    // onAlignmentToggleRequested_ calls SetAlignment back
+                    // synchronously, so the tooltip text is already current.
                     UpdateTooltip();
                     return 0;
                 }
-            }
-            if (IsTiledMode(mode_)) {
-                if (const auto hit = HitTestSplitter(pt)) {
-                    draggingSplitter_ = *hit;
-                    SetCapture(hwnd);
-                }
-                return 0;
             }
             RECT clientRect;
             GetClientRect(hwnd, &clientRect);
@@ -683,14 +621,8 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
 
         case WM_MOUSEMOVE: {
             const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-            if (draggingSplitter_.has_value()) {
-                DragSplitter(pt);
-                return 0;
-            }
             {
-                // Mode-toggle/manage-windows hover -- checked in both
-                // modes (the title bar band always exists), independent
-                // of the mode-specific hover tracking below.
+                // Manage-windows/alignment hover.
                 RECT clientRect;
                 GetClientRect(hwnd, &clientRect);
                 const UINT dpi = GetDpiForWindow(hwnd);
@@ -699,23 +631,9 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                 if (PtInRect(&r, pt)) {
                     newActionHover = TitleBarActionButton::ManageWindows;
                 } else {
-                    r = ModeToggleButtonRect(clientRect, dpi);
+                    r = AlignmentButtonRect(clientRect, dpi);
                     if (PtInRect(&r, pt)) {
-                        newActionHover = TitleBarActionButton::ModeToggle;
-                    } else {
-                        bool hitTileMaximize = false;
-                        if (TileMaximizeButtonVisible()) {
-                            r = TileMaximizeButtonRect(clientRect, dpi);
-                            hitTileMaximize = PtInRect(&r, pt) != FALSE;
-                        }
-                        if (hitTileMaximize) {
-                            newActionHover = TitleBarActionButton::TileMaximize;
-                        } else {
-                            r = AlignmentButtonRect(clientRect, dpi);
-                            if (PtInRect(&r, pt)) {
-                                newActionHover = TitleBarActionButton::Alignment;
-                            }
-                        }
+                        newActionHover = TitleBarActionButton::Alignment;
                     }
                 }
                 if (!trackingMouseLeave_) {
@@ -732,34 +650,6 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                     InvalidateTitleBar();
                     UpdateTooltip();
                 }
-            }
-            if (IsTiledMode(mode_)) {
-                // Splitter hover highlight -- Tile/Stack has no tabs, so
-                // this stands in for (doesn't compete with) the tab
-                // hover-preview tracking below, which only ever applies
-                // in Tab mode anyway (ComputeTabRects is always empty
-                // here). Cursor shape itself is WM_SETCURSOR's job, not
-                // this handler's.
-                if (!trackingMouseLeave_) {
-                    TRACKMOUSEEVENT tme{};
-                    tme.cbSize = sizeof(tme);
-                    tme.dwFlags = TME_LEAVE;
-                    tme.hwndTrack = hwnd;
-                    if (TrackMouseEvent(&tme)) {
-                        trackingMouseLeave_ = true;
-                    }
-                }
-                const auto newHover = HitTestSplitter(pt);
-                if (newHover != hoveredSplitter_) {
-                    if (hoveredSplitter_.has_value()) {
-                        InvalidateSplitterBand(hoveredSplitter_->first, hoveredSplitter_->second);
-                    }
-                    hoveredSplitter_ = newHover;
-                    if (hoveredSplitter_.has_value()) {
-                        InvalidateSplitterBand(hoveredSplitter_->first, hoveredSplitter_->second);
-                    }
-                }
-                return 0;
             }
 
             RECT clientRect;
@@ -837,10 +727,6 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                     onTabHovered_(std::nullopt, RECT{});
                 }
             }
-            if (hoveredSplitter_.has_value()) {
-                InvalidateSplitterBand(hoveredSplitter_->first, hoveredSplitter_->second);
-                hoveredSplitter_.reset();
-            }
             if (hoveredActionButton_.has_value()) {
                 hoveredActionButton_.reset();
                 InvalidateTitleBar();
@@ -863,33 +749,7 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
                 }
             }
             return 0;
-
-        case WM_LBUTTONDBLCLK: {
-            if (IsTiledMode(mode_)) {
-                const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-                auto hit = HitTestSplitter(pt);
-                if (hit.has_value() && onTileSplitterDoubleClicked_) {
-                    onTileSplitterDoubleClicked_(hit->first, hit->second);
-                }
-                return 0;
-            }
-            return DefWindowProcW(hwnd, message, wParam, lParam);
-        }
-
         case WM_LBUTTONUP: {
-            if (draggingSplitter_.has_value()) {
-                ReleaseCapture();
-                draggingSplitter_.reset();
-                // One final full self-redraw once the drag actually
-                // ends -- cheap here (once per drag, not once per
-                // mouse-move like the reflows during the drag itself),
-                // and guarantees a fully clean frame on both sides of
-                // the splitter regardless of any transient repaint
-                // race during the drag (confirmed real: visible update
-                // artifacts lingering after release).
-                RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN | RDW_ERASE);
-                return 0;
-            }
             if (draggingIndex_.has_value()) {
                 // Captured before ReleaseCapture(), not after --
                 // ReleaseCapture() synchronously re-enters this window
@@ -909,10 +769,9 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
         case WM_CAPTURECHANGED:
             // Mouse capture was taken by something else mid-drag (e.g.
             // another window stole focus) -- abandon the drag rather
-            // than leaving draggingIndex_/draggingSplitter_ stuck set,
+            // than leaving draggingIndex_ stuck set,
             // which would make the next unrelated WM_MOUSEMOVE misbehave.
             draggingIndex_.reset();
-            draggingSplitter_.reset();
             return 0;
 
         case WM_CONTEXTMENU: {
@@ -1022,7 +881,7 @@ LRESULT GroupChromeWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
 
 std::vector<RECT> GroupChromeWindow::ComputeTabRects(const RECT& clientRect) const {
     std::vector<RECT> rects;
-    if (memberTitles_.empty() || IsTiledMode(mode_)) {
+    if (memberTitles_.empty()) {
         return rects;  // Tile/Stack has no clickable tabs -- see Show()'s comment
     }
     const UINT dpi = GetDpiForWindow(window_);
@@ -1120,60 +979,6 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     DeleteObject(titleBarBrush);
     PaintTitleBar(hdc, clientRect);
 
-    if (IsTiledMode(mode_)) {
-        // No tab strip in Tile/Stack -- there are no tabs to render
-        // (every member is simultaneously visible instead, positioned by
-        // GroupManager's grid layout). Content fills everything below
-        // the title bar band.
-        RECT tileContentRect{clientRect.left, clientRect.top + titleBarHeight, clientRect.right, clientRect.bottom};
-        HBRUSH contentBrush = CreateSolidBrush(kContentColor);
-        FillRect(hdc, &tileContentRect, contentBrush);
-        DeleteObject(contentBrush);
-
-        if (!tileColumnBoundaries_.empty() || !tileRowBoundaries_.empty()) {
-            // Resting state matches the thin-hairline convention used by
-            // Windows Terminal/VS Code/the Settings app -- the full
-            // kSplitterWidth is still reserved as real gap space (layout
-            // math and hit-testing are unchanged) and content already
-            // fills the whole client rect including that gap, so a
-            // resting splitter can draw as a much thinner line without
-            // leaving a hole. Hovered (or actively being dragged) grows
-            // to the full reserved width and switches to the OS's own
-            // accent color -- the same visual cue Windows itself uses for
-            // "this is draggable".
-            const COLORREF accentColor = GetAccentColor();
-            const int splitterWidth = Scale(kSplitterWidth, dpi);
-            const int restWidth = Scale(kSplitterRestWidth, dpi);
-            for (size_t i = 0; i < tileColumnBoundaries_.size(); ++i) {
-                const bool highlighted = (draggingSplitter_.has_value() && draggingSplitter_->first &&
-                                           draggingSplitter_->second == i) ||
-                                          (hoveredSplitter_.has_value() && hoveredSplitter_->first &&
-                                           hoveredSplitter_->second == i);
-                const int width = highlighted ? splitterWidth : restWidth;
-                const int boundary = tileColumnBoundaries_[i];
-                RECT bar{clientRect.left + boundary - width / 2, tileContentRect.top,
-                         clientRect.left + boundary + (width - width / 2), tileContentRect.bottom};
-                HBRUSH splitterBrush = CreateSolidBrush(highlighted ? accentColor : kActiveBorderColor);
-                FillRect(hdc, &bar, splitterBrush);
-                DeleteObject(splitterBrush);
-            }
-            for (size_t i = 0; i < tileRowBoundaries_.size(); ++i) {
-                const bool highlighted = (draggingSplitter_.has_value() && !draggingSplitter_->first &&
-                                           draggingSplitter_->second == i) ||
-                                          (hoveredSplitter_.has_value() && !hoveredSplitter_->first &&
-                                           hoveredSplitter_->second == i);
-                const int width = highlighted ? splitterWidth : restWidth;
-                const int boundary = tileRowBoundaries_[i];
-                RECT bar{clientRect.left, tileContentRect.top + boundary - width / 2, clientRect.right,
-                         tileContentRect.top + boundary + (width - width / 2)};
-                HBRUSH splitterBrush = CreateSolidBrush(highlighted ? accentColor : kActiveBorderColor);
-                FillRect(hdc, &bar, splitterBrush);
-                DeleteObject(splitterBrush);
-            }
-        }
-        return;
-    }
-
     const int tabHeight = Scale(kTabStripHeight, dpi);
     const int tabColumnWidth = TabColumnWidth(dpi);        // 0 unless Vertical
     const int tabStripLeftWidth = TabStripLeftWidth(dpi);  // 0 unless Vertical
@@ -1182,7 +987,7 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
     // computed just before the tab-label loop, as it used to be) --
     // paintConnectorBorderLine, further down, needs the active tab's own
     // rect to know where to leave a gap for the fillets to bridge.
-    // Depends only on clientRect/memberTitles_/mode_/alignment_, none of
+    // Depends only on clientRect/memberTitles_/alignment_, none of
     // which the painting below touches, so hoisting it changes nothing
     // about what it returns.
     const std::vector<RECT> tabRects = ComputeTabRects(clientRect);
@@ -1261,7 +1066,7 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
         // bottom for the same reason the horizontal band's are straight
         // left and right -- only the tab-to-column join itself
         // (DrawConcaveFillet, below) needs a curve.
-        if (mode_ == GroupMode::Tab) {
+        {
             RECT connectorRect{clientRect.left + tabColumnWidth, clientRect.top + titleBarHeight, clientRect.left + tabStripLeftWidth,
                                 clientRect.bottom};
             HBRUSH connectorBrush = CreateSolidBrush(kActiveTabColor);
@@ -1281,7 +1086,7 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
         FillRect(hdc, &stripRect, stripBrush);
         DeleteObject(stripBrush);
 
-        // Tab mode only: a permanent full-width band, colored to match
+        // A permanent full-width band, colored to match
         // the active tab, between the strip and the member's own
         // content -- File Explorer's own command-bar area does the
         // same thing (see kTabConnectorThickness's comment). Straight
@@ -1291,7 +1096,7 @@ void GroupChromeWindow::PaintTabStrip(HDC hdc, const RECT& clientRect) {
         // whatever stale content was underneath (a real, confirmed
         // white artifact at the window's edges). Only the tab-to-band
         // join itself (DrawConcaveFillet, below) needs a curve.
-        if (mode_ == GroupMode::Tab) {
+        {
             RECT bandRect{clientRect.left, stripRect.bottom, clientRect.right,
                            stripRect.bottom + Scale(kTabConnectorThickness, dpi)};
             HBRUSH bandBrush = CreateSolidBrush(kActiveTabColor);
@@ -1485,7 +1290,7 @@ int GroupChromeWindow::HeaderHeight(UINT dpi) const {
     // reserves a left column instead (see TabStripLeftWidth), not extra
     // top height, so this is the same TitleBarHeight-only case as
     // Tile/Stack.
-    if (mode_ != GroupMode::Tab || alignment_ == GroupAlignment::Vertical) {
+    if (alignment_ == GroupAlignment::Vertical) {
         return TitleBarHeight(dpi);
     }
     return TitleBarHeight(dpi) + Scale(kTabStripHeight, dpi) + Scale(kTabConnectorThickness, dpi);
@@ -1523,44 +1328,16 @@ RECT GroupChromeWindow::ManageWindowsButtonRect(const RECT& clientRect, UINT dpi
 }
 
 // Left-to-right order (right to left in this anchor chain, each button
-// immediately left of the last): tile-maximize, mode, alignment,
-// manage-windows | gap | minimize, maximize, close. TileMaximize is the
-// one conditionally-visible button (see TileMaximizeButtonVisible), so
-// it anchors the *leftmost* end of the chain instead of sitting in the
-// middle of it -- hiding/showing it then only ever changes the title
-// text's own right boundary (PaintTitleBar), never shifts any other
-// button.
+// immediately left of the last): alignment, manage-windows | gap |
+// minimize, maximize, close.
 RECT GroupChromeWindow::AlignmentButtonRect(const RECT& clientRect, UINT dpi) const {
     const RECT manageWindows = ManageWindowsButtonRect(clientRect, dpi);
     const int w = Scale(kTitleBarButtonWidth, dpi);
     return RECT{manageWindows.left - w, manageWindows.top, manageWindows.left, manageWindows.bottom};
 }
 
-RECT GroupChromeWindow::ModeToggleButtonRect(const RECT& clientRect, UINT dpi) const {
-    const RECT alignment = AlignmentButtonRect(clientRect, dpi);
-    const int w = Scale(kTitleBarButtonWidth, dpi);
-    return RECT{alignment.left - w, alignment.top, alignment.left, alignment.bottom};
-}
-
-bool GroupChromeWindow::TileMaximizeButtonVisible() const {
-    // A single tile already fills the whole content area on its own --
-    // "maximized" wouldn't mean anything different from the normal
-    // state, so there's nothing for this button to do outside a tiled
-    // mode (Tile or Stack) with 2+ members. Mirrors GroupState's own
-    // SetTileMaximized-reset condition (see its comment) so the button
-    // is never shown in a state IsTileMaximized() itself would refuse
-    // to stay true in.
-    return IsTiledMode(mode_) && memberTitles_.size() > 1;
-}
-
-RECT GroupChromeWindow::TileMaximizeButtonRect(const RECT& clientRect, UINT dpi) const {
-    const RECT modeToggle = ModeToggleButtonRect(clientRect, dpi);
-    const int w = Scale(kTitleBarButtonWidth, dpi);
-    return RECT{modeToggle.left - w, modeToggle.top, modeToggle.left, modeToggle.bottom};
-}
-
 int GroupChromeWindow::TabColumnWidth(UINT dpi) const {
-    if (mode_ != GroupMode::Tab || alignment_ != GroupAlignment::Vertical) {
+    if (alignment_ != GroupAlignment::Vertical) {
         return 0;
     }
     return Scale(kTabStripWidth, dpi);
@@ -1614,14 +1391,8 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
     SetTextColor(hdc, dark ? RGB(0xFF, 0xFF, 0xFF) : RGB(0x1A, 0x1A, 0x1A));
 
     const int textLeft = (icon != nullptr) ? iconLeft + iconSize + Scale(kTitleBarIconTextGap, dpi) : iconLeft;
-    // TileMaximize is the leftmost of the four action buttons when
-    // visible (see the anchor-chain comment above AlignmentButtonRect);
-    // otherwise ModeToggle is. This is the one place that still needs
-    // its own visibility check, now that TileMaximizeButtonRect no
-    // longer shifts anything to its right when it disappears.
-    const int textRight =
-        (TileMaximizeButtonVisible() ? TileMaximizeButtonRect(clientRect, dpi) : ModeToggleButtonRect(clientRect, dpi))
-            .left;
+    // The leftmost action button bounds the title text on the right.
+    const int textRight = ManageWindowsButtonRect(clientRect, dpi).left;
     RECT textRect{textLeft, clientRect.top, textRight, clientRect.top + titleBarHeight};
     DrawTextW(hdc, title, -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     SelectObject(hdc, oldFont);
@@ -1756,117 +1527,10 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
         drawLine(manageWindowsGlyph.left, y, manageWindowsGlyph.right, y);
     }
 
-    const RECT modeToggleRect = ModeToggleButtonRect(clientRect, dpi);
-    const bool modeToggleHovered = hoveredActionButton_ == TitleBarActionButton::ModeToggle;
-    if (modeToggleHovered) {
-        HBRUSH brush = CreateSolidBrush(hoverFill);
-        FillRect(hdc, &modeToggleRect, brush);
-        DeleteObject(brush);
-    }
-    const RECT modeToggleGlyph = glyphRect(modeToggleRect);
-    if (mode_ == GroupMode::Tile) {
-        // Tile-mode glyph: a 2x2 grid of small squares -- depicts the
-        // *current* layout, the same convention a view-mode toggle
-        // button normally uses (e.g. Explorer's list/grid switcher),
-        // rather than the mode a click would switch to.
-        const int cellW = (modeToggleGlyph.right - modeToggleGlyph.left - 2) / 2;
-        const int cellH = (modeToggleGlyph.bottom - modeToggleGlyph.top - 2) / 2;
-        for (int row = 0; row < 2; ++row) {
-            for (int col = 0; col < 2; ++col) {
-                const int left = modeToggleGlyph.left + col * (cellW + 2);
-                const int top = modeToggleGlyph.top + row * (cellH + 2);
-                Rectangle(hdc, left, top, left + cellW, top + cellH);
-            }
-        }
-    } else if (mode_ == GroupMode::Stack) {
-        // Stack-mode glyph: three small bars laid out along the stack's
-        // own axis -- three side-by-side vertical bars for Horizontal
-        // (a single row of tiles), three stacked horizontal bars for
-        // Vertical (a single column) -- same "depicts the current
-        // layout" convention as Tile's 2x2 grid above.
-        constexpr int kBarGap = 2;
-        if (alignment_ == GroupAlignment::Vertical) {
-            const int barHeight = (modeToggleGlyph.bottom - modeToggleGlyph.top - 2 * kBarGap) / 3;
-            for (int i = 0; i < 3; ++i) {
-                const int top = modeToggleGlyph.top + i * (barHeight + kBarGap);
-                Rectangle(hdc, modeToggleGlyph.left, top, modeToggleGlyph.right, top + barHeight);
-            }
-        } else {
-            const int barWidth = (modeToggleGlyph.right - modeToggleGlyph.left - 2 * kBarGap) / 3;
-            for (int i = 0; i < 3; ++i) {
-                const int left = modeToggleGlyph.left + i * (barWidth + kBarGap);
-                Rectangle(hdc, left, modeToggleGlyph.top, left + barWidth, modeToggleGlyph.bottom);
-            }
-        }
-    } else {
-        // Tab-mode glyph: a small tab notch overlapping the top-left of
-        // a page outline -- same overlapping-rectangle occlusion
-        // technique as the restore glyph above (fill the front shape
-        // with the background color before outlining it), so the notch
-        // reads as sitting in front of the page instead of just two
-        // crossing outlines.
-        const int notchWidth = (modeToggleGlyph.right - modeToggleGlyph.left) * 2 / 3;
-        const int notchHeight = (modeToggleGlyph.bottom - modeToggleGlyph.top) / 3;
-        Rectangle(hdc, modeToggleGlyph.left, modeToggleGlyph.top + notchHeight, modeToggleGlyph.right,
-                  modeToggleGlyph.bottom);
-        HBRUSH occludeBrush =
-            CreateSolidBrush(modeToggleHovered ? hoverFill : (dark ? RGB(0x20, 0x20, 0x20) : RGB(0xFF, 0xFF, 0xFF)));
-        SelectObject(hdc, occludeBrush);
-        Rectangle(hdc, modeToggleGlyph.left, modeToggleGlyph.top, modeToggleGlyph.left + notchWidth,
-                  modeToggleGlyph.top + notchHeight + 1);
-        SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        DeleteObject(occludeBrush);
-    }
-
-    if (TileMaximizeButtonVisible()) {
-        // Same square / overlapping-squares glyph shapes as the window-
-        // level maximize/restore caption button above -- not new
-        // iconography; this button's position (left of the other two
-        // action buttons) and tooltip text ("Maximize tile"/"Restore
-        // tile") are what disambiguate it from the window-level one,
-        // the same way this file already reuses one glyph vocabulary
-        // across every button rather than inventing a shape per action.
-        const RECT tileMaximizeRect = TileMaximizeButtonRect(clientRect, dpi);
-        const bool tileMaximizeHovered = hoveredActionButton_ == TitleBarActionButton::TileMaximize;
-        if (tileMaximizeHovered) {
-            HBRUSH brush = CreateSolidBrush(hoverFill);
-            FillRect(hdc, &tileMaximizeRect, brush);
-            DeleteObject(brush);
-        }
-        const RECT tileMaximizeGlyph = glyphRect(tileMaximizeRect);
-        if (tileMaximized_) {
-            const int offset = Scale(kTitleBarRestoreGlyphOffset, dpi);
-            Rectangle(hdc, tileMaximizeGlyph.left + offset, tileMaximizeGlyph.top, tileMaximizeGlyph.right,
-                      tileMaximizeGlyph.bottom - offset);
-            HBRUSH occludeBrush = CreateSolidBrush(tileMaximizeHovered ? hoverFill
-                                                                        : (dark ? RGB(0x20, 0x20, 0x20)
-                                                                                : RGB(0xFF, 0xFF, 0xFF)));
-            SelectObject(hdc, occludeBrush);
-            Rectangle(hdc, tileMaximizeGlyph.left, tileMaximizeGlyph.top + offset, tileMaximizeGlyph.right - offset,
-                      tileMaximizeGlyph.bottom);
-            SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            DeleteObject(occludeBrush);
-        } else {
-            Rectangle(hdc, tileMaximizeGlyph.left, tileMaximizeGlyph.top, tileMaximizeGlyph.right,
-                      tileMaximizeGlyph.bottom);
-        }
-    }
-
     {
-        // Alignment glyph depends on mode, since what this button
-        // actually reorients differs: in Tab mode, a small rectangle
-        // outline with a thin filled bar along whichever edge the tab
-        // strip currently occupies -- top for Horizontal, left for
-        // Vertical. Tile/Stack have no tab strip to depict, so instead
-        // these show the rectangle split by divider line(s) matching
-        // the grid's own bias -- a vertical divider (side-by-side
-        // halves) for Horizontal's wide-biased grid, a horizontal
-        // divider (stacked halves) for Vertical's tall-biased grid.
-        // Stack draws two dividers along that same axis instead of one
-        // -- reading as "many" (1xN) rather than Tile's single split --
-        // reusing this file's existing line/rectangle vocabulary rather
-        // than inventing new iconography, same as every other button
-        // here.
+        // A small rectangle outline with a thin filled bar along whichever
+        // edge the tab strip currently occupies -- top for Horizontal,
+        // left for Vertical.
         const RECT alignmentRect = AlignmentButtonRect(clientRect, dpi);
         const bool alignmentHovered = hoveredActionButton_ == TitleBarActionButton::Alignment;
         if (alignmentHovered) {
@@ -1876,33 +1540,7 @@ void GroupChromeWindow::PaintTitleBar(HDC hdc, const RECT& clientRect) const {
         }
         const RECT alignmentGlyph = glyphRect(alignmentRect);
         Rectangle(hdc, alignmentGlyph.left, alignmentGlyph.top, alignmentGlyph.right, alignmentGlyph.bottom);
-        if (mode_ == GroupMode::Tile) {
-            if (alignment_ == GroupAlignment::Vertical) {
-                const int midY = (alignmentGlyph.top + alignmentGlyph.bottom) / 2;
-                MoveToEx(hdc, alignmentGlyph.left, midY, nullptr);
-                LineTo(hdc, alignmentGlyph.right, midY);
-            } else {
-                const int midX = (alignmentGlyph.left + alignmentGlyph.right) / 2;
-                MoveToEx(hdc, midX, alignmentGlyph.top, nullptr);
-                LineTo(hdc, midX, alignmentGlyph.bottom);
-            }
-        } else if (mode_ == GroupMode::Stack) {
-            if (alignment_ == GroupAlignment::Vertical) {
-                const int step = (alignmentGlyph.bottom - alignmentGlyph.top) / 3;
-                for (int i = 1; i <= 2; ++i) {
-                    const int y = alignmentGlyph.top + i * step;
-                    MoveToEx(hdc, alignmentGlyph.left, y, nullptr);
-                    LineTo(hdc, alignmentGlyph.right, y);
-                }
-            } else {
-                const int step = (alignmentGlyph.right - alignmentGlyph.left) / 3;
-                for (int i = 1; i <= 2; ++i) {
-                    const int x = alignmentGlyph.left + i * step;
-                    MoveToEx(hdc, x, alignmentGlyph.top, nullptr);
-                    LineTo(hdc, x, alignmentGlyph.bottom);
-                }
-            }
-        } else {
+        {
             // Half the glyph box, not a quarter -- confirmed,
             // human-reported, that a quarter-thickness bar read as too
             // subtle to register as "this is the tab strip's edge" at
@@ -1951,38 +1589,11 @@ void GroupChromeWindow::UpdateTooltip() {
         }
     } else if (hoveredActionButton_.has_value()) {
         switch (*hoveredActionButton_) {
-            case TitleBarActionButton::ModeToggle:
-                // These two buttons name their *current* state, not what
-                // clicking them would do -- matching their glyphs, which
-                // already depict the current mode/alignment rather than
-                // the target (see PaintTitleBar). An earlier "Switch to
-                // X" wording named the target instead, which read as a
-                // direct contradiction of the glyph sitting right under
-                // the cursor. The remaining buttons below stay
-                // action-worded because they *are* actions, with no
-                // state of their own to report.
-                switch (mode_) {
-                    case GroupMode::Tab:
-                        text = L"Tabs";
-                        break;
-                    case GroupMode::Tile:
-                        text = L"Tiles";
-                        break;
-                    case GroupMode::Stack:
-                        text = L"Stack";
-                        break;
-                }
-                break;
             case TitleBarActionButton::ManageWindows:
                 text = L"Edit Group Windows...";
                 break;
-            case TitleBarActionButton::TileMaximize:
-                text = tileMaximized_ ? L"Restore tile" : L"Maximize tile";
-                break;
             case TitleBarActionButton::Alignment:
-                // One setting regardless of mode (see GroupAlignment's
-                // own comment), so unlike the old target-naming wording
-                // this needs no per-mode phrasing at all.
+                // One setting, naming its current state to match its glyph.
                 text = alignment_ == GroupAlignment::Horizontal ? L"Horizontal" : L"Vertical";
                 break;
         }
@@ -2068,128 +1679,6 @@ void GroupChromeWindow::InvalidateTitleBar() {
     InvalidateRect(window_, &titleBarRect, TRUE);
 }
 
-void GroupChromeWindow::SetTileSplitters(std::vector<int> columnBoundaries, std::vector<int> rowBoundaries) {
-    if (window_ != nullptr) {
-        // A band around every OLD and NEW boundary position -- not the
-        // whole window, which also repaints the content-area fill
-        // behind the members and visibly overwrites them (the same
-        // class of bug already fixed for the tab strip's own hover
-        // highlight; see InvalidateTabStrip's comment).
-        const RECT contentRect = ContentRectInClientCoords();
-        const UINT dpi = GetDpiForWindow(window_);
-        const int band = Scale(kSplitterWidth + kSplitterHitSlop, dpi);
-        for (const std::vector<int>* boundaries : {&tileColumnBoundaries_, &columnBoundaries}) {
-            for (int x : *boundaries) {
-                RECT bar{contentRect.left + x - band, contentRect.top, contentRect.left + x + band,
-                         contentRect.bottom};
-                InvalidateRect(window_, &bar, FALSE);
-            }
-        }
-        for (const std::vector<int>* boundaries : {&tileRowBoundaries_, &rowBoundaries}) {
-            for (int y : *boundaries) {
-                RECT bar{contentRect.left, contentRect.top + y - band, contentRect.right,
-                         contentRect.top + y + band};
-                InvalidateRect(window_, &bar, FALSE);
-            }
-        }
-    }
-    tileColumnBoundaries_ = std::move(columnBoundaries);
-    tileRowBoundaries_ = std::move(rowBoundaries);
-}
-
-int GroupChromeWindow::TileSplitterWidthPx() const {
-    if (window_ == nullptr) {
-        return 0;
-    }
-    return Scale(kSplitterWidth, GetDpiForWindow(window_));
-}
-
-std::optional<std::pair<bool, size_t>> GroupChromeWindow::HitTestSplitter(POINT clientPt) const {
-    if (!IsTiledMode(mode_) || window_ == nullptr) {
-        return std::nullopt;
-    }
-    const RECT contentRect = ContentRectInClientCoords();
-    const UINT dpi = GetDpiForWindow(window_);
-    const int slop = Scale(kSplitterHitSlop, dpi);
-
-    for (size_t i = 0; i < tileColumnBoundaries_.size(); ++i) {
-        const int x = contentRect.left + tileColumnBoundaries_[i];
-        if (clientPt.x >= x - slop && clientPt.x <= x + slop && clientPt.y >= contentRect.top &&
-            clientPt.y <= contentRect.bottom) {
-            return std::make_pair(true, i);
-        }
-    }
-    for (size_t i = 0; i < tileRowBoundaries_.size(); ++i) {
-        const int y = contentRect.top + tileRowBoundaries_[i];
-        if (clientPt.y >= y - slop && clientPt.y <= y + slop && clientPt.x >= contentRect.left &&
-            clientPt.x <= contentRect.right) {
-            return std::make_pair(false, i);
-        }
-    }
-    return std::nullopt;
-}
-
-void GroupChromeWindow::DragSplitter(POINT clientPt) {
-    if (!draggingSplitter_.has_value() || window_ == nullptr) {
-        return;
-    }
-    const auto [isColumn, index] = *draggingSplitter_;
-    const std::vector<int>& boundaries = isColumn ? tileColumnBoundaries_ : tileRowBoundaries_;
-    if (index >= boundaries.size()) {
-        return;
-    }
-    const RECT contentRect = ContentRectInClientCoords();
-    const UINT dpi = GetDpiForWindow(window_);
-    const int minSize = Scale(kMinTileSize, dpi);
-    const int splitterWidth = Scale(kSplitterWidth, dpi);
-    const int totalSize = isColumn ? (contentRect.right - contentRect.left) : (contentRect.bottom - contentRect.top);
-
-    // Only this boundary's own two neighbors bound how far it can
-    // move -- everything past them belongs to a different pair and
-    // stays fixed (matches GroupManager::SetTileBoundary's own
-    // "only the adjacent pair changes" contract).
-    const int prevBoundary = (index == 0) ? 0 : boundaries[index - 1];
-    const int nextBoundary = (index + 1 < boundaries.size()) ? boundaries[index + 1] : totalSize;
-
-    // Each side must leave room for both the *neighboring* splitter's
-    // own reserved gap and this tile's minimum content size -- minSize
-    // alone would let a tile shrink below the floor by up to one
-    // splitter's width.
-    const int lo = prevBoundary + splitterWidth + minSize;
-    const int hi = nextBoundary - splitterWidth - minSize;
-    if (lo >= hi) {
-        return;  // no room left to move this splitter without violating the floor
-    }
-    const int rawPosition = isColumn ? (clientPt.x - contentRect.left) : (clientPt.y - contentRect.top);
-    const int clamped = std::clamp(rawPosition, lo, hi);
-
-    if (onTileSplitterDragged_) {
-        onTileSplitterDragged_(isColumn, index, clamped);
-    }
-}
-
-void GroupChromeWindow::InvalidateSplitterBand(bool column, size_t index) {
-    if (window_ == nullptr) {
-        return;
-    }
-    const std::vector<int>& boundaries = column ? tileColumnBoundaries_ : tileRowBoundaries_;
-    if (index >= boundaries.size()) {
-        return;
-    }
-    const RECT contentRect = ContentRectInClientCoords();
-    const UINT dpi = GetDpiForWindow(window_);
-    const int band = Scale(kSplitterWidth + kSplitterHitSlop, dpi);
-    if (column) {
-        const int x = contentRect.left + boundaries[index];
-        RECT bar{x - band, contentRect.top, x + band, contentRect.bottom};
-        InvalidateRect(window_, &bar, FALSE);
-    } else {
-        const int y = contentRect.top + boundaries[index];
-        RECT bar{contentRect.left, y - band, contentRect.right, y + band};
-        InvalidateRect(window_, &bar, FALSE);
-    }
-}
-
 void GroupChromeWindow::GrowContentAreaTo(SIZE minContentSize) {
     if (window_ == nullptr) {
         return;
@@ -2265,25 +1754,10 @@ void GroupChromeWindow::SetMemberIcons(const std::vector<HICON>& icons) {
     }
 }
 
-void GroupChromeWindow::SetMode(GroupMode mode) {
-    mode_ = mode;
-    if (window_ != nullptr) {
-        InvalidateRect(window_, nullptr, TRUE);
-    }
-}
-
-void GroupChromeWindow::SetTileMaximized(bool maximized) {
-    tileMaximized_ = maximized;
-    if (window_ != nullptr) {
-        InvalidateTitleBar();
-        UpdateTooltip();
-    }
-}
-
 void GroupChromeWindow::SetAlignment(GroupAlignment alignment) {
     alignment_ = alignment;
     if (window_ != nullptr) {
-        // Unlike SetMode/SetTileMaximized, this changes which axis the
+        // This changes which axis the
         // whole header (title bar + tab strip) occupies -- a narrow
         // InvalidateTitleBar/InvalidateTabStrip wouldn't cover the
         // newly-reshaped content boundary either way (the left column
@@ -2299,19 +1773,8 @@ void GroupChromeWindow::ShowContextMenu(int screenX, int screenY) {
         return;
     }
     HMENU menu = CreatePopupMenu();
-    // Three mutually-exclusive mode items (a radio group, not a single
-    // cycling "Switch to X" item -- that stopped reading sensibly once
-    // there were three modes to name instead of two) plus a separator
-    // before the unrelated "Edit windows..." item.
-    AppendMenuW(menu, MF_STRING, kContextMenuModeTab, L"Tabs");
-    AppendMenuW(menu, MF_STRING, kContextMenuModeTile, L"Tiles");
-    AppendMenuW(menu, MF_STRING, kContextMenuModeStack, L"Stack");
-    CheckMenuRadioItem(menu, kContextMenuModeTab, kContextMenuModeStack,
-                        mode_ == GroupMode::Tab   ? kContextMenuModeTab
-                        : mode_ == GroupMode::Tile ? kContextMenuModeTile
-                                                    : kContextMenuModeStack,
-                        MF_BYCOMMAND);
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    // Only "Edit windows..." remains: the three mode radio items (Tabs/
+    // Tiles/Stack) went with tile mode itself.
     AppendMenuW(menu, MF_STRING, kContextMenuEditWindows, L"Edit Group Windows...");
 
     ApplyDarkModeToMenu(window_);
@@ -2326,20 +1789,13 @@ void GroupChromeWindow::ShowContextMenu(int screenX, int screenY) {
     PostMessageW(window_, WM_NULL, 0, 0);
     DestroyMenu(menu);
 
-    if (cmd == kContextMenuModeTab && onModeSelected_) {
-        onModeSelected_(GroupMode::Tab);
-    } else if (cmd == kContextMenuModeTile && onModeSelected_) {
-        onModeSelected_(GroupMode::Tile);
-    } else if (cmd == kContextMenuModeStack && onModeSelected_) {
-        onModeSelected_(GroupMode::Stack);
-    } else if (cmd == kContextMenuEditWindows && onEditWindowsRequested_) {
+    if (cmd == kContextMenuEditWindows && onEditWindowsRequested_) {
         onEditWindowsRequested_();
     }
 }
 
-void GroupChromeWindow::Show(const std::vector<std::wstring>& memberTitles, GroupMode mode) {
+void GroupChromeWindow::Show(const std::vector<std::wstring>& memberTitles) {
     memberTitles_ = memberTitles;
-    mode_ = mode;
 
     if (window_ == nullptr) {
         // WS_CLIPCHILDREN -- confirmed real via diagnostic logging: a

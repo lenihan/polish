@@ -485,6 +485,32 @@ current todo list.
     key-down had not, killing every later Win+Space; and `SetCursorPos`
     not feeding a `WH_MOUSE_LL` hook at all, which made the first probe
     pass while exercising nothing.
+  - A third doorway, for the mouse: the tray menu's "Move or resize a
+    window". Both gestures start with the Win key, which left a mouse-only
+    user with no way in at all.
+    - Needed a public `MoveModeHook::BeginKeyboardSession`, because
+      `keyboardSession_` was private and only ever set from inside the
+      keyboard hook. The load-bearing part of it is `InstallMouseHook()`:
+      that was only reached from the Win-down path, so without it
+      "any mouse button commits the session" would have been dead code for
+      a session started from the menu -- the mouse would have had no way to
+      end what the mouse began. Verified with a probe that drives the menu
+      command, moves with arrows, then commits with a real click and checks
+      that later arrows are inert again.
+    - It deliberately does *not* inject the Start-menu-suppressing Ctrl
+      tap. There is no Win hold to suppress, and the tap would land in
+      whatever app is under the cursor for nothing.
+    - The target comes from the MRU list, for the same reason
+      `ArrangeTargetMonitor` uses it: opening the tray menu takes the
+      foreground for Polish's own message window, so `GetForegroundWindow`
+      answers "us", and the cursor is on the tray icon rather than over
+      anything movable. Neither signal the Win+Space latch relies on
+      survives a trip through a menu. The grab point is the target's own
+      centre for the same reason.
+    - Minimized windows are skipped, unlike maximized ones: a maximized
+      target is restored and then visibly follows the arrows, but
+      restoring a window the user cannot see in order to move it is a
+      surprise.
 
 - Halo: drawn in the user's accent colour rather than a tone picked from
   the theme, with a hairline of the opposite brightness underneath it.
@@ -770,11 +796,57 @@ current todo list.
     from that fill (same hue, alpha 70, around (44,76,102)), and scan
     where the window sat *at the moment of release*.
 
-- Arrange every window: Ctrl+Alt+T tiles and Ctrl+Alt+C cascades every
-  *normal* window on the current monitor, most-recently-used first.
-  Two doorways on purpose -- the tray menu for the mouse, a hotkey for
-  the keyboard -- and the menu prints the key beside each item, so the
-  mouse way in is how anyone learns the keyboard way in.
+- Tile 2-way / 3-way / 4-way: Ctrl+Alt+2, Ctrl+Alt+3 and Ctrl+Alt+4 split
+  the current monitor between that many *normal* windows,
+  most-recently-used first. Two doorways on purpose -- the tray menu for
+  the mouse, a hotkey for the keyboard -- and the menu prints the key
+  beside each item, so the mouse way in is how anyone learns the keyboard
+  way in.
+  - Replaced an earlier "tile every window into a ceil(sqrt(n)) grid" plus
+    a cascade. The grid answered a question nobody asks: past about four
+    slots every window is too small to work in, so the result gets looked
+    at once and undone. Naming each command for its count is the whole
+    fix -- the digit *is* the number of windows. Cascade went with it,
+    since a stack of overlapping windows is what Stacks does properly.
+  - The split axis is the monitor's longer dimension, so two windows on a
+    16:9 monitor get a usable shape each instead of two letterboxes, and
+    turning the monitor on its side flips the split with it. 4-way is
+    always a 2x2, in both orientations.
+    - Deliberately *not* "slice in two, then slice each half along its own
+      long axis", which is tidier and gives quarters on an ordinary
+      monitor -- but on a 3840x1080 ultrawide each half is still
+      landscape, so it would slice the same way again and produce four
+      columns. Four columns may be the better layout there; it is not what
+      the command is called, and a shape that depends on the aspect ratio
+      in a way nobody can predict is worse than one that is merely
+      suboptimal. A test pins the ultrawide case.
+  - Only the N most recent windows are touched; anything older stays
+    exactly where it is. Rearranging the whole desktop as a side effect of
+    "let me see these two" is how a convenience becomes something people
+    stop using.
+  - Pressing the same command again **reverses** the order, and a third
+    press returns to MRU -- a toggle, not three states. The first guess at
+    which window belongs on the left is wrong about half the time, and
+    pressing the key again is cheaper than dragging.
+    - The toggle's reset key is the subtle part, and it is why
+      `ArrangeSelection` is a separate pure module with its own tests. It
+      keys on the *sorted set* of chosen windows. Keying on MRU order
+      would reset the toggle almost every time, because focusing either
+      window between two presses reorders the list -- the reversal would
+      look broken in exactly the situation it is for. Keying on the
+      *chosen* order is worse still: reversing changes it, so the toggle
+      would see its own effect as a change and never reverse twice.
+    - State is per kind. 2-way and 3-way are different commands, and using
+      one must not leave another halfway through its own toggle.
+  - A command with too few windows is greyed out in the menu **with the
+    reason in the item's own label** ("Tile 4-way (needs 4 windows)"). A
+    standard Win32 popup menu has no per-item tooltip, and this app
+    deliberately has no owner-drawn menus (`util/DarkMode.cpp` -- the dark
+    theme comes from `SetWindowTheme`, which owner-draw would opt out of),
+    so the label is the only channel there is. The hotkey stays in its own
+    tab-separated column after the parenthetical, so the three items still
+    line up. The hotkey path refuses and logs independently, since it is
+    reachable while the menu item is greyed.
   - Normal means neither minimized nor maximized
     (`IsWindowInNormalState`, the same predicate restore-position sync
     uses). Maximized is a deliberate exclusion, not a technical limit:
@@ -784,27 +856,36 @@ current todo list.
     window is already arranged; tile and cascade work around it. That
     also removed the SW_RESTORE from the apply path, since nothing
     maximized can reach it any more.
-  - `windowtracking/WindowLayout.h` holds the geometry, pure and tested
-    (18 cases). Deliberately not built on GroupManager's
-    `ComputeGridShape`, which computes the same kind of shape: that one
-    belongs to a subsystem this file already marks for removal, and the
-    arithmetic it saves is one ceil(sqrt). A new feature should not be
-    tied to code scheduled for deletion.
-  - Two useful cases fall out of the general grid rather than being
-    special-cased: a count of 2 is a left/right split and a count of 4 is
-    the four corners. A short final row is stretched to full width, since
-    three windows read better as two over one than as two with a hole.
+  - `windowtracking/WindowLayout.h` holds the geometry and
+    `windowtracking/ArrangeSelection.h` the policy, both pure and tested
+    (34 cases). Both live outside `main.cpp` for a structural reason
+    rather than a stylistic one: `polish_tests` links `polish_core` only,
+    so anything in `main.cpp` cannot be unit tested at all.
+  - 2-way and 3-way are one function, `SliceAlongLongAxis(work, n)` --
+    3-way is not a special case, it is n = 3. Every boundary is computed
+    once as `left + width * i / n` and shared between the slices either
+    side of it, so no rounding can leave a seam and the last slice lands
+    exactly on the far edge. Tested with a width that does not divide by
+    three (1001), which is where a naive `width/3` loses a pixel and shows
+    a strip of desktop between two windows.
   - The MRU list only knows windows focused since Polish started, so the
     candidate set is MRU first then an EnumWindows Z-order tail -- the
     same shape RebuildAltTabCandidates uses, and arranging is exactly
     where the windows you have not touched this session would be most
     obviously missing.
-  - Ctrl+Alt rather than Win+Alt, which would have matched the group
-    hotkey. Probed first: Win+Alt+T, Win+Shift+T, Win+Shift+C and
-    Win+Ctrl+C were all already claimed on this machine, and a pair with
-    mismatched modifiers is worse than a pair that is not Win-based.
-    Registration failure is logged per command, because the group
-    hotkey's history is that a reasonable default was already taken.
+  - Ctrl+Alt plus the digit, rather than Win+Alt, which would have matched
+    the group hotkey. Probed first: Win+Alt+T, Win+Shift+T, Win+Shift+C
+    and Win+Ctrl+C were all already claimed on this machine, and a pair
+    with mismatched modifiers is worse than a pair that is not Win-based.
+    All three of Ctrl+Alt+2/3/4 were confirmed registering here.
+    Registration failure is logged per command, because the group hotkey's
+    history is that a reasonable default was already taken -- and it still
+    is: Win+Alt+G fails on this machine with error 1409.
+  - The registry value names are new (`ArrangeTwoWayHotkey*` and friends)
+    with no fallback to the old `ArrangeTile*`/`ArrangeCascade*`, on
+    purpose: those hold 'T' and 'C', which are the wrong keys for these
+    commands, so inheriting them would leave a user on a hotkey that no
+    longer matches anything the menu says.
   - A bug worth remembering: the first version called
     `SyncRestorePlacementNow` straight after an async `SetWindowPos`.
     That reads the window's *current* rect -- still the old one -- and
@@ -923,6 +1004,23 @@ release has to exist before the signing application can even go in.
   switched off, and that uninstall leaves nothing behind.
 
 ## Left to do
+- Regular app presence: Polish currently lives only in the tray, which is
+  hard to tell is running and often hidden in the overflow. Give it a real
+  window and a taskbar button.
+  - A small main window carrying the feature toggles as real controls (the
+    tray menu's checkboxes, plus Tile/Stack/Move commands), so it is
+    discoverable and the state is visible. Start-at-login starts it
+    minimized.
+  - Keep the tray icon (optional): it is the right place for "running in
+    the background" and costs nothing.
+  - Taskbar-button gestures are the risky part. A click on a taskbar button
+    means "activate this window", so "click = Alt+Tab" has to be done by
+    intercepting the activation/restore and opening the switcher instead,
+    which can flicker. Right-click is the shell's jump list, not a menu we
+    own: expose the full command set as jump-list tasks
+    (ICustomDestinationList, needs an AppUserModelID) rather than trying to
+    replace the shell menu. Prototype the click behaviour before committing
+    to it.
 - Virtual Monitor: From a single monitor, split it into 2+ monitors with custom scaling.
   Mouse should "stick" inside a monitor. Alt+tab only shows apps running on that monitor.
   Can have different resolutions for each monitor. OS should think it is actually multiple

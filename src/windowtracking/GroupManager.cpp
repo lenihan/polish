@@ -13,33 +13,6 @@
 
 namespace polish {
 
-GridShape ComputeGridShape(GroupMode mode, GroupAlignment alignment, int count) {
-    if (mode == GroupMode::Stack) {
-        // Forced to a single row (Horizontal) or single column
-        // (Vertical) -- the "third layout mode" between Tab and full
-        // Tile, rather than the biased-square shape below.
-        if (alignment == GroupAlignment::Vertical) {
-            return GridShape{1, count};
-        }
-        return GridShape{count, 1};
-    }
-    // Tile. Horizontal (default): biased wide (cols >= rows) --
-    // ceil(sqrt(n)) columns, however many rows that leaves. Vertical:
-    // the same formula with columns/rows swapped, biasing tall instead
-    // -- for exactly 2 members this is the difference between
-    // side-by-side and stacked; for any other count it's the general
-    // "grid biased wide vs. tall" behavior GroupState.h's own
-    // GroupAlignment comment documents.
-    if (alignment == GroupAlignment::Vertical) {
-        const int rows = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
-        const int cols = (count + rows - 1) / rows;
-        return GridShape{cols, rows};
-    }
-    const int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
-    const int rows = (count + cols - 1) / cols;
-    return GridShape{cols, rows};
-}
-
 namespace {
 // PW_RENDERFULLCONTENT (Windows 8.1+) -- captures a window's actual
 // rendered content (including hardware-accelerated/DirectComposition
@@ -113,7 +86,7 @@ bool IsLeadingResizeHitCode(LRESULT hit, bool vertical) {
 // stripping styles nor overriding WM_SETCURSOR can ever reach this --
 // the only remaining lever is keeping that band physically outside the
 // member's own window rect (see this function's callers in
-// ApplyTabLayout/ApplyTileLayout).
+// ApplyLayout).
 //
 // Returns 0 for a member that claims no such band (the overwhelmingly
 // common case -- most apps don't hit-test their own frame at all).
@@ -273,9 +246,9 @@ GroupManager::~GroupManager() {
     }
 }
 
-GroupId GroupManager::CreateGroup(const std::vector<HWND>& windows, GroupMode mode) {
+GroupId GroupManager::CreateGroup(const std::vector<HWND>& windows) {
     const GroupId id = nextId_++;
-    GroupState state(id, mode);
+    GroupState state(id);
     for (HWND hwnd : windows) {
         state.AddWindow(hwnd);
     }
@@ -302,7 +275,7 @@ bool GroupManager::EnsureReparented(HWND hwnd, HWND chromeWindow) {
     // WS_MINIMIZE child is not meaningful. Needed now that the picker
     // offers minimized windows as candidates -- ReparentIntoGroup strips
     // the frame bits but not WS_MINIMIZE, so without this a minimized
-    // member joins the group as a blank tile.
+    // member joins the group blank.
     if (IsIconic(hwnd)) {
         ShowWindow(hwnd, SW_RESTORE);
     }
@@ -613,7 +586,7 @@ void GroupManager::CaptureThumbnail(HWND hwnd) {
     //      while still on-screen mid tab-switch; RDW_UPDATENOW alone
     //      still forces the real fix, the synchronous WM_PAINT. hwnd is
     //      never actually hidden by this call itself -- a non-active
-    //      member stays WS_VISIBLE at all times (see ApplyTabLayout),
+    //      member stays WS_VISIBLE at all times (see ApplyLayout),
     //      just covered by whichever member is on top of the Z-order, so
     //      this redraw happens fully behind an opaque window and is
     //      never itself visible to the user.
@@ -660,7 +633,7 @@ bool GroupManager::RefreshThumbnail(HWND hwnd) {
         return false;
     }
     // A Tab-mode member stays WS_VISIBLE at all times now (see
-    // ApplyTabLayout's Z-order-only tab switching) -- IsWindowVisible
+    // ApplyLayout's Z-order-only tab switching) -- IsWindowVisible
     // can no longer tell an active member apart from an inactive,
     // merely-covered one, since both are visible. Only the active
     // member (the one actually on top of the Z-order, doing double
@@ -708,7 +681,7 @@ namespace {
 // the group.
 //
 // Every member this is called for is shown at all times now (see
-// ApplyTabLayout's own comment) -- there is currently no caller that
+// ApplyLayout's own comment) -- there is currently no caller that
 // wants this to hide hwnd instead. Z-order is always left untouched
 // (SWP_NOZORDER) -- a member is already a sibling child, and its
 // Z-order is Tab-mode active-promotion's own job.
@@ -746,8 +719,7 @@ RECT PositionMember(HWND hwnd, const RECT& rect) {
 
 }  // namespace
 
-SIZE GroupManager::ApplyLayout(GroupState& group, HWND chromeWindow, const RECT& contentRectClientCoords,
-                                int tileSplitterWidthPx) {
+SIZE GroupManager::ApplyLayout(GroupState& group, HWND chromeWindow, const RECT& contentRectClientCoords) {
     // Collected rather than removed as they're found: group.Remove
     // mutates group.Members(), the very vector this range-for is
     // iterating, so removal has to wait until the loop is done.
@@ -790,13 +762,7 @@ SIZE GroupManager::ApplyLayout(GroupState& group, HWND chromeWindow, const RECT&
         correctionThrottles_.erase(hwnd);
     }
 
-    if (IsTiledMode(group.Mode())) {
-        return ApplyTileLayout(group, chromeWindow, contentRectClientCoords, tileSplitterWidthPx);
-    }
-    return ApplyTabLayout(group, chromeWindow, contentRectClientCoords);
-}
-
-SIZE GroupManager::ApplyTabLayout(const GroupState& group, HWND chromeWindow, const RECT& contentRect) {
+    const RECT& contentRect = contentRectClientCoords;
     const int requestedWidth = contentRect.right - contentRect.left;
     const int requestedHeight = contentRect.bottom - contentRect.top;
     int neededWidth = requestedWidth;
@@ -873,258 +839,6 @@ SIZE GroupManager::ApplyTabLayout(const GroupState& group, HWND chromeWindow, co
     }
 
     return SIZE{neededWidth, neededHeight};
-}
-
-SIZE GroupManager::ApplyTileLayout(GroupState& group, HWND chromeWindow, const RECT& contentRect,
-                                    int splitterWidthPx) {
-    // Real (non-nested-group) members only -- see the Tab-layout loop's
-    // same filter. Counted separately from group.Members().size() so
-    // the grid isn't sized larger than what will actually get a slot.
-    std::vector<HWND> windows;
-    for (const GroupMember& member : group.Members()) {
-        if (member.kind == GroupMemberKind::Window && member.window != nullptr && IsWindow(member.window)) {
-            windows.push_back(member.window);
-        }
-    }
-    const int requestedWidth = contentRect.right - contentRect.left;
-    const int requestedHeight = contentRect.bottom - contentRect.top;
-    const bool vertical = group.Alignment() == GroupAlignment::Vertical;
-    if (windows.empty()) {
-        tileColumnBoundaries_.erase(group.Id());
-        tileRowBoundaries_.erase(group.Id());
-        return SIZE{requestedWidth, requestedHeight};
-    }
-
-    if (group.IsTileMaximized()) {
-        const std::optional<HWND> active = group.ActiveWindow();
-        if (active.has_value() && IsWindow(*active)) {
-            // Every member gets the *same* full-content rect and stays
-            // shown -- the active one is simply Z-ordered on top,
-            // exactly ApplyTabLayout's own "one covers the rest, nothing
-            // ever hidden" technique (see its own comment for why: an
-            // earlier hide-inactive/show-active design here visibly
-            // flashed a member's own header on every switch, confirmed
-            // real).
-            int neededWidth = requestedWidth;
-            int neededHeight = requestedHeight;
-            for (HWND hwnd : windows) {
-                const RECT actual = PositionMember(hwnd, contentRect);
-                memberRects_[hwnd] = contentRect;  // requested, not actual -- see the Tab-layout loop's comment
-                neededWidth = std::max(neededWidth, static_cast<int>(actual.right - actual.left));
-                neededHeight = std::max(neededHeight, static_cast<int>(actual.bottom - actual.top));
-            }
-            // The active member's Z-order promotion, done once here for
-            // the same reason as ApplyTabLayout's own identical block.
-            SetWindowPos(*active, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            // Only the maximized tile is visible, so only it needs its
-            // band(s) covered -- see ApplyTabLayout's own identical block.
-            std::vector<RECT> maximizedBandRects;
-            AppendResizeBandRects(*active, contentRect, vertical, maximizedBandRects);
-            for (size_t i = 0; i < maximizedBandRects.size(); ++i) {
-                PlaceResizeBandOverlay(chromeWindow, i, maximizedBandRects[i]);
-            }
-            HideUnusedResizeBandOverlays(chromeWindow, maximizedBandRects.size());
-            LogUncoveredResizeBands(chromeWindow, *active, contentRect);
-            // No grid while maximized -- same "nothing to render/hit-
-            // test" contract as the 0-1-member case above.
-            tileColumnBoundaries_.erase(group.Id());
-            tileRowBoundaries_.erase(group.Id());
-            return SIZE{neededWidth, neededHeight};
-        }
-        // No valid active window (e.g. it closed) -- fall through to
-        // the normal grid below rather than leaving every member
-        // full-size with nothing chosen to be on top.
-    }
-
-    const int count = static_cast<int>(windows.size());
-    const GridShape shape = ComputeGridShape(group.Mode(), group.Alignment(), count);
-    const int cols = shape.cols;
-    const int rows = shape.rows;
-
-    // User-adjustable column widths/row heights (each a fraction of the
-    // content area's total width/height), falling back to an equal
-    // split whenever they don't match the grid's current column/row
-    // count -- a member added/removed reshapes the grid, so fractions
-    // sized for the old shape don't carry over.
-    std::vector<double> columnFractions = group.TileColumnFractions();
-    if (columnFractions.size() != static_cast<size_t>(cols)) {
-        columnFractions.assign(static_cast<size_t>(cols), 1.0 / cols);
-        group.SetTileColumnFractions(columnFractions);
-    }
-    std::vector<double> rowFractions = group.TileRowFractions();
-    if (rowFractions.size() != static_cast<size_t>(rows)) {
-        rowFractions.assign(static_cast<size_t>(rows), 1.0 / rows);
-        group.SetTileRowFractions(rowFractions);
-    }
-
-    // Splitters reserve real space between adjacent columns/rows --
-    // members never overlap them (an earlier version drew the splitter
-    // *over* the members' shared edge, which could visibly race with
-    // their own repaints; confirmed real). The fractions above divide
-    // up the *content-only* width/height, excluding all the reserved
-    // gaps.
-    const int colGapTotal = (cols - 1) * splitterWidthPx;
-    const int rowGapTotal = (rows - 1) * splitterWidthPx;
-    const int contentOnlyWidth = std::max(0, requestedWidth - colGapTotal);
-    const int contentOnlyHeight = std::max(0, requestedHeight - rowGapTotal);
-
-    // Cumulative column/row edges in *content-only* space (gaps
-    // excluded) -- colEdges[c] is column c's left edge if gaps didn't
-    // exist, colEdges[cols] is the content-only area's own right edge
-    // (forced exactly, absorbing any rounding error from the
-    // fraction*width truncation into the last column rather than
-    // leaving a gap).
-    std::vector<int> colEdges(static_cast<size_t>(cols) + 1, 0);
-    for (int c = 0; c < cols; ++c) {
-        colEdges[static_cast<size_t>(c) + 1] =
-            colEdges[static_cast<size_t>(c)] +
-            static_cast<int>(std::lround(columnFractions[static_cast<size_t>(c)] * contentOnlyWidth));
-    }
-    colEdges[static_cast<size_t>(cols)] = contentOnlyWidth;
-
-    std::vector<int> rowEdges(static_cast<size_t>(rows) + 1, 0);
-    for (int r = 0; r < rows; ++r) {
-        rowEdges[static_cast<size_t>(r) + 1] =
-            rowEdges[static_cast<size_t>(r)] +
-            static_cast<int>(std::lround(rowFractions[static_cast<size_t>(r)] * contentOnlyHeight));
-    }
-    rowEdges[static_cast<size_t>(rows)] = contentOnlyHeight;
-
-    // Per-column/row required size, like an HTML table's auto layout --
-    // a single oversized member (its own minimum size bigger than its
-    // slot) only grows its own column/row, not the whole grid uniformly.
-    std::vector<int> colWidths(static_cast<size_t>(cols), 0);
-    std::vector<int> rowHeights(static_cast<size_t>(rows), 0);
-
-    // Collected during the loop, placed after it -- every tile is visible
-    // at once here, so each embedded one whose frame claims a band needs
-    // its own overlay, and they all have to go on top of every member
-    // rather than whichever member happens to be positioned after them.
-    std::vector<RECT> bandRects;
-    // Parallel record of which member/slot pairs actually got a band
-    // rect appended above, so the coverage self-check below can run once
-    // the overlays it's checking have actually been placed, not before.
-    std::vector<std::pair<HWND, RECT>> bandCheckTargets;
-
-    for (int i = 0; i < count; ++i) {
-        const int col = i % cols;
-        const int row = i / cols;
-        // Shift right/down by however many whole gaps precede this
-        // column/row, converting content-only edges into real,
-        // gap-reserved screen coordinates.
-        const int slotLeft = colEdges[static_cast<size_t>(col)] + col * splitterWidthPx;
-        const int slotRight = colEdges[static_cast<size_t>(col) + 1] + col * splitterWidthPx;
-        const int slotTop = rowEdges[static_cast<size_t>(row)] + row * splitterWidthPx;
-        const int slotBottom = rowEdges[static_cast<size_t>(row) + 1] + row * splitterWidthPx;
-        const RECT clientSlot{contentRect.left + slotLeft, contentRect.top + slotTop, contentRect.left + slotRight,
-                               contentRect.top + slotBottom};
-        HWND memberHwnd = windows[static_cast<size_t>(i)];
-        // Every member here occupies its own distinct tile, all visible
-        // at once -- an ordinary sibling child, Z-order untouched here
-        // as always.
-        const RECT actual = PositionMember(memberHwnd, clientSlot);
-        memberRects_[memberHwnd] = clientSlot;  // requested, not actual -- see the Tab-layout loop's comment
-        const size_t beforeCount = bandRects.size();
-        AppendResizeBandRects(memberHwnd, clientSlot, vertical, bandRects);
-        if (bandRects.size() > beforeCount) {
-            bandCheckTargets.emplace_back(memberHwnd, clientSlot);
-        }
-        colWidths[static_cast<size_t>(col)] =
-            std::max(colWidths[static_cast<size_t>(col)], static_cast<int>(actual.right - actual.left));
-        rowHeights[static_cast<size_t>(row)] =
-            std::max(rowHeights[static_cast<size_t>(row)], static_cast<int>(actual.bottom - actual.top));
-    }
-    for (size_t i = 0; i < bandRects.size(); ++i) {
-        PlaceResizeBandOverlay(chromeWindow, i, bandRects[i]);
-    }
-    HideUnusedResizeBandOverlays(chromeWindow, bandRects.size());
-    for (const auto& [checkMember, checkSlot] : bandCheckTargets) {
-        LogUncoveredResizeBands(chromeWindow, checkMember, checkSlot);
-    }
-
-    // Cache boundaries for the chrome's splitter rendering/hit-testing,
-    // in real (gap-reserved) coordinates -- the *center* of each
-    // reserved gap, internal edges only (a grid of N columns has N-1
-    // draggable boundaries between them; the outer two edges aren't
-    // splitters).
-    std::vector<int> columnBoundaries;
-    for (int c = 1; c < cols; ++c) {
-        columnBoundaries.push_back(colEdges[static_cast<size_t>(c)] + (c - 1) * splitterWidthPx +
-                                    splitterWidthPx / 2);
-    }
-    tileColumnBoundaries_[group.Id()] = std::move(columnBoundaries);
-    std::vector<int> rowBoundaries;
-    for (int r = 1; r < rows; ++r) {
-        rowBoundaries.push_back(rowEdges[static_cast<size_t>(r)] + (r - 1) * splitterWidthPx + splitterWidthPx / 2);
-    }
-    tileRowBoundaries_[group.Id()] = std::move(rowBoundaries);
-
-    int neededWidth = colGapTotal;
-    for (int w : colWidths) {
-        neededWidth += w;
-    }
-    int neededHeight = rowGapTotal;
-    for (int h : rowHeights) {
-        neededHeight += h;
-    }
-
-    return SIZE{std::max(neededWidth, requestedWidth), std::max(neededHeight, requestedHeight)};
-}
-
-std::vector<int> GroupManager::TileColumnBoundaries(GroupId id) const {
-    const auto it = tileColumnBoundaries_.find(id);
-    return it == tileColumnBoundaries_.end() ? std::vector<int>{} : it->second;
-}
-
-std::vector<int> GroupManager::TileRowBoundaries(GroupId id) const {
-    const auto it = tileRowBoundaries_.find(id);
-    return it == tileRowBoundaries_.end() ? std::vector<int>{} : it->second;
-}
-
-void GroupManager::SetTileBoundary(GroupState& group, bool column, size_t index, int newPixelPosition,
-                                    int totalSize, int splitterWidthPx) {
-    if (totalSize <= 0) {
-        return;
-    }
-    std::vector<double> fractions = column ? group.TileColumnFractions() : group.TileRowFractions();
-    const size_t count = fractions.size();
-    if (index + 1 >= count) {
-        return;
-    }
-
-    // `newPixelPosition`/`totalSize` are in real (gap-reserved) space --
-    // the same space TileColumnBoundaries/TileRowBoundaries report,
-    // where this boundary is the *center* of its reserved splitter gap.
-    // Convert into content-only space (gaps excluded), matching how
-    // ApplyTileLayout's own fractions divide things up: subtract the
-    // `index` whole gaps preceding this one, then step back from the
-    // gap's center to its left edge.
-    const int gapTotal = static_cast<int>(count - 1) * splitterWidthPx;
-    const int contentOnlySize = std::max(1, totalSize - gapTotal);
-    const int contentOnlyPosition =
-        newPixelPosition - static_cast<int>(index) * splitterWidthPx - splitterWidthPx / 2;
-
-    // The span this one boundary can move within: the edge just before
-    // `index` and the edge just after `index + 1` -- everything outside
-    // this pair stays exactly as it was.
-    double prevEdgeFraction = 0.0;
-    for (size_t i = 0; i < index; ++i) {
-        prevEdgeFraction += fractions[i];
-    }
-    const double pairFraction = fractions[index] + fractions[index + 1];
-    const double nextEdgeFraction = prevEdgeFraction + pairFraction;
-
-    const double newFraction = static_cast<double>(contentOnlyPosition) / contentOnlySize;
-    const double clamped = std::clamp(newFraction, prevEdgeFraction, nextEdgeFraction);
-
-    fractions[index] = clamped - prevEdgeFraction;
-    fractions[index + 1] = nextEdgeFraction - clamped;
-
-    if (column) {
-        group.SetTileColumnFractions(std::move(fractions));
-    } else {
-        group.SetTileRowFractions(std::move(fractions));
-    }
 }
 
 }  // namespace polish

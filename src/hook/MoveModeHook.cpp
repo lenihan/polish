@@ -145,6 +145,7 @@ void MoveModeHook::EndSession(WPARAM action) {
     armed_ = false;
     dragging_ = false;
     keyboardSession_ = false;
+    menuSession_ = false;
     dragPostPending_ = false;
     // nativeHandoffActive_ is deliberately NOT reset here: it has to
     // outlive the session it ended and keep the rest of this Win hold
@@ -153,6 +154,28 @@ void MoveModeHook::EndSession(WPARAM action) {
     // clear it.
     UninstallMouseHook();
     Post(action);
+}
+
+bool MoveModeHook::BeginKeyboardSession(POINT grabPoint) {
+    if (armed_ || dragging_ || keyboardSession_) {
+        return false;
+    }
+    keyboardSession_ = true;
+    menuSession_ = true;
+    grabPoint_ = grabPoint;
+    // Load-bearing, and the reason this method exists rather than the
+    // caller just setting a flag: the mouse hook is otherwise only
+    // installed from the Win-down path, and without it HandleMouseEvent
+    // never runs -- so "any mouse button commits the session" would be
+    // dead code for a session that started from the menu, leaving no way
+    // to end it with the mouse that started it.
+    InstallMouseHook();
+    // keysPhysicallyDown_ is deliberately left alone. Every debounced
+    // key's up-event clears its own slot unconditionally (see
+    // HandleKeyEvent), so a stale slot is already impossible; clearing
+    // here would instead break the "the up is swallowed if and only if
+    // its down was" pairing for a key that happens to be held right now.
+    return true;
 }
 
 void MoveModeHook::SuppressStartMenuForThisHold() {
@@ -396,6 +419,18 @@ bool MoveModeHook::HandleMouseEvent(WPARAM wParam, POINT screenPt) {
     }
 
     if (keyboardSession_) {
+        if (menuSession_ && wParam == WM_LBUTTONDOWN && canGrab_ && canGrab_(screenPt)) {
+            // A session started from the tray menu: the press is a drag,
+            // not a commit. Hands over to the ordinary drag path, which
+            // swallows this press and its release and, with no Win key
+            // held, ends the whole session on that release.
+            keyboardSession_ = false;
+            menuSession_ = false;
+            dragging_ = true;
+            grabPoint_ = screenPt;
+            Post(static_cast<WPARAM>(HookAction::Grab));
+            return true;
+        }
         if (IsButtonDown(wParam)) {
             // Commits rather than cancels, and deliberately not swallowed
             // -- the click reaches whatever is under the cursor completely

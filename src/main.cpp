@@ -48,6 +48,7 @@
 #include "windowtracking/GroupManager.h"
 #include "windowtracking/MoveSnap.h"
 #include "windowtracking/RectUtils.h"
+#include "windowtracking/ArrangeSelection.h"
 #include "windowtracking/WindowLayout.h"
 #include "windowtracking/TaskbarButtons.h"
 #include "windowtracking/TaskbarReadPolicy.h"
@@ -472,18 +473,6 @@ polish::ActivationHistory g_activationHistory;
 polish::GroupManager g_groupManager;
 std::map<polish::GroupId, std::unique_ptr<polish::GroupChromeWindow>> g_groupChromeWindows;
 
-// Which tile is "active" in a Tile/Stack group -- one ring per group,
-// keyed the same way as g_groupChromeWindows (a single shared instance,
-// used until this map replaced it, let one group's reflow silently
-// Hide() a different group's ring -- see EnsureGroupActiveTileHighlight's
-// own comment). Uses AltTabHighlightBorder (Alt+Tab itself now uses
-// ActiveWindowHalo instead) -- nothing in
-// AltTabHighlightBorder assumes its target is top-level, and a
-// reparented member's GetWindowRect/DwmGetWindowAttribute both still
-// return real screen coordinates. See
-// OnObjectFocusChanged/UpdateGroupActiveTileHighlight.
-std::map<polish::GroupId, std::unique_ptr<polish::AltTabHighlightBorder>> g_groupActiveTileHighlights;
-
 // One shared hover-preview popup, reused across every group's tab strip
 // (only one can ever be hovered at a time app-wide) -- created lazily
 // on first hover, not at startup, since most sessions may never hover
@@ -794,7 +783,7 @@ bool CoversWholeMonitor(HWND hwnd) {
 
 // Shows/hides/repositions the active-window halo to match hwnd's current
 // state -- called any time something might have changed which window
-// should have it, modeled on UpdateGroupActiveTileHighlight below. Always
+// should have it. Always
 // safe to call speculatively.
 void UpdateActiveWindowHalo(HWND hwnd) {
     if (!g_activeWindowHalo) {
@@ -1616,63 +1605,12 @@ void EnsureAltTabOverlayPoolSize(size_t count) {
     }
 }
 
-// Creates group `id`'s own ring on demand, owned by its chrome window --
-// see AltTabHighlightBorder's own `owner` comment for what that gets for
-// free (always in front of its owner, hidden/shown with minimize/
-// restore, destroyed with its owner). One instance per group (not the
-// single shared instance an earlier version used) so two groups' rings
-// can never fight over one window -- confirmed real: any *other* group's
-// reflow used to call Hide() on the one shared ring and silently kill
-// whichever group was actually using it.
-void EnsureGroupActiveTileHighlight(polish::GroupId id, HWND chromeWindow) {
-    if (g_groupActiveTileHighlights.find(id) == g_groupActiveTileHighlights.end()) {
-        // alwaysOnTop=false -- unlike the real Alt+Tab overlay, this
-        // ring must not float above unrelated windows (e.g. covering
-        // VS Code) once the group loses focus; ownership (the `owner`
-        // param) keeps it glued to the chrome's own Z position instead.
-        g_groupActiveTileHighlights[id] = std::make_unique<polish::AltTabHighlightBorder>(
-            GetModuleHandleW(nullptr), /*alwaysOnTop=*/false, chromeWindow);
-    }
-}
-
-// Shows/hides/repositions the active-tile ring for group `id` to match
-// its current state -- called any time something might have changed
-// which tile is active, whether it's still Tile mode, where the active
-// member's own rect now is, or where the chrome itself now is (a mode
-// switch, a reflow, a chrome move, closing the group, ...). Always safe
-// to call speculatively; a cheap no-op whenever there's nothing to show.
-void UpdateGroupActiveTileHighlight(polish::GroupId id) {
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    auto ringIt = g_groupActiveTileHighlights.find(id);
-    if (group == nullptr || !polish::IsTiledMode(group->Mode()) || group->MemberCount() <= 1) {
-        // A single-member Tile "grid" already fills the whole content
-        // area -- nothing to distinguish it from, so no point ringing
-        // it.
-        if (ringIt != g_groupActiveTileHighlights.end()) {
-            ringIt->second->Hide();
-        }
-        return;
-    }
-    const auto active = group->ActiveWindow();
-    auto chromeIt = g_groupChromeWindows.find(id);
-    if (!active.has_value() || !IsWindow(*active) || chromeIt == g_groupChromeWindows.end()) {
-        if (ringIt != g_groupActiveTileHighlights.end()) {
-            ringIt->second->Hide();
-        }
-        return;
-    }
-    EnsureGroupActiveTileHighlight(id, chromeIt->second->Handle());
-    g_groupActiveTileHighlights[id]->ShowAroundTarget(*active);
-}
-
-// Called when the active tile changes via something other than the
-// (Tab-mode-only) tab strip -- specifically, keyboard focus landing
-// somewhere inside a Tile-mode member (see OnObjectFocusChanged).
-// Mirrors ActivateGroupTab's own GroupState-then-chrome update, minus
-// the reflow/refocus steps that only make sense for Tab mode (every
-// Tile-mode member is already shown and already has focus -- that's
-// the whole reason this fired in the first place).
-void ActivateGroupTile(polish::GroupId id, HWND hwnd) {
+// Called when the active member changes via something other than the
+// tab strip -- keyboard focus or a click landing somewhere inside a
+// member (see OnObjectFocusChanged). Mirrors ActivateGroupTab's own
+// GroupState-then-chrome update, minus the reflow/refocus steps: the
+// member already has focus, which is the whole reason this fired.
+void ActivateGroupMember(polish::GroupId id, HWND hwnd) {
     polish::GroupState* group = g_groupManager.FindGroup(id);
     auto chromeIt = g_groupChromeWindows.find(id);
     if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
@@ -1682,7 +1620,6 @@ void ActivateGroupTile(polish::GroupId id, HWND hwnd) {
     if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
         chromeIt->second->SetActiveIndex(*activeIndex);
     }
-    UpdateGroupActiveTileHighlight(id);
 }
 
 // Called from GroupChromeWindow's onMemberClicked (WM_PARENTNOTIFY) --
@@ -1703,7 +1640,7 @@ void OnGroupMemberClicked(polish::GroupId id, POINT clientPt) {
         // actually land on a member -- e.g. a gap between splitters).
         return;
     }
-    ActivateGroupTile(id, member);
+    ActivateGroupMember(id, member);
 }
 
 void OnObjectFocusChanged(HWND hwnd) {
@@ -1722,7 +1659,7 @@ void OnObjectFocusChanged(HWND hwnd) {
     for (HWND parent = GetParent(candidate); parent != nullptr; parent = GetParent(candidate)) {
         for (const auto& [id, chrome] : g_groupChromeWindows) {
             if (chrome->Handle() == parent) {
-                ActivateGroupTile(id, candidate);
+                ActivateGroupMember(id, candidate);
                 return;
             }
         }
@@ -5089,6 +5026,18 @@ void OnMoveModeGrab(POINT screenPt) {
         // still have gone away in the message-queue gap.
         return;
     }
+    // A session started from the tray menu starts as a keyboard session
+    // and turns into this drag on the first press. The keyboard session's
+    // target was undimmed to show it was the one in hand; if the press
+    // landed on a different window, put the old one's dim back.
+    if (g_moveModeKeyboardSession) {
+        g_moveModeKeyboardSession = false;
+        if (g_moveModeTarget != nullptr && g_moveModeTarget != target && g_moveModeDimmed) {
+            if (auto* overlay = MoveModeOverlayFor(g_moveModeTarget)) {
+                overlay->ShowOverTarget(g_moveModeTarget);
+            }
+        }
+    }
     // The dim may not have appeared yet -- a fast hold-and-drag beats the
     // delay timer, and the mode still has to look like it is on.
     ShowMoveModeDim();
@@ -5397,6 +5346,33 @@ void OnMoveModeDrop() {
     g_moveModeHaveOriginal = false;
 }
 
+// The tail of starting a keyboard session, shared by the Win+Space latch
+// and the tray menu's "Move or resize a window". Picking the target is
+// the only thing those two do differently; everything below has to happen
+// in this order for both, which is why it is one function and not two
+// copies waiting to drift.
+//
+// grabPt is the drag origin. The latch passes the cursor; the menu passes
+// the target's own centre, because by then the cursor is over the tray.
+void StartMoveModeSessionOn(HWND target, POINT grabPt) {
+    ShowMoveModeDim();
+    if (IsZoomed(target)) {
+        ShowWindow(target, SW_RESTORE);
+    }
+    BeginMoveModeTarget(target, grabPt, polish::Grip::Move);
+    g_moveModeKeyboardSession = true;
+    g_moveModeKeyboardGrip = polish::Grip::BottomRight;
+    // Not a mouse drag, but still Polish moving a window -- the settle
+    // debounce has to stay suppressed for the whole session.
+    g_moveModeMovingWindow = true;
+    if (auto* overlay = MoveModeOverlayFor(target)) {
+        overlay->Hide();
+    }
+    UpdateMoveModeOutline();
+    polish::LogDebug(std::format(L"[Polish] MoveMode: keyboard session on hwnd={}",
+                                  reinterpret_cast<void*>(target)));
+}
+
 void OnMoveModeKeyboardLatch(POINT screenPt) {
     HWND target = MoveModeCandidateAt(screenPt);
     if (target == nullptr) {
@@ -5414,22 +5390,31 @@ void OnMoveModeKeyboardLatch(POINT screenPt) {
         EndMoveModeSession();
         return;
     }
-    ShowMoveModeDim();
-    if (IsZoomed(target)) {
-        ShowWindow(target, SW_RESTORE);
+    StartMoveModeSessionOn(target, screenPt);
+}
+
+// Which window the tray menu's "Move or resize a window" acts on.
+//
+// The MRU list, for the same reason ArrangeTargetMonitor uses it: opening
+// the tray menu takes the foreground for Polish's own message window, so
+// GetForegroundWindow answers "us" by the time the command runs, and the
+// cursor is sitting on the tray icon rather than over anything movable.
+// Neither of the two signals the Win+Space latch relies on survives the
+// trip through a menu.
+//
+// Minimized windows are skipped, unlike maximized ones: a maximized
+// target is restored by StartMoveModeSessionOn and then visibly follows
+// the arrows, but a minimized one has no visible rect to outline, and
+// restoring a window the user cannot see in order to move it is a
+// surprise rather than a feature.
+HWND MoveModeMenuTarget() {
+    for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+        if (IsWindow(hwnd) && !IsOwnProcessWindow(hwnd) && polish::IsCandidateWindow(hwnd) &&
+            !polish::IsElevatedWindow(hwnd) && !IsIconic(hwnd)) {
+            return hwnd;
+        }
     }
-    BeginMoveModeTarget(target, screenPt, polish::Grip::Move);
-    g_moveModeKeyboardSession = true;
-    g_moveModeKeyboardGrip = polish::Grip::BottomRight;
-    // Not a mouse drag, but still Polish moving a window -- the settle
-    // debounce has to stay suppressed for the whole session.
-    g_moveModeMovingWindow = true;
-    if (auto* overlay = MoveModeOverlayFor(target)) {
-        overlay->Hide();
-    }
-    UpdateMoveModeOutline();
-    polish::LogDebug(std::format(L"[Polish] MoveMode: keyboard session on hwnd={}",
-                                  reinterpret_cast<void*>(target)));
+    return nullptr;
 }
 
 // Tab walks the eight resize zones in the order they sit around the
@@ -5702,8 +5687,26 @@ void NudgeArrangedWindowOnScreen(HWND hwnd) {
                  SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
 }
 
+// Which windows each tiling command last placed, and whether the next
+// press of it reverses the order. See ArrangeSelection.h -- the awkward
+// part is which key resets it, and it is unit tested there because nothing
+// in this file can be.
+polish::ArrangeToggle g_arrangeToggle;
+
+const wchar_t* ArrangeKindName(polish::ArrangeKind kind) {
+    switch (kind) {
+        case polish::ArrangeKind::TwoWay:
+            return L"2-way";
+        case polish::ArrangeKind::ThreeWay:
+            return L"3-way";
+        case polish::ArrangeKind::FourWay:
+            break;
+    }
+    return L"4-way";
+}
+
 void ArrangeWindows(polish::ArrangeKind kind) {
-    const wchar_t* kindName = kind == polish::ArrangeKind::Tile ? L"tile" : L"cascade";
+    const wchar_t* kindName = ArrangeKindName(kind);
     const HMONITOR monitor = ArrangeTargetMonitor();
     MONITORINFO info{};
     info.cbSize = sizeof(info);
@@ -5711,19 +5714,21 @@ void ArrangeWindows(polish::ArrangeKind kind) {
         polish::LogDebug(std::format(L"[Polish] Arrange ({}): no monitor to arrange on", kindName));
         return;
     }
-    const std::vector<HWND> windows = ArrangeCandidates(monitor);
-    if (windows.empty()) {
-        polish::LogDebug(std::format(L"[Polish] Arrange ({}): nothing to arrange", kindName));
+    const std::vector<HWND> candidates = ArrangeCandidates(monitor);
+    const polish::ArrangeAvailability availability =
+        polish::EvaluateArrange(kind, static_cast<int>(candidates.size()));
+    if (!availability.enabled) {
+        // Reachable by hotkey even when the menu item for it is greyed
+        // out, so it has to refuse here too rather than trusting the menu
+        // to have been the only way in.
+        polish::LogDebug(std::format(L"[Polish] Arrange ({}): {} ({} candidate(s))", kindName,
+                                      availability.reason, candidates.size()));
         return;
     }
 
-    const UINT dpi = MoveModeDpiForMonitor(monitor);
-    const int count = static_cast<int>(windows.size());
+    const std::vector<HWND> windows = g_arrangeToggle.Next(kind, candidates);
     const std::vector<RECT> rects =
-        kind == polish::ArrangeKind::Tile
-            ? polish::TileRects(info.rcWork, count)
-            : polish::CascadeRects(info.rcWork, count,
-                                   MulDiv(polish::kCascadeStepDip, static_cast<int>(dpi), 96));
+        polish::ArrangeRects(info.rcWork, kind, static_cast<int>(windows.size()));
     if (rects.size() != windows.size()) {
         return;
     }
@@ -5738,9 +5743,10 @@ void ArrangeWindows(polish::ArrangeKind kind) {
     g_arrangeSyncPending = windows;
     g_arrangeSyncWorkArea = info.rcWork;
     SetTimer(g_messageWindow, kArrangeSyncTimerId, kArrangeSyncDelayMs, nullptr);
-    polish::LogDebug(
-        std::format(L"[Polish] Arrange ({}): {} window(s) on work area ({},{})-({},{})", kindName, count,
-                     info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom));
+    polish::LogDebug(std::format(
+        L"[Polish] Arrange ({}): {} of {} candidate(s) on work area ({},{})-({},{})", kindName,
+        windows.size(), candidates.size(), info.rcWork.left, info.rcWork.top, info.rcWork.right,
+        info.rcWork.bottom));
 }
 
 constexpr UINT kMenuIdRestoreSync = 1;
@@ -5754,8 +5760,10 @@ constexpr UINT kMenuIdHalo = 8;
 constexpr UINT kMenuIdBullseye = 9;
 constexpr UINT kMenuIdTaskbar = 10;
 constexpr UINT kMenuIdMoveMode = 11;
-constexpr UINT kMenuIdArrangeTile = 12;
-constexpr UINT kMenuIdArrangeCascade = 13;
+constexpr UINT kMenuIdArrangeTwoWay = 12;
+constexpr UINT kMenuIdArrangeThreeWay = 13;
+constexpr UINT kMenuIdMoveModeStart = 14;
+constexpr UINT kMenuIdArrangeFourWay = 15;
 
 constexpr wchar_t kAboutUrl[] = L"https://www.linkedin.com/in/davidlenihan/";
 
@@ -5769,12 +5777,13 @@ constexpr wchar_t kAboutUrl[] = L"https://www.linkedin.com/in/davidlenihan/";
 // Win+Alt+G) -- confirmed necessary, not just nice-to-have: something
 // else on the dev machine itself already claims Win+Alt+G.
 constexpr int kNewGroupHotkeyId = 1;
-// Two more of the same, for the arrange commands. Separate ids rather
+// Three more of the same, for the tiling commands. Separate ids rather
 // than one id with a modifier test, because RegisterHotKey is what
 // decides which combination fired and a failed registration has to be
 // reportable per command.
-constexpr int kArrangeTileHotkeyId = 2;
-constexpr int kArrangeCascadeHotkeyId = 3;
+constexpr int kArrangeTwoWayHotkeyId = 2;
+constexpr int kArrangeThreeWayHotkeyId = 3;
+constexpr int kArrangeFourWayHotkeyId = 4;
 
 // (Re-)registers the group hotkey from g_settings' current combination,
 // unregistering any previous one first (harmless no-op if none was
@@ -5806,13 +5815,14 @@ std::wstring FormatHotkey(UINT modifiers, UINT virtualKey) {
 // kNewGroupHotkeyId's comment), so this loops back to the same dialog
 // with an inline error instead of silently leaving no hotkey active.
 
-// The two arrange hotkeys, registered the same way. Failure is reported
+// The three tiling hotkeys, registered the same way. Failure is reported
 // rather than swallowed: the group hotkey's own history is that a
 // perfectly reasonable default was already taken on this very machine,
 // so "the key does nothing" has to be diagnosable from the log.
 void RegisterArrangeHotkeysFromSettings() {
-    UnregisterHotKey(g_messageWindow, kArrangeTileHotkeyId);
-    UnregisterHotKey(g_messageWindow, kArrangeCascadeHotkeyId);
+    UnregisterHotKey(g_messageWindow, kArrangeTwoWayHotkeyId);
+    UnregisterHotKey(g_messageWindow, kArrangeThreeWayHotkeyId);
+    UnregisterHotKey(g_messageWindow, kArrangeFourWayHotkeyId);
     const auto reg = [](int id, UINT modifiers, UINT vk, const wchar_t* what) {
         if (RegisterHotKey(g_messageWindow, id, modifiers | MOD_NOREPEAT, vk) == FALSE) {
             polish::LogDebug(std::format(
@@ -5824,10 +5834,12 @@ void RegisterArrangeHotkeysFromSettings() {
                 std::format(L"[Polish] {} ({}) hotkey registered", FormatHotkey(modifiers, vk), what));
         }
     };
-    reg(kArrangeTileHotkeyId, g_settings.arrangeTileHotkeyModifiers, g_settings.arrangeTileHotkeyVirtualKey,
-        L"tile windows");
-    reg(kArrangeCascadeHotkeyId, g_settings.arrangeCascadeHotkeyModifiers,
-        g_settings.arrangeCascadeHotkeyVirtualKey, L"cascade windows");
+    reg(kArrangeTwoWayHotkeyId, g_settings.arrangeTwoWayHotkeyModifiers,
+        g_settings.arrangeTwoWayHotkeyVirtualKey, L"tile 2-way");
+    reg(kArrangeThreeWayHotkeyId, g_settings.arrangeThreeWayHotkeyModifiers,
+        g_settings.arrangeThreeWayHotkeyVirtualKey, L"tile 3-way");
+    reg(kArrangeFourWayHotkeyId, g_settings.arrangeFourWayHotkeyModifiers,
+        g_settings.arrangeFourWayHotkeyVirtualKey, L"tile 4-way");
 }
 
 void ChangeGroupHotkey() {
@@ -5959,8 +5971,7 @@ void ReflowGroupTo(polish::GroupId id) {
     const HWND chromeHandle = chromeIt->second->Handle();
     const RECT contentRect = chromeIt->second->ContentRectInClientCoords();
     const size_t memberCountBefore = group->MemberCount();
-    const SIZE needed =
-        g_groupManager.ApplyLayout(*group, chromeHandle, contentRect, chromeIt->second->TileSplitterWidthPx());
+    const SIZE needed = g_groupManager.ApplyLayout(*group, chromeHandle, contentRect);
     // ApplyLayout can drop a member that turned out to be unreparentable
     // (see its own comment) -- when it does, the chrome's tab strip
     // still shows the stale, now-too-long title/icon list until
@@ -5973,12 +5984,6 @@ void ReflowGroupTo(polish::GroupId id) {
             chromeIt->second->SetActiveIndex(*activeIndex);
         }
     }
-    // A no-op in Tab mode (both come back empty) -- ApplyLayout is what
-    // actually (re)computes these, so the chrome's own copy (used for
-    // splitter rendering/hit-testing) needs refreshing after every call
-    // to it, not just the first.
-    chromeIt->second->SetTileSplitters(g_groupManager.TileColumnBoundaries(id), g_groupManager.TileRowBoundaries(id));
-
     // Re-arm (not just start) the delayed thumbnail-refresh sweep on
     // every reflow -- see kThumbnailRefreshTimerId's own comment for
     // why a single synchronous capture isn't always enough.
@@ -5993,89 +5998,9 @@ void ReflowGroupTo(polish::GroupId id) {
         g_reflowGrowInProgress = true;
         chromeIt->second->GrowContentAreaTo(needed);
         g_reflowGrowInProgress = false;
-        g_groupManager.ApplyLayout(*group, chromeHandle, chromeIt->second->ContentRectInClientCoords(),
-                                    chromeIt->second->TileSplitterWidthPx());
-        chromeIt->second->SetTileSplitters(g_groupManager.TileColumnBoundaries(id),
-                                            g_groupManager.TileRowBoundaries(id));
+        g_groupManager.ApplyLayout(*group, chromeHandle, chromeIt->second->ContentRectInClientCoords());
     }
 
-    // The active member's screen rect may have just moved (a new tile
-    // grid shape, a resize, ...) -- keep the active-tile ring (if
-    // showing at all) glued to it. A cheap no-op when there's nothing
-    // to update (wrong mode, ≤1 member, etc. -- see its own comment).
-    UpdateGroupActiveTileHighlight(id);
-}
-
-// Called live while a Tile-mode splitter is being dragged
-// (GroupChromeWindow's onTileSplitterDragged callback, already clamped
-// there so neither adjacent tile shrinks below its visible-content
-// floor) -- updates just that one pair of adjacent tiles' stored
-// fractions and reflows, so the drag visibly resizes tiles in real
-// time rather than only once on drop.
-void OnTileSplitterDragged(polish::GroupId id, bool column, size_t index, int newPixelPosition) {
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    auto chromeIt = g_groupChromeWindows.find(id);
-    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
-        return;
-    }
-    const RECT contentRect = chromeIt->second->ContentRectInClientCoords();
-    const int totalSize = column ? (contentRect.right - contentRect.left) : (contentRect.bottom - contentRect.top);
-    g_groupManager.SetTileBoundary(*group, column, index, newPixelPosition, totalSize,
-                                    chromeIt->second->TileSplitterWidthPx());
-    ReflowGroupTo(id);
-}
-
-// Remembers each splitter's most recent *custom* (non-50/50) fraction
-// pair, keyed by (group, axis, index) -- so a double-click can toggle
-// back to it after having snapped to an even split. Only ever holds an
-// entry while that splitter is currently sitting at 50/50 because of a
-// double-click; a live drag (OnTileSplitterDragged) doesn't touch this
-// map at all, so dragging away from an even split simply leaves no
-// stale entry to toggle back to (there's nothing to "undo" yet).
-std::map<std::tuple<polish::GroupId, bool, size_t>, std::pair<double, double>> g_tileSplitterLastCustom;
-
-// Called when a Tile-mode splitter is double-clicked
-// (GroupChromeWindow's onTileSplitterDoubleClicked callback) -- toggles
-// that one pair of adjacent tiles between an even 50/50 split and
-// whatever custom split they had before, so a quick double-click undoes
-// a drag without having to eyeball it back into place.
-void OnTileSplitterDoubleClicked(polish::GroupId id, bool column, size_t index) {
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    if (group == nullptr) {
-        return;
-    }
-    std::vector<double> fractions = column ? group->TileColumnFractions() : group->TileRowFractions();
-    if (index + 1 >= fractions.size()) {
-        return;
-    }
-
-    const double pairTotal = fractions[index] + fractions[index + 1];
-    const double evenSplit = pairTotal / 2.0;
-    constexpr double kEvenTolerance = 0.005;  // ~0.5% of the pair -- comfortably tighter than any visible difference
-    const auto key = std::make_tuple(id, column, index);
-
-    if (std::abs(fractions[index] - evenSplit) < kEvenTolerance) {
-        // Already even -- toggle back to the last custom split, if any.
-        const auto it = g_tileSplitterLastCustom.find(key);
-        if (it == g_tileSplitterLastCustom.end()) {
-            return;  // nothing to restore
-        }
-        fractions[index] = it->second.first;
-        fractions[index + 1] = it->second.second;
-        g_tileSplitterLastCustom.erase(it);
-    } else {
-        // Currently custom -- remember it, then snap to even.
-        g_tileSplitterLastCustom[key] = {fractions[index], fractions[index + 1]};
-        fractions[index] = evenSplit;
-        fractions[index + 1] = evenSplit;
-    }
-
-    if (column) {
-        group->SetTileColumnFractions(std::move(fractions));
-    } else {
-        group->SetTileRowFractions(std::move(fractions));
-    }
-    ReflowGroupTo(id);
 }
 
 // Current window titles for group's members, in membership order --
@@ -6283,88 +6208,8 @@ void ReorderGroupTab(polish::GroupId id, size_t fromIndex, size_t toIndex) {
         std::format(L"[Polish] Group: tab reordered {} -> {} for group id={}", fromIndex, toIndex, id));
 }
 
-// Names a mode for the debug log below.
-const wchar_t* ModeName(polish::GroupMode mode) {
-    switch (mode) {
-        case polish::GroupMode::Tab:
-            return L"Tab";
-        case polish::GroupMode::Tile:
-            return L"Tile";
-        case polish::GroupMode::Stack:
-            return L"Stack";
-    }
-    return L"Tab";
-}
-
-// Applies a new mode to group `id`: updates GroupState, mirrors it into
-// the chrome's own rendering, and reflows -- ApplyLayout already
-// branches on GroupState::Mode(), so switching modes needs no special-
-// casing beyond that single flag flip plus a reflow. v1 has no per-mode
-// saved geometry (a tiled member just gets repositioned into the shared
-// tab rect if switching to Tab, and vice versa) -- acceptable for v1,
-// not worth the complexity of remembering "where it would have been."
-// Shared by ToggleGroupMode (title-bar button, cycles) and
-// GroupChromeWindow's context-menu mode selection (picks directly).
-void SetGroupMode(polish::GroupId id, polish::GroupMode mode) {
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    auto chromeIt = g_groupChromeWindows.find(id);
-    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
-        return;
-    }
-    group->SetMode(mode);
-    chromeIt->second->SetMode(mode);
-    ReflowGroupTo(id);
-    polish::LogDebug(std::format(L"[Polish] Group: mode switched to {} for group id={}", ModeName(mode), id));
-}
-
-// Called from GroupChromeWindow's title-bar mode-toggle button: cycles
-// Tab -> Tile -> Stack -> Tab (see the chrome's own ModeToggle tooltip,
-// which names whichever of these three is next).
-void ToggleGroupMode(polish::GroupId id) {
-    const polish::GroupState* group = g_groupManager.FindGroup(id);
-    if (group == nullptr) {
-        return;
-    }
-    polish::GroupMode newMode = polish::GroupMode::Tab;
-    switch (group->Mode()) {
-        case polish::GroupMode::Tab:
-            newMode = polish::GroupMode::Tile;
-            break;
-        case polish::GroupMode::Tile:
-            newMode = polish::GroupMode::Stack;
-            break;
-        case polish::GroupMode::Stack:
-            newMode = polish::GroupMode::Tab;
-            break;
-    }
-    SetGroupMode(id, newMode);
-}
-
-// Called from GroupChromeWindow's title-bar tile-maximize button (only
-// ever clickable in a tiled mode -- Tile or Stack -- with 2+ members --
-// the button itself isn't shown otherwise, see
-// TileMaximizeButtonVisible). Same flip-state-then-reflow shape as
-// ToggleGroupMode.
-void ToggleTileMaximize(polish::GroupId id) {
-    polish::GroupState* group = g_groupManager.FindGroup(id);
-    auto chromeIt = g_groupChromeWindows.find(id);
-    if (group == nullptr || chromeIt == g_groupChromeWindows.end()) {
-        return;
-    }
-    const bool newMaximized = !group->IsTileMaximized();
-    group->SetTileMaximized(newMaximized);
-    chromeIt->second->SetTileMaximized(newMaximized);
-    ReflowGroupTo(id);
-    polish::LogDebug(std::format(L"[Polish] Group: tile {} for group id={}",
-                                  newMaximized ? L"maximized" : L"restored", id));
-}
-
-// Called from GroupChromeWindow's title-bar alignment button. Same
-// flip-state-then-reflow shape as ToggleGroupMode/ToggleTileMaximize --
-// ReflowGroupTo re-derives everything from GroupState::Alignment()
-// itself (GroupManager::ApplyTileLayout's grid-shape bias,
-// GroupChromeWindow's own tab-strip axis via SetAlignment below), so
-// flipping the one flag and reflowing is the whole job.
+// Called from GroupChromeWindow's title-bar alignment button: flips the
+// one flag, mirrors it into the chrome's tab-strip axis, and reflows.
 void ToggleGroupAlignment(polish::GroupId id) {
     polish::GroupState* group = g_groupManager.FindGroup(id);
     auto chromeIt = g_groupChromeWindows.find(id);
@@ -6430,12 +6275,6 @@ void EditGroupWindows(polish::GroupId id) {
     if (const auto activeIndex = group->ActiveIndex(); activeIndex.has_value()) {
         chromeIt->second->SetActiveIndex(*activeIndex);
     }
-    // SetMembers above may have just reset IsTileMaximized() to false
-    // (membership dropped to <=1 -- see its own comment) -- re-sync the
-    // chrome's copy either way so the tile-maximize button's glyph/
-    // visibility reflects whatever GroupState actually landed on, not
-    // whatever it was before this edit.
-    chromeIt->second->SetTileMaximized(group->IsTileMaximized());
     SetWindowTextW(chromeIt->second->Handle(), group->Name().c_str());
     ReflowGroupTo(id);
     polish::LogDebug(std::format(L"[Polish] Group: edited group id={}, now {} window(s), name=\"{}\"", id,
@@ -6512,32 +6351,44 @@ void TriggerNewGroup(HWND owner) {
     chrome->SetMemberIcons(memberIcons);
     chrome->SetOnTabClicked([id](size_t index) { ActivateGroupTab(id, index); });
     chrome->SetOnTabReordered([id](size_t from, size_t to) { ReorderGroupTab(id, from, to); });
-    chrome->SetOnModeToggleRequested([id]() { ToggleGroupMode(id); });
-    chrome->SetOnModeSelected([id](polish::GroupMode mode) { SetGroupMode(id, mode); });
-    chrome->SetOnTileMaximizeToggleRequested([id]() { ToggleTileMaximize(id); });
     chrome->SetOnAlignmentToggleRequested([id]() { ToggleGroupAlignment(id); });
     chrome->SetOnEditWindowsRequested([id]() { EditGroupWindows(id); });
     chrome->SetOnResized([id]() { ReflowGroupTo(id); });
-    // Deliberately UpdateGroupActiveTileHighlight, not a full
-    // ReflowGroupTo -- a member moves for free with its parent (see
-    // GroupChromeWindow's own WM_MOVE comment), only the ring needs
-    // repositioning.
-    chrome->SetOnMoved([id]() { UpdateGroupActiveTileHighlight(id); });
     chrome->SetOnMemberClicked([id](POINT pt) { OnGroupMemberClicked(id, pt); });
     chrome->SetOnClosing([id]() { CloseGroup(id); });
     chrome->SetOnTabHovered(
         [id](std::optional<size_t> index, const RECT& tabScreenRect) { OnGroupTabHovered(id, index, tabScreenRect); });
-    chrome->SetOnTileSplitterDragged(
-        [id](bool column, size_t index, int newPixelPosition) {
-            OnTileSplitterDragged(id, column, index, newPixelPosition);
-        });
-    chrome->SetOnTileSplitterDoubleClicked(
-        [id](bool column, size_t index) { OnTileSplitterDoubleClicked(id, column, index); });
     polish::LogDebug(std::format(L"[Polish] New Group: chrome window created hwnd={} for group id={}",
                                   reinterpret_cast<void*>(chrome->Handle()), id));
 
     g_groupChromeWindows[id] = std::move(chrome);
     ReflowGroupTo(id);
+}
+
+// One tiling command's menu item.
+//
+// When the command cannot run, the reason goes in the item's own label.
+// That is not a stylistic choice: a standard Win32 popup menu has no
+// per-item tooltip, and this app deliberately has no owner-drawn menus
+// (util/DarkMode.cpp explains why -- the dark theme comes from
+// SetWindowTheme, which an owner-drawn menu would opt out of). A greyed
+// item with no explanation is the thing worth avoiding, so the label is
+// where the explanation has to go.
+//
+// The reason goes before the tab, so the hotkey stays in its own column
+// and the three items still line up with each other.
+void AppendArrangeMenuItem(HMENU menu, UINT id, polish::ArrangeKind kind, const wchar_t* label,
+                           UINT modifiers, UINT virtualKey, int candidateCount) {
+    const polish::ArrangeAvailability availability = polish::EvaluateArrange(kind, candidateCount);
+    std::wstring text = label;
+    if (!availability.enabled) {
+        text += L" (";
+        text += availability.reason;
+        text += L")";
+    }
+    text += L"\t";
+    text += FormatHotkey(modifiers, virtualKey);
+    AppendMenuW(menu, MF_STRING | (availability.enabled ? MF_ENABLED : MF_GRAYED), id, text.c_str());
 }
 
 // Rebuilt fresh every time the tray icon's context menu is about to
@@ -6557,18 +6408,30 @@ void PopulateTrayMenu(HMENU menu) {
                 L"Taskbar hover list and click-to-cycle");
     AppendMenuW(menu, MF_STRING | (g_settings.moveModeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdMoveMode,
                 L"Hold Win to move/resize any window");
+    // Directly under the toggle it depends on, and the only way into
+    // move/resize mode that needs no keyboard: both gestures above are
+    // Win-key holds, which leaves a mouse-only user with nothing. Acts on
+    // the most recently used window -- see MoveModeMenuTarget on why not
+    // the foreground one.
+    const bool canStartMoveMode = g_settings.moveModeEnabled && MoveModeMenuTarget() != nullptr;
+    AppendMenuW(menu, MF_STRING | (canStartMoveMode ? MF_ENABLED : MF_GRAYED), kMenuIdMoveModeStart,
+                g_settings.moveModeEnabled ? L"Move or resize a window"
+                                           : L"Move or resize a window (switch it on above)");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     // The hotkey is shown beside each item on purpose: the tray menu is
     // the mouse way in, and seeing the key there is how anyone ever
     // learns the keyboard way in.
-    AppendMenuW(menu, MF_STRING, kMenuIdArrangeTile,
-                (L"Tile windows	" + FormatHotkey(g_settings.arrangeTileHotkeyModifiers,
-                                                  g_settings.arrangeTileHotkeyVirtualKey))
-                    .c_str());
-    AppendMenuW(menu, MF_STRING, kMenuIdArrangeCascade,
-                (L"Cascade windows	" + FormatHotkey(g_settings.arrangeCascadeHotkeyModifiers,
-                                                     g_settings.arrangeCascadeHotkeyVirtualKey))
-                    .c_str());
+    // Counted once for all three items, on the monitor they would act on.
+    const int arrangeCandidateCount = static_cast<int>(ArrangeCandidates(ArrangeTargetMonitor()).size());
+    AppendArrangeMenuItem(menu, kMenuIdArrangeTwoWay, polish::ArrangeKind::TwoWay, L"Tile 2-way",
+                          g_settings.arrangeTwoWayHotkeyModifiers, g_settings.arrangeTwoWayHotkeyVirtualKey,
+                          arrangeCandidateCount);
+    AppendArrangeMenuItem(menu, kMenuIdArrangeThreeWay, polish::ArrangeKind::ThreeWay, L"Tile 3-way",
+                          g_settings.arrangeThreeWayHotkeyModifiers,
+                          g_settings.arrangeThreeWayHotkeyVirtualKey, arrangeCandidateCount);
+    AppendArrangeMenuItem(menu, kMenuIdArrangeFourWay, polish::ArrangeKind::FourWay, L"Tile 4-way",
+                          g_settings.arrangeFourWayHotkeyModifiers,
+                          g_settings.arrangeFourWayHotkeyVirtualKey, arrangeCandidateCount);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuIdNewGroup,
                 (L"New Group...\t" + FormatHotkey(g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey))
@@ -6625,6 +6488,24 @@ void HandleTrayCommand(UINT commandId) {
                 EndMoveModeSession();
             }
             break;
+        case kMenuIdMoveModeStart: {
+            const HWND target = MoveModeMenuTarget();
+            if (target == nullptr || g_moveModeHook == nullptr) {
+                polish::LogDebug(L"[Polish] MoveMode: menu start found no movable window");
+                break;
+            }
+            // The target's centre, not the cursor: the cursor is on the
+            // tray icon, and this point becomes the drag origin.
+            RECT inset{};
+            const RECT visible = MoveModeVisibleRectFor(target, inset);
+            const POINT centre{(visible.left + visible.right) / 2, (visible.top + visible.bottom) / 2};
+            if (!g_moveModeHook->BeginKeyboardSession(centre)) {
+                polish::LogDebug(L"[Polish] MoveMode: menu start refused, a session is already live");
+                break;
+            }
+            StartMoveModeSessionOn(target, centre);
+            break;
+        }
         case kMenuIdTaskbar:
             g_settings.taskbarEnabled = !g_settings.taskbarEnabled;
             polish::SaveSettings(g_settings);
@@ -6639,11 +6520,14 @@ void HandleTrayCommand(UINT commandId) {
                 std::format(L"[Polish] start with Windows {}", newValue ? L"enabled" : L"disabled"));
             break;
         }
-        case kMenuIdArrangeTile:
-            ArrangeWindows(polish::ArrangeKind::Tile);
+        case kMenuIdArrangeTwoWay:
+            ArrangeWindows(polish::ArrangeKind::TwoWay);
             break;
-        case kMenuIdArrangeCascade:
-            ArrangeWindows(polish::ArrangeKind::Cascade);
+        case kMenuIdArrangeThreeWay:
+            ArrangeWindows(polish::ArrangeKind::ThreeWay);
+            break;
+        case kMenuIdArrangeFourWay:
+            ArrangeWindows(polish::ArrangeKind::FourWay);
             break;
         case kMenuIdNewGroup:
             TriggerNewGroup(nullptr);
@@ -6856,10 +6740,12 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         case WM_HOTKEY:
             if (wParam == kNewGroupHotkeyId) {
                 TriggerNewGroup(nullptr);
-            } else if (wParam == kArrangeTileHotkeyId) {
-                ArrangeWindows(polish::ArrangeKind::Tile);
-            } else if (wParam == kArrangeCascadeHotkeyId) {
-                ArrangeWindows(polish::ArrangeKind::Cascade);
+            } else if (wParam == kArrangeTwoWayHotkeyId) {
+                ArrangeWindows(polish::ArrangeKind::TwoWay);
+            } else if (wParam == kArrangeThreeWayHotkeyId) {
+                ArrangeWindows(polish::ArrangeKind::ThreeWay);
+            } else if (wParam == kArrangeFourWayHotkeyId) {
+                ArrangeWindows(polish::ArrangeKind::FourWay);
             }
             return 0;
 
@@ -6907,7 +6793,6 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             // along with it as a side effect (harmless -- the ring's own
             // destructor guards with IsWindow -- but erasing our side
             // first is the more predictable order).
-            g_groupActiveTileHighlights.erase(id);
             g_groupChromeWindows.erase(id);
             return 0;
         }
@@ -6917,8 +6802,9 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             KillTimer(hwnd, kBullseyeFrameTimerId);
             KillTimer(hwnd, kMoveModeDimTimerId);
             UnregisterHotKey(hwnd, kNewGroupHotkeyId);
-            UnregisterHotKey(hwnd, kArrangeTileHotkeyId);
-            UnregisterHotKey(hwnd, kArrangeCascadeHotkeyId);
+            UnregisterHotKey(hwnd, kArrangeTwoWayHotkeyId);
+            UnregisterHotKey(hwnd, kArrangeThreeWayHotkeyId);
+            UnregisterHotKey(hwnd, kArrangeFourWayHotkeyId);
             if (g_foregroundHook != nullptr) {
                 UnhookWinEvent(g_foregroundHook);
             }
@@ -6961,7 +6847,6 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             // owned by its group's chrome (see AltTabHighlightBorder's
             // `owner`), so clearing this first is the same predictable-
             // order reasoning as kCloseGroupMessage's own erase order.
-            g_groupActiveTileHighlights.clear();
             // Every remaining group's members must be released back to
             // top-level *before* their chrome windows are destroyed
             // below -- unlike a single group's own WM_CLOSE path

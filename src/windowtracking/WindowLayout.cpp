@@ -1,84 +1,88 @@
 #include "windowtracking/WindowLayout.h"
 
-#include <algorithm>
-#include <cmath>
-
 namespace polish {
 
-LayoutGrid TileShape(int count) {
-    if (count <= 0) {
-        return LayoutGrid{0, 0};
+int SlotsFor(ArrangeKind kind) {
+    switch (kind) {
+        case ArrangeKind::TwoWay:
+            return 2;
+        case ArrangeKind::ThreeWay:
+            return 3;
+        case ArrangeKind::FourWay:
+            return 4;
     }
-    const int cols = static_cast<int>(std::ceil(std::sqrt(static_cast<double>(count))));
-    const int rows = (count + cols - 1) / cols;
-    return LayoutGrid{cols, rows};
+    return 0;
 }
 
-std::vector<RECT> TileRects(const RECT& work, int count) {
-    std::vector<RECT> rects;
-    if (count <= 0 || work.right <= work.left || work.bottom <= work.top) {
-        return rects;
-    }
-    rects.reserve(static_cast<size_t>(count));
-
-    const LayoutGrid grid = TileShape(count);
+Orientation OrientationOf(const RECT& work) {
     const LONG width = work.right - work.left;
     const LONG height = work.bottom - work.top;
+    return width >= height ? Orientation::Landscape : Orientation::Portrait;
+}
 
-    // How many rows are completely full, and what is left over for a
-    // final short row.
-    const int fullRows = count / grid.cols;
-    const int remainder = count % grid.cols;
-
-    // Row edges computed from the row index rather than accumulated, so
-    // rounding cannot drift and leave a seam between rows.
-    const auto rowTop = [&](int row) { return work.top + height * row / grid.rows; };
-
-    for (int row = 0; row < fullRows; ++row) {
-        for (int col = 0; col < grid.cols; ++col) {
-            rects.push_back(RECT{work.left + width * col / grid.cols, rowTop(row),
-                                 work.left + width * (col + 1) / grid.cols, rowTop(row + 1)});
-        }
+std::vector<RECT> SliceAlongLongAxis(const RECT& work, int n) {
+    std::vector<RECT> rects;
+    if (n <= 0 || work.right <= work.left || work.bottom <= work.top) {
+        return rects;
     }
-    if (remainder > 0) {
-        // The short row shares the full width between however many are
-        // left, so there is no hole beside them.
-        const int row = fullRows;
-        for (int col = 0; col < remainder; ++col) {
-            rects.push_back(RECT{work.left + width * col / remainder, rowTop(row),
-                                 work.left + width * (col + 1) / remainder, rowTop(row + 1)});
+    rects.reserve(static_cast<size_t>(n));
+
+    if (OrientationOf(work) == Orientation::Landscape) {
+        const LONG width = work.right - work.left;
+        // Computed from the index rather than accumulated, and shared
+        // between neighbouring slices, so there is no seam and no lost
+        // pixel -- edge(n) is exactly work.right.
+        const auto edge = [&](int i) { return work.left + width * i / n; };
+        for (int i = 0; i < n; ++i) {
+            rects.push_back(RECT{edge(i), work.top, edge(i + 1), work.bottom});
+        }
+    } else {
+        const LONG height = work.bottom - work.top;
+        const auto edge = [&](int i) { return work.top + height * i / n; };
+        for (int i = 0; i < n; ++i) {
+            rects.push_back(RECT{work.left, edge(i), work.right, edge(i + 1)});
         }
     }
     return rects;
 }
 
-std::vector<RECT> CascadeRects(const RECT& work, int count, int stepPx) {
-    std::vector<RECT> rects;
-    if (count <= 0 || work.right <= work.left || work.bottom <= work.top) {
-        return rects;
+std::vector<RECT> ArrangeRects(const RECT& work, ArrangeKind kind, int count) {
+    if (count != SlotsFor(kind) || work.right <= work.left || work.bottom <= work.top) {
+        return {};
     }
-    rects.reserve(static_cast<size_t>(count));
 
-    const LONG width = work.right - work.left;
-    const LONG height = work.bottom - work.top;
-    const LONG winWidth = std::max<LONG>(1, width * kCascadeWidthPercent / 100);
-    const LONG winHeight = std::max<LONG>(1, height * kCascadeHeightPercent / 100);
-    const LONG step = std::max<LONG>(1, stepPx);
+    switch (kind) {
+        case ArrangeKind::TwoWay:
+        case ArrangeKind::ThreeWay:
+            return SliceAlongLongAxis(work, count);
 
-    // How many windows fit before one would hang off the work area. At
-    // least one, so a step larger than the leftover room still produces
-    // a stack rather than nothing.
-    const LONG slotsAcross = (width - winWidth) / step;
-    const LONG slotsDown = (height - winHeight) / step;
-    const LONG slots = std::max<LONG>(1, std::min(slotsAcross, slotsDown) + 1);
-
-    for (int i = 0; i < count; ++i) {
-        const LONG slot = static_cast<LONG>(i) % slots;
-        const LONG left = work.left + slot * step;
-        const LONG top = work.top + slot * step;
-        rects.push_back(RECT{left, top, left + winWidth, top + winHeight});
+        case ArrangeKind::FourWay: {
+            // Always a 2x2, in both orientations: the four corners are the
+            // same four corners whichever way round the monitor is, and
+            // four quarters is what "4-way" means to everyone who has used
+            // another window manager.
+            //
+            // Deliberately not "slice in two, then slice each half in two
+            // along its own long axis". That is tidier to write and gives
+            // four quarters on an ordinary monitor, but on an ultrawide
+            // (3840x1080, say) each half is still landscape, so it would
+            // slice again the same way and produce four columns instead.
+            // Four columns may well be the better layout there, but it is
+            // not what this command is called, and a command whose shape
+            // depends on the aspect ratio in a way nobody can predict is
+            // worse than one that is merely suboptimal.
+            //
+            // Both midpoints are shared between the slots either side of
+            // them, for the same no-seam reason as SliceAlongLongAxis.
+            const LONG midX = work.left + (work.right - work.left) / 2;
+            const LONG midY = work.top + (work.bottom - work.top) / 2;
+            return {RECT{work.left, work.top, midX, midY},
+                    RECT{midX, work.top, work.right, midY},
+                    RECT{work.left, midY, midX, work.bottom},
+                    RECT{midX, midY, work.right, work.bottom}};
+        }
     }
-    return rects;
+    return {};
 }
 
 }  // namespace polish

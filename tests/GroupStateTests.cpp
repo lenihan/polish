@@ -10,10 +10,9 @@ namespace {
 HWND AsHwnd(uintptr_t value) { return reinterpret_cast<HWND>(value); }
 }  // namespace
 
-TEST_CASE("GroupState: new group has an id, default Tab mode, and no members") {
+TEST_CASE("GroupState: new group has an id and no members") {
     GroupState state(42);
     CHECK(state.Id() == 42);
-    CHECK(state.Mode() == GroupMode::Tab);
     CHECK(state.MemberCount() == 0);
     CHECK(state.ActiveIndex() == std::nullopt);
     CHECK(state.ActiveWindow() == std::nullopt);
@@ -23,25 +22,6 @@ TEST_CASE("GroupState: new group defaults to Horizontal alignment and an auto-ge
     GroupState state(42);
     CHECK(state.Alignment() == GroupAlignment::Horizontal);
     CHECK(state.Name() == L"Group 42");
-}
-
-TEST_CASE("GroupState: new group has no tile column/row fractions until customized") {
-    GroupState state(1);
-    CHECK(state.TileColumnFractions().empty());
-    CHECK(state.TileRowFractions().empty());
-}
-
-TEST_CASE("GroupState: SetTileColumnFractions/SetTileRowFractions round-trip") {
-    GroupState state(1);
-    state.SetTileColumnFractions({0.3, 0.7});
-    state.SetTileRowFractions({0.25, 0.5, 0.25});
-    CHECK(state.TileColumnFractions() == std::vector<double>{0.3, 0.7});
-    CHECK(state.TileRowFractions() == std::vector<double>{0.25, 0.5, 0.25});
-}
-
-TEST_CASE("GroupState: mode can be set at construction") {
-    GroupState state(1, GroupMode::Tile);
-    CHECK(state.Mode() == GroupMode::Tile);
 }
 
 TEST_CASE("GroupState: AddWindow appends and the first window becomes active") {
@@ -165,35 +145,6 @@ TEST_CASE("GroupState: Remove of a window not in the group is a no-op") {
     state.Remove(AsHwnd(99));
     CHECK(state.MemberCount() == 1);
     CHECK(state.Contains(AsHwnd(1)));
-}
-
-TEST_CASE("GroupState: SetMode changes the mode without touching membership") {
-    GroupState state(1);
-    state.AddWindow(AsHwnd(1));
-    state.SetMode(GroupMode::Tile);
-    CHECK(state.Mode() == GroupMode::Tile);
-    CHECK(state.MemberCount() == 1);
-    CHECK(state.ActiveWindow() == AsHwnd(1));
-}
-
-TEST_CASE("GroupState: SetMode from Tile to Stack preserves IsTileMaximized") {
-    GroupState state(1, GroupMode::Tile);
-    state.AddWindow(AsHwnd(1));
-    state.AddWindow(AsHwnd(2));
-    state.SetTileMaximized(true);
-    state.SetMode(GroupMode::Stack);
-    CHECK(state.Mode() == GroupMode::Stack);
-    CHECK(state.IsTileMaximized());
-}
-
-TEST_CASE("GroupState: SetMode from Stack to Tab clears IsTileMaximized") {
-    GroupState state(1, GroupMode::Stack);
-    state.AddWindow(AsHwnd(1));
-    state.AddWindow(AsHwnd(2));
-    state.SetTileMaximized(true);
-    state.SetMode(GroupMode::Tab);
-    CHECK(state.Mode() == GroupMode::Tab);
-    CHECK_FALSE(state.IsTileMaximized());
 }
 
 TEST_CASE("GroupState: SetAlignment changes the alignment without touching membership") {

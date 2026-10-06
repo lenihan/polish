@@ -179,6 +179,24 @@ public:
     // AltTabHook's click-commits makes.
     void SetOnCommit(std::function<void()> onCommit) { onCommit_ = std::move(onCommit); }
 
+    // Starts a keyboard session from outside the hook -- the tray menu's
+    // "Move or resize a window", which is the only way into this feature
+    // that needs no keyboard at all. Returns false, changing nothing, if
+    // a hold, a drag or a session is already live: two concurrent
+    // sessions would each believe they owned the target.
+    //
+    // grabPoint is the drag origin the Grab handler will read. A menu
+    // caller should pass the target window's own centre, not the cursor
+    // -- the cursor is over the tray icon, nowhere near the window being
+    // moved.
+    //
+    // Unlike the Space path this deliberately does NOT call
+    // SuppressStartMenuForThisHold(): there is no Win hold to suppress,
+    // and its injected Ctrl tap would land in whatever app is under the
+    // cursor for no reason at all. The symmetry with the Space branch
+    // invites adding it back; don't.
+    bool BeginKeyboardSession(POINT grabPoint);
+
     // Injects the invisible Ctrl tap that stops the Start menu opening
     // on the Win-up at the end of this hold, if it hasn't been injected
     // already. Idempotent per hold.
@@ -273,6 +291,14 @@ private:
     // it and is ended only by Enter, Escape, a click, or the caller
     // noticing its target is gone.
     bool keyboardSession_ = false;
+    // The keyboard session was started from the tray menu rather than by
+    // Space during a hold. Such a session also accepts the mouse: the
+    // first left-press on a movable window becomes an ordinary drag
+    // (move, or resize from the border band) and the session ends when
+    // the button comes up. Without this the menu entry was keyboard-only,
+    // which defeats the point of it -- it exists for people not using
+    // the keyboard.
+    bool menuSession_ = false;
     // See SuppressStartMenuForThisHold. Reset on Win-up.
     bool startMenuSuppressedThisHold_ = false;
     // Tracked the same observed-from-hook-events way as winHeld_, and
