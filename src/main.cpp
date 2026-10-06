@@ -5572,7 +5572,8 @@ BOOL CALLBACK EnumArrangeCandidatesProc(HWND hwnd, LPARAM) {
     if (g_arrangeCollecting == nullptr) {
         return FALSE;
     }
-    if (IsOwnProcessWindow(hwnd) || !polish::IsCandidateWindow(hwnd) || polish::IsElevatedWindow(hwnd)) {
+    if (IsOwnProcessWindow(hwnd) || !polish::IsCandidateWindow(hwnd) ||
+        !IsWindowInNormalState(hwnd) || polish::IsElevatedWindow(hwnd)) {
         return TRUE;
     }
     if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != g_arrangeCollectingMonitor) {
@@ -5585,8 +5586,17 @@ BOOL CALLBACK EnumArrangeCandidatesProc(HWND hwnd, LPARAM) {
     return TRUE;
 }
 
-// The windows an arrange command acts on: every non-minimized,
-// non-elevated candidate on `monitor`, most-recently-used first.
+// The windows an arrange command acts on: every *normal* non-elevated
+// candidate on `monitor`, most-recently-used first.
+//
+// Normal means neither minimized nor maximized -- IsWindowInNormalState,
+// the same predicate restore-position sync uses to decide a rect is
+// worth recording. Minimized is obvious. Maximized is a deliberate
+// choice rather than a technical limit: an earlier version pulled a
+// maximized window down into a tile slot, which quietly undid a state
+// the user had explicitly asked for, on a window they may not even have
+// been thinking about. A window that is maximized is already arranged;
+// tile and cascade leave it alone and work around it.
 //
 // Elevated windows are left out rather than attempted: UIPI makes
 // SetWindowPos a silent no-op against them (docs/LIMITATIONS.md #1), so
@@ -5596,7 +5606,7 @@ std::vector<HWND> ArrangeCandidates(HMONITOR monitor) {
     std::vector<HWND> windows;
     for (HWND hwnd : g_activationHistory.OrderedWindows()) {
         if (!IsWindow(hwnd) || IsOwnProcessWindow(hwnd) || !polish::IsCandidateWindow(hwnd) ||
-            polish::IsElevatedWindow(hwnd)) {
+            !IsWindowInNormalState(hwnd) || polish::IsElevatedWindow(hwnd)) {
             continue;
         }
         if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != monitor) {
@@ -5641,12 +5651,10 @@ HMONITOR ArrangeTargetMonitor() {
 // GetWindowRect coordinates leaves a ~14px gap between the edges you can
 // actually see, which is the whole point of a tiling command.
 void ApplyArrangedRect(HWND hwnd, const RECT& target) {
-    if (IsZoomed(hwnd)) {
-        // SetWindowPos silently no-ops on a maximized window's size and
-        // position (GroupManager.h documents the same trap), so it has to
-        // come down first or it would sit out the arrangement.
-        ShowWindow(hwnd, SW_RESTORE);
-    }
+    // No SW_RESTORE here, unlike move/resize mode's own grab path: a
+    // maximized window never reaches this function, because
+    // ArrangeCandidates refuses to treat one as a candidate at all. See
+    // its comment for why that is a choice rather than an oversight.
     RECT inset{};
     MoveModeVisibleRectFor(hwnd, inset);
     const RECT windowRect{target.left + inset.left, target.top + inset.top, target.right + inset.right,

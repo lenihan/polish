@@ -771,10 +771,19 @@ current todo list.
     where the window sat *at the moment of release*.
 
 - Arrange every window: Ctrl+Alt+T tiles and Ctrl+Alt+C cascades every
-  non-minimized window on the current monitor, most-recently-used first.
+  *normal* window on the current monitor, most-recently-used first.
   Two doorways on purpose -- the tray menu for the mouse, a hotkey for
   the keyboard -- and the menu prints the key beside each item, so the
   mouse way in is how anyone learns the keyboard way in.
+  - Normal means neither minimized nor maximized
+    (`IsWindowInNormalState`, the same predicate restore-position sync
+    uses). Maximized is a deliberate exclusion, not a technical limit:
+    the first version restored a maximized window into a tile slot,
+    which quietly undid a state the user had explicitly asked for, on a
+    window they may not have been thinking about at all. A maximized
+    window is already arranged; tile and cascade work around it. That
+    also removed the SW_RESTORE from the apply path, since nothing
+    maximized can reach it any more.
   - `windowtracking/WindowLayout.h` holds the geometry, pure and tested
     (18 cases). Deliberately not built on GroupManager's
     `ComputeGridShape`, which computes the same kind of shape: that one

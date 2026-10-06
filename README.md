@@ -200,9 +200,14 @@ restarts from the top-left rather than walking off the screen.
 Both are also in the tray menu, which shows the key beside each one —
 so the mouse way in teaches the keyboard way in. Windows are taken
 most-recently-used first, so the one you were just in gets the first
-slot. Maximized windows are restored first so they can take part;
-elevated windows are left alone, because Windows won't let an
-unelevated app move them (see
+slot.
+
+**Only normal windows take part.** A minimized window stays minimized,
+and a maximized one stays maximized and keeps its place — tiling works
+around it rather than pulling it down into a slot. A window you
+maximized is already arranged, and quietly undoing that is not what
+"tile the others" should mean. Elevated windows are left alone too,
+because Windows won't let an unelevated app move them (see
 [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)).
 
 One honest limit: an app can refuse to be as small as its slot, and
