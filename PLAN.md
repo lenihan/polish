@@ -824,20 +824,31 @@ current todo list.
     exactly where it is. Rearranging the whole desktop as a side effect of
     "let me see these two" is how a convenience becomes something people
     stop using.
-  - Pressing the same command again **reverses** the order, and a third
-    press returns to MRU -- a toggle, not three states. The first guess at
-    which window belongs on the left is wrong about half the time, and
-    pressing the key again is cheaper than dragging.
+  - Pressing the same command again **rotates** the windows one slot (each
+    moves along, the last wraps to the first), so with N slots every
+    window is first exactly once in N presses and the Nth repeat returns to
+    MRU. For 2-way that is a swap. The first guess at which window belongs
+    in the first slot is wrong most of the time, and pressing the key again
+    is cheaper than dragging. (It was a plain reverse at first, which is
+    only useful for two windows.)
     - The toggle's reset key is the subtle part, and it is why
       `ArrangeSelection` is a separate pure module with its own tests. It
       keys on the *sorted set* of chosen windows. Keying on MRU order
       would reset the toggle almost every time, because focusing either
-      window between two presses reorders the list -- the reversal would
+      window between two presses reorders the list -- the rotation would
       look broken in exactly the situation it is for. Keying on the
-      *chosen* order is worse still: reversing changes it, so the toggle
-      would see its own effect as a change and never reverse twice.
+      *chosen* order is worse still: rotating changes it, so the toggle
+      would see its own effect as a change and never rotate twice.
     - State is per kind. 2-way and 3-way are different commands, and using
       one must not leave another halfway through its own toggle.
+    - A press that would land on the layout already on screen is skipped
+      in favour of the next rotation. Focusing the other window between
+      two presses reorders the most-recent list, so the rotation can
+      arrive exactly where the windows already are and the press looks
+      like a no-op -- reported as needing to press twice. Done in
+      `main.cpp`, since it needs the live window rects, and bounded by
+      the slot count. Verified with a probe: tile, activate the other
+      window, press once; the control run on the old build moved nothing.
   - A command with too few windows is greyed out in the menu **with the
     reason in the item's own label** ("Tile 4-way (needs 4 windows)"). A
     standard Win32 popup menu has no per-item tooltip, and this app
@@ -847,15 +858,17 @@ current todo list.
     tab-separated column after the parenthetical, so the three items still
     line up. The hotkey path refuses and logs independently, since it is
     reachable while the menu item is greyed.
-  - Normal means neither minimized nor maximized
-    (`IsWindowInNormalState`, the same predicate restore-position sync
-    uses). Maximized is a deliberate exclusion, not a technical limit:
-    the first version restored a maximized window into a tile slot,
-    which quietly undid a state the user had explicitly asked for, on a
-    window they may not have been thinking about at all. A maximized
-    window is already arranged; tile and cascade work around it. That
-    also removed the SW_RESTORE from the apply path, since nothing
-    maximized can reach it any more.
+  - Minimized windows are left out; maximized ones are included and
+    restored into their slot. That reverses an earlier decision: the first
+    version restored maximized windows, which was judged to undo a state
+    the user had asked for, so they were excluded -- but the common case
+    is one maximized editor plus "put this beside the other thing I am
+    using". Excluding it meant the command tiled everything *except* the
+    window being looked at, which read as it doing nothing (the tiled
+    windows landed behind the maximized one). Restoring is synchronous and
+    happens before the per-edge inset is sampled, because a maximized
+    window has a different invisible border from a restored one. Tiled
+    windows are also raised to the front, for the same reason.
   - `windowtracking/WindowLayout.h` holds the geometry and
     `windowtracking/ArrangeSelection.h` the policy, both pure and tested
     (34 cases). Both live outside `main.cpp` for a structural reason

@@ -206,21 +206,22 @@ other way instead. 4-way is the four corners either way round.
 Windows are taken **most-recently-used first**, so the one you were just
 in gets the first slot, and anything older than the slots available is
 left exactly where it is — tiling two windows does not rearrange the rest
-of your desktop. **Press the same keys again to reverse the order**, which
-is usually a faster fix than dragging when the left and right ended up the
-wrong way round; a third press puts them back.
+of your desktop. **Press the same keys again to rotate the windows one
+slot**, which is usually a faster fix than dragging when they ended up in
+the wrong places. With two windows that is a swap; with three or four,
+every window gets the first slot once in as many presses as there are
+windows, and the last press comes back to where you started.
 
 All three are also in the tray menu, which shows the key beside each one,
 so the mouse way in teaches the keyboard way in. An item you do not have
 enough windows for is greyed out and says so.
 
-**Only normal windows take part.** A minimized window stays minimized,
-and a maximized one stays maximized and keeps its place — tiling works
-around it rather than pulling it down into a slot. A window you
-maximized is already arranged, and quietly undoing that is not what
-"tile the others" should mean. Elevated windows are left alone too,
-because Windows won't let an unelevated app move them (see
-[`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)).
+**Minimized windows stay put; maximized ones take part.** A minimized
+window stays minimized, since it is not on screen. A maximized window is
+tiled like any other: it is restored into its slot, so a maximized
+editor can be split with the window you were last in. Elevated windows
+are left alone, because Windows won't let an unelevated app move them
+(see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)).
 
 One honest limit: an app can refuse to be as small as its slot, and
 nothing here can overrule that. Such a window keeps the size it insists

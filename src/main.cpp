@@ -5558,7 +5558,7 @@ BOOL CALLBACK EnumArrangeCandidatesProc(HWND hwnd, LPARAM) {
         return FALSE;
     }
     if (IsOwnProcessWindow(hwnd) || !polish::IsCandidateWindow(hwnd) ||
-        !IsWindowInNormalState(hwnd) || polish::IsElevatedWindow(hwnd)) {
+        IsIconic(hwnd) || polish::IsElevatedWindow(hwnd)) {
         return TRUE;
     }
     if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != g_arrangeCollectingMonitor) {
@@ -5571,17 +5571,17 @@ BOOL CALLBACK EnumArrangeCandidatesProc(HWND hwnd, LPARAM) {
     return TRUE;
 }
 
-// The windows an arrange command acts on: every *normal* non-elevated
-// candidate on `monitor`, most-recently-used first.
+// The windows an arrange command acts on: every non-minimized,
+// non-elevated candidate on `monitor`, most-recently-used first.
 //
-// Normal means neither minimized nor maximized -- IsWindowInNormalState,
-// the same predicate restore-position sync uses to decide a rect is
-// worth recording. Minimized is obvious. Maximized is a deliberate
-// choice rather than a technical limit: an earlier version pulled a
-// maximized window down into a tile slot, which quietly undid a state
-// the user had explicitly asked for, on a window they may not even have
-// been thinking about. A window that is maximized is already arranged;
-// tile and cascade leave it alone and work around it.
+// Maximized windows are included, and restored into their slot. They
+// used to be left out on the theory that a maximized window is already
+// arranged and tiling should not undo a state the user asked for -- but
+// the common case is the opposite: one maximized editor, and "put this
+// beside the other thing I am using". Skipping it meant the command
+// tiled everything *except* the window the user was looking at, which
+// read as it doing nothing. Minimized windows stay out: they are not on
+// screen, and restoring ones the user cannot see is a surprise.
 //
 // Elevated windows are left out rather than attempted: UIPI makes
 // SetWindowPos a silent no-op against them (docs/LIMITATIONS.md #1), so
@@ -5591,7 +5591,7 @@ std::vector<HWND> ArrangeCandidates(HMONITOR monitor) {
     std::vector<HWND> windows;
     for (HWND hwnd : g_activationHistory.OrderedWindows()) {
         if (!IsWindow(hwnd) || IsOwnProcessWindow(hwnd) || !polish::IsCandidateWindow(hwnd) ||
-            !IsWindowInNormalState(hwnd) || polish::IsElevatedWindow(hwnd)) {
+            IsIconic(hwnd) || polish::IsElevatedWindow(hwnd)) {
             continue;
         }
         if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != monitor) {
@@ -5636,14 +5636,29 @@ HMONITOR ArrangeTargetMonitor() {
 // GetWindowRect coordinates leaves a ~14px gap between the edges you can
 // actually see, which is the whole point of a tiling command.
 void ApplyArrangedRect(HWND hwnd, const RECT& target) {
-    // No SW_RESTORE here, unlike move/resize mode's own grab path: a
-    // maximized window never reaches this function, because
-    // ArrangeCandidates refuses to treat one as a candidate at all. See
-    // its comment for why that is a choice rather than an oversight.
+    // A maximized window cannot be moved or resized -- SetWindowPos
+    // silently no-ops on both -- so restore it first. Synchronously and
+    // before the inset is sampled, not after: a maximized window has a
+    // different invisible border from a restored one, so an inset taken
+    // while it was still maximized would leave the window a few pixels off
+    // its slot.
+    if (IsZoomed(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    }
     RECT inset{};
     MoveModeVisibleRectFor(hwnd, inset);
     const RECT windowRect{target.left + inset.left, target.top + inset.top, target.right + inset.right,
                           target.bottom + inset.bottom};
+    {
+        wchar_t title[80] = L"";
+        GetWindowTextW(hwnd, title, 80);
+        RECT before{};
+        GetWindowRect(hwnd, &before);
+        polish::LogDebug(std::format(
+            L"[Polish] Arrange: hwnd={} '{}' ({},{})-({},{}) -> ({},{})-({},{})", reinterpret_cast<void*>(hwnd),
+            title, before.left, before.top, before.right, before.bottom, windowRect.left, windowRect.top,
+            windowRect.right, windowRect.bottom));
+    }
     // Z-order deliberately untouched. A background process cannot
     // reliably raise another process's window anyway (HWND_TOP returns
     // success and does nothing -- see PlaceHaloBehindTarget), and the
@@ -5688,7 +5703,7 @@ void NudgeArrangedWindowOnScreen(HWND hwnd) {
 }
 
 // Which windows each tiling command last placed, and whether the next
-// press of it reverses the order. See ArrangeSelection.h -- the awkward
+// press of it rotates the windows one slot. See ArrangeSelection.h -- the awkward
 // part is which key resets it, and it is unit tested there because nothing
 // in this file can be.
 polish::ArrangeToggle g_arrangeToggle;
@@ -5703,6 +5718,23 @@ const wchar_t* ArrangeKindName(polish::ArrangeKind kind) {
             break;
     }
     return L"4-way";
+}
+
+// Whether every window is already sitting in its slot, to the pixel -- the
+// visible rect, which is the space the slots are in. A maximized window is
+// never "in place": it is about to be restored, which is a change.
+bool ArrangementAlreadyInPlace(const std::vector<HWND>& windows, const std::vector<RECT>& rects) {
+    for (size_t i = 0; i < windows.size(); ++i) {
+        if (IsZoomed(windows[i])) {
+            return false;
+        }
+        RECT inset{};
+        const RECT visible = MoveModeVisibleRectFor(windows[i], inset);
+        if (!polish::RectsApproximatelyEqual(visible, rects[i], /*epsilonPixels=*/2)) {
+            return false;
+        }
+    }
+    return true;
 }
 
 void ArrangeWindows(polish::ArrangeKind kind) {
@@ -5726,16 +5758,39 @@ void ArrangeWindows(polish::ArrangeKind kind) {
         return;
     }
 
-    const std::vector<HWND> windows = g_arrangeToggle.Next(kind, candidates);
-    const std::vector<RECT> rects =
-        polish::ArrangeRects(info.rcWork, kind, static_cast<int>(windows.size()));
-    if (rects.size() != windows.size()) {
-        return;
+    // Take the next arrangement that would actually change something.
+    //
+    // Pressing the command again rotates the windows (see ArrangeToggle),
+    // but the rotation is blind to what is on screen. Focusing the other
+    // window between two presses reorders the most-recent list, so the
+    // rotation can land on exactly the layout the windows are already in,
+    // and the press looks like it did nothing -- reported as having to
+    // press twice. When that happens, advance to the next rotation instead.
+    // Bounded by the slot count: a full cycle has to contain a layout that
+    // differs from the current one, because the slots are different rects.
+    std::vector<HWND> windows;
+    std::vector<RECT> rects;
+    for (int attempt = 0; attempt < polish::SlotsFor(kind); ++attempt) {
+        windows = g_arrangeToggle.Next(kind, candidates);
+        rects = polish::ArrangeRects(info.rcWork, kind, static_cast<int>(windows.size()));
+        if (rects.size() != windows.size()) {
+            return;
+        }
+        if (!ArrangementAlreadyInPlace(windows, rects)) {
+            break;
+        }
     }
     // Last first, so the most-recently-used window is positioned last and
     // any repaint storm settles with it on top.
     for (size_t i = windows.size(); i-- > 0;) {
         ApplyArrangedRect(windows[i], rects[i]);
+        // Bring it in front of whatever else is open. Tiling used to
+        // leave the stacking order alone, which looked like the command
+        // doing nothing whenever a window it skips -- a maximized one,
+        // deliberately -- was in front: the tiled windows arrived neatly
+        // positioned behind it, out of sight. Raised in this same
+        // last-first order, so the most recent ends up topmost.
+        polish::PromoteWindowToFront(windows[i]);
     }
     // Hand the new positions to restore-position sync once they have
     // actually taken, so the native Maximize/Restore pair round-trips

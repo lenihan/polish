@@ -13,7 +13,7 @@ namespace polish {
 //
 // Separate from main.cpp, and pure, for a reason that is structural rather
 // than stylistic: polish_tests links polish_core only, so anything living
-// in main.cpp cannot be unit tested at all. The reverse-order toggle below
+// in main.cpp cannot be unit tested at all. The rotate-on-repeat toggle below
 // has two failure modes that are each one line of code and invisible in
 // use until they annoy someone, which is exactly the kind of thing that
 // has to be a test rather than a careful read.
@@ -36,13 +36,14 @@ struct ArrangeAvailability {
 ArrangeAvailability EvaluateArrange(ArrangeKind kind, int eligibleCount);
 
 // Picks the windows for one invocation of a tiling command, and remembers
-// enough between invocations to reverse the order on the second press.
+// enough between invocations to rotate the windows one slot on a repeat.
 //
-// The reversal exists because the first guess at which window should get
-// the left-hand slot is wrong about half the time, and pressing the same
-// key again is a cheaper fix than dragging. A third press comes back to
-// where it started, so the key is a toggle rather than something with
-// three states to keep track of.
+// The rotation exists because the first guess at which window should get
+// the first slot is wrong most of the time, and pressing the same key
+// again is a cheaper fix than dragging. Each repeat moves every window one
+// slot along, the last wrapping round to the first, so with N slots every
+// window is first exactly once in N presses and the Nth repeat returns to
+// where it started. For two slots that is simply a swap.
 class ArrangeToggle {
 public:
     // mruOrdered is every eligible window, most recently used first.
@@ -50,7 +51,7 @@ public:
     // SlotsFor(kind) of them, and empty if there are not enough.
     std::vector<HWND> Next(ArrangeKind kind, const std::vector<HWND>& mruOrdered);
 
-    // Forget the reversal state for every kind, so the next invocation is
+    // Forget the rotation state for every kind, so the next invocation is
     // in MRU order.
     void Reset();
 
@@ -62,13 +63,14 @@ private:
         // new", and MRU order changes every time anything is focused --
         // which is nearly always, between two presses of the same key.
         // Keying on the order would therefore reset the toggle almost
-        // every time and the reversal would look broken.
+        // every time and the rotation would look broken.
         //
         // Nor can it be the *chosen* order: that changes as a direct
-        // result of reversing, so the toggle would see its own effect as a
-        // change, reset itself, and never reverse twice in a row.
+        // result of rotating, so the toggle would see its own effect as a
+        // change, reset itself, and never rotate twice in a row.
         std::vector<HWND> lastEligible;
-        bool reverseNext = false;
+        // How many slots the next invocation rotates by, in [0, slots).
+        int shiftNext = 0;
     };
 
     KindState& StateFor(ArrangeKind kind);

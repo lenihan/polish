@@ -62,19 +62,21 @@ std::vector<HWND> ArrangeToggle::Next(ArrangeKind kind, const std::vector<HWND>&
     KindState& state = StateFor(kind);
     if (key != state.lastEligible) {
         // A different set of windows: the user means something new, so
-        // start from MRU order again rather than inheriting a reversal
-        // they asked for about some other pair of windows.
-        state.reverseNext = false;
+        // start from MRU order again rather than inheriting a rotation
+        // they asked for about some other set of windows.
+        state.shiftNext = 0;
         state.lastEligible = std::move(key);
     }
 
-    if (state.reverseNext) {
-        // Reversing what was just chosen, not replaying a stored list:
-        // this way the reversal always applies to the windows that are
-        // eligible now, even if their order shifted since last time.
-        std::reverse(chosen.begin(), chosen.end());
+    if (state.shiftNext > 0) {
+        // Every window moves one slot further along per repeat, the last
+        // wrapping to the first: [a,b,c] -> [c,a,b] -> [b,c,a] -> [a,b,c].
+        // Applied to what was just chosen rather than to a stored list, so
+        // it always rotates the windows that are eligible now, even if
+        // their order shifted since last time.
+        std::rotate(chosen.begin(), chosen.end() - state.shiftNext, chosen.end());
     }
-    state.reverseNext = !state.reverseNext;
+    state.shiftNext = (state.shiftNext + 1) % slots;
     return chosen;
 }
 
