@@ -168,3 +168,112 @@ TEST_CASE("ArrangeToggle: Reset puts every kind back to MRU order") {
     toggle.Reset();
     CHECK(toggle.Next(ArrangeKind::ThreeWay, mru) == std::vector<HWND>{W(1), W(2), W(3)});
 }
+
+namespace {
+
+size_t PositionOf(const std::vector<HWND>& order, HWND w) {
+    return static_cast<size_t>(std::find(order.begin(), order.end(), w) - order.begin());
+}
+
+}  // namespace
+
+TEST_CASE("ArrangeToggle: arrangements the fit check rejects are never offered") {
+    ArrangeToggle toggle;
+    const std::vector<HWND> mru{W(1), W(2), W(3), W(4)};
+    // W(1) may not end up in the last slot.
+    const auto fits = [](const std::vector<HWND>& order) { return order.back() != W(1); };
+
+    for (int i = 0; i < 9; ++i) {
+        const auto chosen = toggle.Next(ArrangeKind::FourWay, mru, fits);
+        REQUIRE(chosen.size() == 4);
+        CHECK(chosen.back() != W(1));
+    }
+}
+
+TEST_CASE("ArrangeToggle: a rotation that does not fit is replaced, so the cycle keeps its length") {
+    ArrangeToggle toggle;
+    const std::vector<HWND> mru{W(1), W(2), W(3), W(4)};
+    const auto fits = [](const std::vector<HWND>& order) { return order.back() != W(1); };
+
+    // Three of the four rotations fit. The fourth is replaced by the
+    // closest arrangement that does, rather than the cycle shrinking to
+    // three, so four presses make a full lap.
+    std::vector<std::vector<HWND>> lap;
+    for (int i = 0; i < 4; ++i) {
+        lap.push_back(toggle.Next(ArrangeKind::FourWay, mru, fits));
+        CHECK(fits(lap.back()));
+    }
+    for (size_t i = 0; i < lap.size(); ++i) {
+        for (size_t j = i + 1; j < lap.size(); ++j) {
+            CHECK(lap[i] != lap[j]);
+        }
+    }
+    CHECK(toggle.Next(ArrangeKind::FourWay, mru, fits) == lap[0]);
+}
+
+TEST_CASE("ArrangeToggle: a stubborn window steps through the slots in order") {
+    // The reported bug, in order. Window 1 (Outlook) must share a row with
+    // window 3 (the 757px one), and they start opposite each other. With
+    // quadrants
+    //     A B        slots 0 1
+    //     C D              2 3
+    // Outlook should move A -> B -> C -> D -> A, one step per press, and
+    // the lighter windows should be the ones moved around it.
+    ArrangeToggle toggle;
+    const std::vector<HWND> mru{W(1), W(2), W(3), W(4)};
+    const auto fits = [](const std::vector<HWND>& order) {
+        return PositionOf(order, W(1)) / 2 == PositionOf(order, W(3)) / 2;
+    };
+    const auto weight = [](HWND w) -> long long { return w == W(1) ? 1286 : w == W(3) ? 757 : 300; };
+
+    std::vector<size_t> outlookSlots;
+    for (int i = 0; i < 5; ++i) {
+        const auto chosen = toggle.Next(ArrangeKind::FourWay, mru, fits, weight);
+        REQUIRE(chosen.size() == 4);
+        CHECK(fits(chosen));
+        outlookSlots.push_back(PositionOf(chosen, W(1)));
+    }
+    CHECK(outlookSlots == std::vector<size_t>{0, 1, 2, 3, 0});
+}
+
+TEST_CASE("ArrangeToggle: when a rotation does fit it is used as it is") {
+    ArrangeToggle toggle;
+    const std::vector<HWND> mru{W(1), W(2), W(3), W(4)};
+    const auto everything = [](const std::vector<HWND>&) { return true; };
+    CHECK(toggle.Next(ArrangeKind::FourWay, mru, everything) == std::vector<HWND>{W(1), W(2), W(3), W(4)});
+    CHECK(toggle.Next(ArrangeKind::FourWay, mru, everything) == std::vector<HWND>{W(4), W(1), W(2), W(3)});
+}
+
+TEST_CASE("ArrangeToggle: when no rotation fits it finds another arrangement that does") {
+    // The reported case in miniature: windows 1 and 3 must share a row
+    // (slots 0/1 or 2/3), but in the most-recent order they are opposite
+    // each other, and no rotation of that order ever puts them together.
+    ArrangeToggle toggle;
+    const std::vector<HWND> mru{W(1), W(2), W(3), W(4)};
+    const auto fits = [](const std::vector<HWND>& order) {
+        return PositionOf(order, W(1)) / 2 == PositionOf(order, W(3)) / 2;
+    };
+
+    // Sanity: it really is true that no plain rotation works.
+    for (int k = 0; k < 4; ++k) {
+        std::vector<HWND> rotated = mru;
+        std::rotate(rotated.begin(), rotated.end() - k, rotated.end());
+        REQUIRE_FALSE(fits(rotated));
+    }
+
+    std::vector<std::vector<HWND>> seen;
+    for (int i = 0; i < 6; ++i) {
+        const auto chosen = toggle.Next(ArrangeKind::FourWay, mru, fits);
+        REQUIRE(chosen.size() == 4);
+        CHECK(fits(chosen));
+        seen.push_back(chosen);
+    }
+    // And repeated presses still move things, rather than sticking.
+    CHECK(seen[0] != seen[1]);
+}
+
+TEST_CASE("ArrangeToggle: nothing is returned when no arrangement fits at all") {
+    ArrangeToggle toggle;
+    const auto never = [](const std::vector<HWND>&) { return false; };
+    CHECK(toggle.Next(ArrangeKind::FourWay, {W(1), W(2), W(3), W(4)}, never).empty());
+}

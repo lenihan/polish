@@ -908,11 +908,107 @@ current todo list.
     perfectly correct. The sync happens on a 250ms timer now, once the
     moves have landed.
   - An app can refuse to be as small as its slot (`WM_GETMINMAXINFO`) and
-    nothing can overrule that. Measured: a four-way tile gave one window
-    a 912px slot and it came back 1286 tall, 374px past the bottom of the
-    screen. It cannot be made to fit, so it is slid back on screen
-    instead -- moved, never resized -- and overlaps its neighbour rather
-    than disappearing off the edge.
+    nothing can overrule that, so the slots are sized around it instead
+    of pretending otherwise. Each window is asked for its minimum
+    (`SendMessageTimeout`, 200ms, ABORTIFHUNG -- a stalled target must not
+    freeze the hooks), converted to visible-rect space, and
+    `DistributeWithMinimums` holds any window that cannot shrink to an
+    equal share at its minimum while the rest divide what is left.
+    Repeated, because holding one shrinks everyone else's share and can
+    push another over its own limit. Three windows in 2880px where one
+    needs 1500 give 1500 / 690 / 690. 4-way holds a whole column or row
+    at its widest/tallest minimum so the four still tile exactly.
+    - When the minimums cannot all fit, the command is refused rather than
+      made anyway (`CheckArrangeFit`, `CheckArrangeFitAnyRotation`). A
+      tiling that leaves windows sitting on top of each other has not done
+      what it is named for, and a stubborn window sticking out over its
+      neighbours looks like a bug. An earlier version fell back to equal
+      slots and let the overrun overlap; it was dropped because it threw
+      away every minimum even when most could be honoured, and because
+      "I could not do that, and here is why" is more useful than a mess.
+    - The reason names the window in the way: "Edge can't be made narrower
+      than 1478px, so the 3 windows need 4400px and only 2880px is
+      available." Shown as a tray notification when a hotkey is pressed
+      (a hotkey has no menu item to carry it) and as a short label on the
+      greyed menu item ("Tile 3-way (Edge won't fit)"). The menu measures
+      the four most recent windows each time it opens.
+    - The check runs before the rotation toggle is touched, so a refused
+      press does not use up a step. In 4-way it tries every *assignment*
+      of windows to slots, not just rotations, because which windows share
+      a row or column decides whether the minimums fit.
+      - A bug worth remembering: the first version tried only rotations of
+        the most-recent order, and refused a real case. Outlook needs 1286px
+        of height, another window needs 757px, and in the most-recent order
+        they were opposite each other, so the rows needed 1286 + 757 = 2043
+        and only 1824px exist -- yet Outlook beside the 757px window leaves
+        a row of two small windows and fits easily. Rotation keeps opposite
+        windows opposite, so no rotation could ever put those two in one
+        row. Found by the user, reproduced with a probe (two forms with
+        large minimum heights plus two ordinary windows, arranged so the
+        stubborn pair is opposite) before fixing.
+      - The toggle offers the rotations that fit, and only if none do, the
+        other arrangements that fit, in a fixed order, so repeated presses
+        still step through different layouts. Rotations remain the first
+        choice because they are what the user expects to see.
+    - A second report, from real windows: Ctrl+Alt+4 worked once and
+      refused on the next press ("need 1828px and only 1824px"). Measured
+      with a read-only probe of the live windows: Outlook 1286px, VS Code
+      windows 542px each, two rows = 1828. Two causes.
+      - A maximized window's invisible border is larger than once it is
+        restored (26px tall vs 11px, at 192 DPI), so subtracting it from
+        the minimum *understated* the minimum, the first press passed, the
+        slot came out too small, and the window overran it by a few
+        pixels. (It had been written up as erring "a few pixels large",
+        which was the wrong direction; the harmful direction is too
+        small.) A maximized window now has no border subtracted, which
+        overstates by about ten pixels instead.
+      - Four pixels is not worth refusing over. A shortfall of up to 1%
+        of the dimension (at least 12px) is accepted, and the slots are
+        scaled down in proportion so each stubborn window overruns by a
+        little rather than one by all of it. This also absorbs the ten
+        pixels above. Verified: a ~7px shortfall tiled (5px overlap), a
+        ~90px one was refused with the explanation.
+    - A third report: cycling 4-way, Outlook never reached the upper
+      right. The toggle offered only the rotations that fit, so when size
+      limits tie two windows to a shared row (Outlook and the 757px one)
+      some rotations were dropped and the remaining ones never visited
+      every slot. Now a rotation that does not fit is *replaced* by the
+      closest arrangement that does (fewest windows in a different slot),
+      so the cycle keeps its length of N and the window it was about to put
+      in a slot stays there where the limits allow. Ties go to the
+      arrangement that puts windows in slots not yet used this lap --
+      without that a tie went to whichever came first and sent Outlook
+      back to a slot it had already had. Verified with a probe (a 1300px
+      form tied to a 770px form, starting opposite, plus two ordinary
+      windows): the tall one visited UL, LL, UR, LR; on the build before,
+      UL, UL, LL, LR -- the repeat and the missing upper right.
+    - A fourth: it reached every quadrant but in the wrong order (upper
+      left, lower left, upper right, lower right) where the expectation is
+      A -> B -> C -> D across the 2x2, row by row. When a rotation was
+      replaced by another arrangement, nothing stopped the replacement
+      moving the stubborn window itself. The replacement now costs the
+      summed *stubbornness* (minimum width + height) of the windows it
+      moves, so the light ones move around the heavy one and the heavy one
+      keeps the slot the rotation gave it; distance and then novelty only
+      break ties. Pinned by a unit test that requires slots 0, 1, 2, 3, 0
+      for the stubborn window, and by a probe whose control (the previous
+      build) produced the out-of-order sequence.
+    - The numbers are visible-rect pixels (the window's 1500 minus its
+      ~22px invisible border reads as 1478), which is the size you can
+      actually see.
+    - `NudgeArrangedWindowOnScreen` is still there for the case it was
+      written for (measured: a four-way tile gave one window a 912px slot
+      and it came back 1286 tall, 374px past the bottom of the screen).
+    - A maximized window's minimum is converted using its border while
+      still maximized, which is smaller than it will be once restored, so
+      it can come out a few pixels large -- harmless, it errs towards
+      giving the window room.
+    - Verified with a real window that refuses to go below 1500px, tiled
+      3-way with two Character Map windows: held at its minimum, the
+      others 701px each, edge to edge. A first run was contaminated by a
+      stale helper window from an earlier failed attempt of the probe
+      itself, which is worth remembering when a probe disagrees with the
+      log: check the window handles match.
   - Verified with a probe that snapshots every window's placement first
     and restores it afterwards, since the command moves the real desktop
     and a test that leaves it scattered is not one worth running twice.
@@ -1017,6 +1113,7 @@ release has to exist before the signing application can even go in.
   switched off, and that uninstall leaves nothing behind.
 
 ## Left to do
+- A scrollable way to see all notifications (like snipping tool) once they are gone
 - Regular app presence: Polish currently lives only in the tray, which is
   hard to tell is running and often hidden in the overflow. Give it a real
   window and a taskbar button.

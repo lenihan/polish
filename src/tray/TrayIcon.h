@@ -46,6 +46,14 @@ public:
     // for RegisterWindowMessageW(L"TaskbarCreated") and call this then.
     void HandleTaskbarRecreated();
 
+    // Shows a short notification from the tray icon (a toast on Windows
+    // 11) -- for telling the user why something they asked for did not
+    // happen, when the request came from a hotkey and there is no menu
+    // item to carry the reason. Truncated to the shell's limits (63
+    // characters of title, 255 of text) rather than dropped. A no-op if
+    // the icon is not currently added.
+    void ShowNotification(const std::wstring& title, const std::wstring& text);
+
     static constexpr UINT kCallbackMessage = WM_APP + 1;
 
 private:

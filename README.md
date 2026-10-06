@@ -223,15 +223,23 @@ editor can be split with the window you were last in. Elevated windows
 are left alone, because Windows won't let an unelevated app move them
 (see [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md)).
 
-One honest limit: an app can refuse to be as small as its slot, and
-nothing here can overrule that. Such a window keeps the size it insists
-on and is slid back onto the screen rather than left hanging off the
-edge, so it overlaps its neighbour instead of disappearing.
+**A window that will not shrink gets the room it needs, or the command
+says why not.** An app can refuse to go below a minimum size. Polish asks
+each window for that minimum first, holds a stubborn window at it, and
+divides what is left between the others, so a browser that needs 1500px
+in a three-way tile takes 1500px and the other two share the rest — edge
+to edge, with no overlap. A shortfall of a few pixels (up to 1% of the
+screen) is absorbed rather than refused: two windows may overlap by that
+much. Anything bigger and nothing is moved: a notification names the
+window in the way and the sizes involved, and in the tray menu the item
+is greyed out with the same window named, for example "Tile 3-way (Edge
+won't fit)".
 
-If `Ctrl+Alt+T` or `Ctrl+Alt+C` is already taken on your machine, Polish
-says so in its log at startup and the key simply does nothing. Change it
-under `HKCU\Software\Polish` (`ArrangeTileHotkeyVirtualKey` and friends)
-— there's no picker for these two yet.
+If one of `Ctrl+Alt+2`, `Ctrl+Alt+3` or `Ctrl+Alt+4` is already taken on
+your machine, Polish says so in its log at startup and that key simply does
+nothing. Change it under `HKCU\Software\Polish`
+(`ArrangeTwoWayHotkeyVirtualKey` and friends) — there is no picker for
+these yet.
 
 Every feature can be turned off independently from the tray icon's
 right-click menu, which also has a **Start with Windows** option and

@@ -51,6 +51,26 @@ void TrayIcon::AddIcon() {
     iconAdded_ = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
 }
 
+void TrayIcon::ShowNotification(const std::wstring& title, const std::wstring& text) {
+    if (!iconAdded_) {
+        return;
+    }
+    NOTIFYICONDATAW data{};
+    data.cbSize = sizeof(data);
+    data.hWnd = messageWindow_;
+    data.uID = kIconId;
+    data.uFlags = NIF_INFO;
+    data.dwInfoFlags = NIIF_INFO | NIIF_NOSOUND;
+    // The shell silently drops a string that does not fit, so truncate.
+    const size_t titleLength = std::min(title.size(), ARRAYSIZE(data.szInfoTitle) - 1);
+    std::copy_n(title.begin(), titleLength, data.szInfoTitle);
+    data.szInfoTitle[titleLength] = 0;
+    const size_t textLength = std::min(text.size(), ARRAYSIZE(data.szInfo) - 1);
+    std::copy_n(text.begin(), textLength, data.szInfo);
+    data.szInfo[textLength] = 0;
+    Shell_NotifyIconW(NIM_MODIFY, &data);
+}
+
 void TrayIcon::HandleTaskbarRecreated() {
     iconAdded_ = false;
     AddIcon();

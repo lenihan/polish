@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <functional>
 #include <vector>
 
 #include "windowtracking/WindowLayout.h"
@@ -49,7 +50,20 @@ public:
     // mruOrdered is every eligible window, most recently used first.
     // Returns the ones to place, in placement order -- at most
     // SlotsFor(kind) of them, and empty if there are not enough.
-    std::vector<HWND> Next(ArrangeKind kind, const std::vector<HWND>& mruOrdered);
+    //
+    // fits, if given, says whether an arrangement (the windows in slot
+    // order) is acceptable -- main.cpp passes one that checks minimum
+    // window sizes. Arrangements it rejects are never returned; see the
+    // implementation for how the choice is made when it rejects some or
+    // all of the plain rotations. Returns empty if none is acceptable.
+    //
+    // weightOf, if given, says how stubborn a window is (main.cpp passes
+    // its minimum size). When a rotation does not fit and another
+    // arrangement is substituted, it is the one that moves the lightest
+    // windows, so the stubborn ones keep the slot the rotation gave them.
+    std::vector<HWND> Next(ArrangeKind kind, const std::vector<HWND>& mruOrdered,
+                           const std::function<bool(const std::vector<HWND>&)>& fits = {},
+                           const std::function<long long(HWND)>& weightOf = {});
 
     // Forget the rotation state for every kind, so the next invocation is
     // in MRU order.
@@ -69,8 +83,9 @@ private:
         // result of rotating, so the toggle would see its own effect as a
         // change, reset itself, and never rotate twice in a row.
         std::vector<HWND> lastEligible;
-        // How many slots the next invocation rotates by, in [0, slots).
-        int shiftNext = 0;
+        // How many times this kind has been invoked for the current set of
+        // windows; selects which arrangement the next press shows.
+        int presses = 0;
     };
 
     KindState& StateFor(ArrangeKind kind);

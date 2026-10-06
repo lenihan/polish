@@ -5720,6 +5720,79 @@ const wchar_t* ArrangeKindName(polish::ArrangeKind kind) {
     return L"4-way";
 }
 
+// The smallest *visible* size `hwnd` will accept, as it reports it through
+// WM_GETMINMAXINFO -- the same message the window manager consults when
+// the user drags a border, and the one an app answers to say "no smaller
+// than this".
+//
+// Asked with a timeout and ABORTIFHUNG, because this is a cross-process
+// SendMessage on the message-loop thread: a stalled target must cost a
+// bounded delay, not freeze Polish and its hooks. A window that does not
+// answer is treated as having no minimum, which falls back to ordinary
+// equal slots for it.
+//
+// Reported by the window as a window-rect size, so it is converted to
+// visible-rect space here (the space the slots are in) by removing the
+// invisible border.
+//
+// A maximized window gets NO border subtracted. Its invisible border is
+// larger while maximized than once restored (measured on a VS Code window
+// at 192 DPI: 26px tall maximized, 11px restored), so subtracting it would
+// understate the minimum the window will have in its slot -- and an
+// understated minimum is the harmful direction: the slot comes out too
+// small, the window refuses it, and it overlaps its neighbour. This was
+// the cause of a four-pixel overlap, and then a refusal on the next press,
+// because the numbers changed once the window was no longer maximized.
+// Leaving the border in overstates the minimum by about ten pixels, which
+// only ever gives the window a little extra room.
+SIZE MinimumVisibleSizeFor(HWND hwnd) {
+    MINMAXINFO info{};
+    DWORD_PTR ignored = 0;
+    if (SendMessageTimeoutW(hwnd, WM_GETMINMAXINFO, 0, reinterpret_cast<LPARAM>(&info),
+                             SMTO_ABORTIFHUNG | SMTO_BLOCK, 200, &ignored) == 0) {
+        return SIZE{0, 0};
+    }
+    RECT inset{};
+    MoveModeVisibleRectFor(hwnd, inset);
+    // windowRect = visible + inset, so visible size = window size - (right - left) etc.
+    const bool maximized = IsZoomed(hwnd) != FALSE;
+    const LONG borderX = maximized ? 0 : inset.right - inset.left;
+    const LONG borderY = maximized ? 0 : inset.bottom - inset.top;
+    return SIZE{std::max<LONG>(0, info.ptMinTrackSize.x - borderX),
+                std::max<LONG>(0, info.ptMinTrackSize.y - borderY)};
+}
+
+// A window's title, shortened for use in a message.
+std::wstring ShortWindowTitle(HWND hwnd, size_t maxChars) {
+    wchar_t title[256] = L"";
+    GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+    std::wstring text = title;
+    if (text.empty()) {
+        return L"A window";
+    }
+    if (text.size() > maxChars) {
+        text.resize(maxChars - 1);
+        text += L"…";
+    }
+    return text;
+}
+
+// Why an arrangement was refused, in a sentence a person can act on: which
+// window is in the way, what it will not go below, and what that adds up
+// to. Used for the notification a hotkey press shows, since a hotkey has
+// no menu item to carry the reason.
+std::wstring DescribeArrangeMisfit(polish::ArrangeKind kind, const polish::ArrangeFit& fit, HWND blocker) {
+    const std::wstring title = ShortWindowTitle(blocker, 40);
+    const wchar_t* direction = fit.tooWide ? L"narrower" : L"shorter";
+    if (fit.needed == fit.blockerMin) {
+        // A single window that does not fit the screen on its own.
+        return std::format(L"{} can't be made {} than {}px, and only {}px is available.", title, direction,
+                            fit.blockerMin, fit.available);
+    }
+    return std::format(L"{} can't be made {} than {}px, so the {} windows need {}px and only {}px is available.",
+                        title, direction, fit.blockerMin, polish::SlotsFor(kind), fit.needed, fit.available);
+}
+
 // Whether every window is already sitting in its slot, to the pixel -- the
 // visible rect, which is the space the slots are in. A maximized window is
 // never "in place": it is about to be restored, which is a change.
@@ -5758,27 +5831,86 @@ void ArrangeWindows(polish::ArrangeKind kind) {
         return;
     }
 
+    // Refuse, with the reason, when the windows cannot be fitted without
+    // overlap. Checked before the rotation toggle is touched, so a refused
+    // press does not use up a step of it.
+    //
+    // Tiling windows on top of each other has not done what the command is
+    // named for, and what it would produce -- a stubborn window sticking
+    // out over its neighbours -- is worse than nothing, because it looks
+    // like a bug. Better to say which window is in the way.
+    const size_t slotCount = static_cast<size_t>(polish::SlotsFor(kind));
+    // Minimum sizes for the windows this command would use, asked for once.
+    // Keyed by window so any arrangement of them can be checked cheaply.
+    std::map<HWND, SIZE> minimumsByWindow;
+    std::vector<SIZE> mruMinimums;
+    for (size_t i = 0; i < slotCount; ++i) {
+        const SIZE m = MinimumVisibleSizeFor(candidates[i]);
+        minimumsByWindow[candidates[i]] = m;
+        mruMinimums.push_back(m);
+    }
+    const auto minimumsFor = [&](const std::vector<HWND>& order) {
+        std::vector<SIZE> mins;
+        mins.reserve(order.size());
+        for (HWND w : order) {
+            mins.push_back(minimumsByWindow[w]);
+        }
+        return mins;
+    };
+    {
+        const polish::ArrangeFit fit = polish::CheckArrangeFitAnyOrder(info.rcWork, kind, mruMinimums);
+        if (!fit.fits) {
+            const std::wstring why = DescribeArrangeMisfit(kind, fit, candidates[static_cast<size_t>(fit.blocker)]);
+            polish::LogDebug(std::format(L"[Polish] Arrange ({}): refused -- {}", kindName, why));
+            if (g_trayIcon) {
+                g_trayIcon->ShowNotification(std::format(L"Can't tile {}", kindName), why);
+            }
+            return;
+        }
+    }
+    // Which arrangements the toggle may offer: only ones whose slots every
+    // window's minimum fits. The toggle falls back to non-rotation
+    // arrangements itself when no rotation fits.
+    // How stubborn a window is: how much room it insists on. When the
+    // toggle has to rearrange windows to make an arrangement fit, the light
+    // ones are moved and the heavy ones stay in the slot the rotation gave
+    // them, so a window like Outlook steps A, B, C, D rather than jumping.
+    const std::function<long long(HWND)> stubbornness = [&](HWND w) {
+        const SIZE m = minimumsByWindow[w];
+        return static_cast<long long>(m.cx) + m.cy;
+    };
+    const std::function<bool(const std::vector<HWND>&)> arrangementFits = [&](const std::vector<HWND>& order) {
+        return polish::CheckArrangeFit(info.rcWork, kind, static_cast<int>(order.size()), minimumsFor(order)).fits;
+    };
+
     // Take the next arrangement that would actually change something.
     //
-    // Pressing the command again rotates the windows (see ArrangeToggle),
-    // but the rotation is blind to what is on screen. Focusing the other
-    // window between two presses reorders the most-recent list, so the
-    // rotation can land on exactly the layout the windows are already in,
+    // Pressing the command again steps to the next arrangement (see
+    // ArrangeToggle), but that is blind to what is on screen. Focusing the
+    // other window between two presses reorders the most-recent list, so
+    // the step can land on exactly the layout the windows are already in,
     // and the press looks like it did nothing -- reported as having to
-    // press twice. When that happens, advance to the next rotation instead.
-    // Bounded by the slot count: a full cycle has to contain a layout that
-    // differs from the current one, because the slots are different rects.
+    // press twice. When that happens, advance once more instead. Bounded:
+    // one arrangement in the cycle is the current one, so a second step
+    // always differs from it.
     std::vector<HWND> windows;
     std::vector<RECT> rects;
-    for (int attempt = 0; attempt < polish::SlotsFor(kind); ++attempt) {
-        windows = g_arrangeToggle.Next(kind, candidates);
-        rects = polish::ArrangeRects(info.rcWork, kind, static_cast<int>(windows.size()));
+    bool found = false;
+    for (size_t attempt = 0; attempt < slotCount && !found; ++attempt) {
+        windows = g_arrangeToggle.Next(kind, candidates, arrangementFits, stubbornness);
+        if (windows.empty()) {
+            break;
+        }
+        const std::vector<SIZE> minimums = minimumsFor(windows);
+        rects = polish::ArrangeRectsWithMinimums(info.rcWork, kind, static_cast<int>(windows.size()), minimums);
         if (rects.size() != windows.size()) {
             return;
         }
-        if (!ArrangementAlreadyInPlace(windows, rects)) {
-            break;
-        }
+        found = !ArrangementAlreadyInPlace(windows, rects);
+    }
+    if (!found) {
+        polish::LogDebug(std::format(L"[Polish] Arrange ({}): nothing to change", kindName));
+        return;
     }
     // Last first, so the most-recently-used window is positioned last and
     // any repaint storm settles with it on top.
@@ -6433,17 +6565,27 @@ void TriggerNewGroup(HWND owner) {
 // The reason goes before the tab, so the hotkey stays in its own column
 // and the three items still line up with each other.
 void AppendArrangeMenuItem(HMENU menu, UINT id, polish::ArrangeKind kind, const wchar_t* label,
-                           UINT modifiers, UINT virtualKey, int candidateCount) {
+                           UINT modifiers, UINT virtualKey, int candidateCount,
+                           const std::wstring& misfitReason) {
     const polish::ArrangeAvailability availability = polish::EvaluateArrange(kind, candidateCount);
+    // Greyed for either of two reasons: too few windows, or enough windows
+    // but they cannot be fitted without overlap (misfitReason, empty when
+    // they can). The first takes precedence, since it needs no measuring.
+    const bool enabled = availability.enabled && misfitReason.empty();
     std::wstring text = label;
     if (!availability.enabled) {
         text += L" (";
         text += availability.reason;
         text += L")";
+    } else if (!misfitReason.empty()) {
+        text += L" (";
+        text += misfitReason;
+        text += L")";
     }
-    text += L"\t";
+    text += L"	";
     text += FormatHotkey(modifiers, virtualKey);
-    AppendMenuW(menu, MF_STRING | (availability.enabled ? MF_ENABLED : MF_GRAYED), id, text.c_str());
+    polish::LogDebug(std::format(L"[Polish] Menu: {} {}", enabled ? L"enabled" : L"greyed", text));
+    AppendMenuW(menu, MF_STRING | (enabled ? MF_ENABLED : MF_GRAYED), id, text.c_str());
 }
 
 // Rebuilt fresh every time the tray icon's context menu is about to
@@ -6476,17 +6618,48 @@ void PopulateTrayMenu(HMENU menu) {
     // The hotkey is shown beside each item on purpose: the tray menu is
     // the mouse way in, and seeing the key there is how anyone ever
     // learns the keyboard way in.
-    // Counted once for all three items, on the monitor they would act on.
-    const int arrangeCandidateCount = static_cast<int>(ArrangeCandidates(ArrangeTargetMonitor()).size());
+    // Counted and measured once for all three items, on the monitor they
+    // would act on. The minimum sizes are asked for only for the (at most
+    // four) most recent windows, since no command uses more.
+    const HMONITOR arrangeMonitor = ArrangeTargetMonitor();
+    const std::vector<HWND> arrangeCandidates = ArrangeCandidates(arrangeMonitor);
+    const int arrangeCandidateCount = static_cast<int>(arrangeCandidates.size());
+    MONITORINFO arrangeInfo{};
+    arrangeInfo.cbSize = sizeof(arrangeInfo);
+    const bool haveWorkArea = arrangeMonitor != nullptr && GetMonitorInfoW(arrangeMonitor, &arrangeInfo);
+    std::vector<SIZE> recentMinimums;
+    if (haveWorkArea) {
+        for (size_t i = 0; i < arrangeCandidates.size() && i < 4; ++i) {
+            recentMinimums.push_back(MinimumVisibleSizeFor(arrangeCandidates[i]));
+        }
+    }
+    // Empty when the first N windows can be fitted without overlap, or
+    // there are not enough windows to ask (that case has its own reason).
+    const auto misfitFor = [&](polish::ArrangeKind kind) -> std::wstring {
+        const size_t n = static_cast<size_t>(polish::SlotsFor(kind));
+        if (!haveWorkArea || recentMinimums.size() < n) {
+            return L"";
+        }
+        const std::vector<SIZE> first(recentMinimums.begin(), recentMinimums.begin() + n);
+        const polish::ArrangeFit fit = polish::CheckArrangeFitAnyOrder(arrangeInfo.rcWork, kind, first);
+        if (fit.fits) {
+            return L"";
+        }
+        // Short: it goes in a menu label. The full sentence is what the
+        // hotkey's notification carries.
+        return ShortWindowTitle(arrangeCandidates[static_cast<size_t>(fit.blocker)], 24) + L" won't fit";
+    };
     AppendArrangeMenuItem(menu, kMenuIdArrangeTwoWay, polish::ArrangeKind::TwoWay, L"Tile 2-way",
                           g_settings.arrangeTwoWayHotkeyModifiers, g_settings.arrangeTwoWayHotkeyVirtualKey,
-                          arrangeCandidateCount);
+                          arrangeCandidateCount, misfitFor(polish::ArrangeKind::TwoWay));
     AppendArrangeMenuItem(menu, kMenuIdArrangeThreeWay, polish::ArrangeKind::ThreeWay, L"Tile 3-way",
                           g_settings.arrangeThreeWayHotkeyModifiers,
-                          g_settings.arrangeThreeWayHotkeyVirtualKey, arrangeCandidateCount);
+                          g_settings.arrangeThreeWayHotkeyVirtualKey, arrangeCandidateCount,
+                          misfitFor(polish::ArrangeKind::ThreeWay));
     AppendArrangeMenuItem(menu, kMenuIdArrangeFourWay, polish::ArrangeKind::FourWay, L"Tile 4-way",
                           g_settings.arrangeFourWayHotkeyModifiers,
-                          g_settings.arrangeFourWayHotkeyVirtualKey, arrangeCandidateCount);
+                          g_settings.arrangeFourWayHotkeyVirtualKey, arrangeCandidateCount,
+                          misfitFor(polish::ArrangeKind::FourWay));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuIdNewGroup,
                 (L"New Group...\t" + FormatHotkey(g_settings.groupHotkeyModifiers, g_settings.groupHotkeyVirtualKey))
