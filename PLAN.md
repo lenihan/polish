@@ -1203,6 +1203,9 @@ release has to exist before the signing application can even go in.
   switched off, and that uninstall leaves nothing behind.
 
 ## Left to do
+
+- User click/drag taskbar button should allow reorder...currently is noop
+- Right click start should provide normal utility menu....currently is noop
 - A scrollable way to see all notifications (like snipping tool) once they are gone
 - Regular app presence: Polish currently lives only in the tray, which is
   hard to tell is running and often hidden in the overflow. Give it a real

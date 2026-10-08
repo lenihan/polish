@@ -713,4 +713,11 @@ LRESULT StackStripWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
     }
 }
 
+void StackStripWindow::SetTaskbarMinimized(bool minimized) {
+    if (taskbarWindow_ == nullptr || (IsIconic(taskbarWindow_) != 0) == minimized) {
+        return;
+    }
+    ShowWindow(taskbarWindow_, minimized ? SW_SHOWMINNOACTIVE : SW_SHOWNOACTIVATE);
+}
+
 }  // namespace polish

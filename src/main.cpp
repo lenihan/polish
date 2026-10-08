@@ -958,11 +958,23 @@ void BeginHaloRestoreWait(HWND restored) {
     SetTimer(g_messageWindow, kHaloRestoreTimerId, kHaloRestoreDelayMs, nullptr);
 }
 
+// The taskbar itself takes focus for a moment when one of its buttons is
+// clicked. It is not a window the user was working in, so it must not count as
+// "the window that was in front" when deciding what a stack's button means.
+bool IsShellTaskbarWindow(HWND hwnd) {
+    wchar_t cls[64] = {};
+    GetClassNameW(hwnd, cls, 64);
+    return wcsncmp(cls, L"Shell_", 6) == 0 || wcscmp(cls, L"TaskListThumbnailWnd") == 0 ||
+           wcscmp(cls, L"TopLevelWindowForOverflowXamlIsland") == 0 || wcscmp(cls, L"XamlExplorerHostIslandWindow") == 0;
+}
+
 void OnForegroundChanged(HWND newForeground) {
     // A click on a stack's taskbar button arrives as that stand-in window
     // becoming foreground; the window before it decides what the click means.
     const HWND previousForeground = g_lastForeground;
-    g_lastForeground = newForeground;
+    if (!IsShellTaskbarWindow(newForeground)) {
+        g_lastForeground = newForeground;
+    }
     OnStackTaskbarForeground(newForeground, previousForeground);
     // A window coming to the front that went into the taskbar earlier is a
     // restore, and is usually how this app hears about one first -- before
@@ -6028,6 +6040,14 @@ void UpdateStripVisibility() {
     const HWND foreground = GetForegroundWindow();
     const polish::StackState* active = foreground != nullptr ? g_stackManager.FindStackContaining(foreground) : nullptr;
     for (auto& [id, strip] : g_stackStrips) {
+        const polish::StackState* own = g_stackManager.FindStack(id);
+        bool anyUp = false;
+        if (own != nullptr) {
+            for (const polish::StackMember& member : own->Members()) {
+                anyUp = anyUp || (IsWindow(member.window) && !IsIconic(member.window));
+            }
+        }
+        strip->SetTaskbarMinimized(!anyUp);
         const bool strip_is_foreground = foreground == strip->Handle();
         // Every strip while a window is being dragged toward one: the dragged
         // window is the foreground window, so without this the strips would
@@ -6131,6 +6151,9 @@ void MinimizeStackMembers(polish::StackId id) {
             ShowWindow(member.window, SW_MINIMIZE);
         }
     }
+    if (const auto it = g_stackStrips.find(id); it != g_stackStrips.end()) {
+        it->second->SetTaskbarMinimized(true);
+    }
 }
 
 // Restores every minimized member, lays the stack out again, and activates
@@ -6140,9 +6163,18 @@ void BringStackForward(polish::StackId id) {
     if (stack == nullptr) {
         return;
     }
+    if (const auto it = g_stackStrips.find(id); it != g_stackStrips.end()) {
+        it->second->SetTaskbarMinimized(false);
+    }
+    polish::LogDebug(std::format(L"[Polish] Stack: BringStackForward id={} members={}", id, stack->Members().size()));
     for (const polish::StackMember& member : stack->Members()) {
         if (IsWindow(member.window) && IsIconic(member.window)) {
-            ShowWindow(member.window, SW_RESTORE);
+            const BOOL ok = ShowWindow(member.window, SW_RESTORE);
+            wchar_t title[80] = {};
+            GetWindowTextW(member.window, title, 80);
+            polish::LogDebug(std::format(L"[Polish] Stack: restore member 0x{:X} \"{}\" prevVisible={} iconicAfter={}",
+                                         reinterpret_cast<uintptr_t>(member.window), title, ok != 0,
+                                         IsIconic(member.window) != 0));
         }
     }
     ReflowStackTo(id);

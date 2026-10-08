@@ -73,6 +73,10 @@ public:
     // Polish's. The owner learns of the shell activating or closing it
     // through the callbacks below.
     HWND TaskbarHandle() const { return taskbarWindow_; }
+    // Keeps the taskbar button in step with the stack: minimized exactly when
+    // every member is. A button that looks "up" is one the shell has nothing
+    // to restore, so clicking it did nothing.
+    void SetTaskbarMinimized(bool minimized);
 
     // Replaces the tabs and which one is active, and repaints.
     void SetTabs(std::vector<StripTab> tabs, size_t activeIndex);
