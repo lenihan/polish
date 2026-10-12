@@ -145,7 +145,10 @@ public:
     // last render, and makes it visible. Always safe to call speculatively
     // -- callers don't need to pre-check target's state (see main.cpp's
     // UpdateActiveWindowHalo, which is the only real caller).
-    void ShowAroundTarget(HWND target);
+    // `unionWith`, when given, is a screen rect the halo should also enclose:
+    // a stack's title bar and tab strip are separate windows above the member,
+    // and the glow belongs around the whole stack, not just the window under it.
+    void ShowAroundTarget(HWND target, const RECT* unionWith = nullptr);
 
     // Hides the glow. Safe to call when already hidden.
     void Hide();

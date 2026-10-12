@@ -713,6 +713,22 @@ bool CoversWholeMonitor(HWND hwnd) {
 // state -- called any time something might have changed which window
 // should have it. Always
 // safe to call speculatively.
+// For a window in a stack, the strip (title bar and tabs) that sits above it:
+// the halo goes around the stack as a whole, not just the window under the bar.
+// Returns false when there is none to include.
+bool StackStripRectFor(HWND hwnd, RECT* out) {
+    const polish::StackState* stack = g_stackManager.FindStackContaining(hwnd);
+    if (stack == nullptr) {
+        return false;
+    }
+    const auto it = g_stackStrips.find(stack->Id());
+    if (it == g_stackStrips.end() || !it->second->IsShown()) {
+        return false;
+    }
+    *out = it->second->ScreenRect();
+    return true;
+}
+
 void UpdateActiveWindowHalo(HWND hwnd) {
     if (!g_activeWindowHalo) {
         return;
@@ -762,7 +778,9 @@ void UpdateActiveWindowHalo(HWND hwnd) {
     // re-evaluate after it stops covering the monitor.
     g_haloWatched = hwnd;
     if (polish::IsCandidateWindow(hwnd) && IsWindowInNormalState(hwnd) && !CoversWholeMonitor(hwnd)) {
-        g_activeWindowHalo->ShowAroundTarget(hwnd);
+        RECT stripRect{};
+        const bool withStrip = StackStripRectFor(hwnd, &stripRect);
+        g_activeWindowHalo->ShowAroundTarget(hwnd, withStrip ? &stripRect : nullptr);
         g_haloTarget = hwnd;
     } else {
         g_activeWindowHalo->Hide();

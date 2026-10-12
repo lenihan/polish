@@ -320,7 +320,7 @@ void ActiveWindowHalo::FollowTargetVirtualDesktop(HWND target) {
     // call if the live walkthrough confirms it's a real problem.
 }
 
-void ActiveWindowHalo::ShowAroundTarget(HWND target) {
+void ActiveWindowHalo::ShowAroundTarget(HWND target, const RECT* unionWith) {
     if (window_ == nullptr) {
         return;
     }
@@ -330,8 +330,8 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
         Hide();
         return;
     }
-    const int targetWidth = targetRect.right - targetRect.left;
-    const int targetHeight = targetRect.bottom - targetRect.top;
+    int targetWidth = targetRect.right - targetRect.left;
+    int targetHeight = targetRect.bottom - targetRect.top;
     if (targetWidth <= 0 || targetHeight <= 0) {
         // Nothing sane to draw around (e.g. target mid-minimize) -- hide
         // rather than leaving stale content on screen at a stale position,
@@ -339,6 +339,16 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
         Hide();
         return;
     }
+    // The target's own size is what callers debounce resize bursts against
+    // (CachedTargetSize), so it is kept apart from the enclosed rect.
+    const SIZE ownSize{targetWidth, targetHeight};
+    if (unionWith != nullptr) {
+        RECT combined{};
+        UnionRect(&combined, &targetRect, unionWith);
+        targetRect = combined;
+    }
+    targetWidth = targetRect.right - targetRect.left;
+    targetHeight = targetRect.bottom - targetRect.top;
 
     FollowTargetVirtualDesktop(target);
 
@@ -423,7 +433,7 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target) {
 
     const ULONGLONG renderStartMs = GetTickCount64();
     Render(targetWidth, targetHeight, inflate, dpi, glow);
-    cachedTargetSize_ = SIZE{targetWidth, targetHeight};
+    cachedTargetSize_ = ownSize;
     const ULONGLONG renderDurationMs = GetTickCount64() - renderStartMs;
 
     HDC screenDC = GetDC(nullptr);

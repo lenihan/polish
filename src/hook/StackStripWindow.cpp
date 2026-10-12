@@ -284,6 +284,22 @@ void StackStripWindow::PlaceAt(const RECT& screenRect) {
     SetWindowPos(window_, topmost_ ? HWND_TOPMOST : nullptr, screenRect.left, screenRect.top,
                  screenRect.right - screenRect.left, screenRect.bottom - screenRect.top,
                  SWP_NOACTIVATE | (topmost_ ? 0 : SWP_NOZORDER));
+
+    // Round the top corners to match the windows below (Windows 11 rounds its
+    // own by about 8 DIP); the bottom stays square, flush against the member.
+    const int width = screenRect.right - screenRect.left;
+    const int height = screenRect.bottom - screenRect.top;
+    if (width > 0 && height > 0 && (width != regionWidth_ || height != regionHeight_)) {
+        const int radius = Scale(8, GetDpiForWindow(window_));
+        // Taller than the window by the radius, so only the top corners are cut.
+        HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + radius + 1, radius * 2, radius * 2);
+        if (region != nullptr && SetWindowRgn(window_, region, TRUE)) {
+            regionWidth_ = width;
+            regionHeight_ = height;
+        } else if (region != nullptr) {
+            DeleteObject(region);
+        }
+    }
 }
 
 void StackStripWindow::Show() {

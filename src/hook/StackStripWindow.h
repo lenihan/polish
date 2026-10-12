@@ -171,6 +171,8 @@ private:
     bool maximizePressed_ = false;
     bool focused_ = false;
     bool topmost_ = true;
+    int regionWidth_ = 0;
+    int regionHeight_ = 0;
     HWND stackedAbove_ = nullptr;
     bool maximized_ = false;
     std::vector<StripTab> tabs_;
