@@ -42,4 +42,21 @@ std::vector<HWND> CollapseStackMembers(const std::vector<HWND>& ordered, const s
     return result;
 }
 
+WindowStateGroup StateGroupOf(bool minimized, bool maximized) {
+    if (minimized) {
+        return WindowStateGroup::Minimized;
+    }
+    return maximized ? WindowStateGroup::Maximized : WindowStateGroup::Normal;
+}
+
+std::vector<size_t> OrderByStateGroup(const std::vector<WindowStateGroup>& groups) {
+    std::vector<size_t> order(groups.size());
+    for (size_t i = 0; i < order.size(); ++i) {
+        order[i] = i;
+    }
+    std::stable_sort(order.begin(), order.end(),
+                     [&](size_t a, size_t b) { return static_cast<int>(groups[a]) < static_cast<int>(groups[b]); });
+    return order;
+}
+
 }  // namespace polish

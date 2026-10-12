@@ -114,6 +114,20 @@ public:
     void SetOnStripDragged(std::function<void(int, int)> callback) { onStripDragged_ = std::move(callback); }
     // The title bar's minimize button: minimize every member.
     void SetOnMinimizeAll(std::function<void()> callback) { onMinimizeAll_ = std::move(callback); }
+    // The title bar maximize/restore button: the owner grows the stack to its
+    // monitor work area, or puts it back where it was.
+    void SetOnToggleMaximize(std::function<void()> callback) { onToggleMaximize_ = std::move(callback); }
+    // True while one of the stack windows is the active window; the title
+    // bar then wears the system accent color, and a muted one otherwise.
+    void SetFocused(bool focused);
+    // Where the strip sits in Z. Topmost while the stack is active, so it stays
+    // over the members it was just raised with. Otherwise it is placed directly
+    // above the stack's active member, so whatever covers the stack covers its
+    // title bar too instead of the bar floating over unrelated apps.
+    void SetStacking(bool topmost, HWND activeMember);
+    // Whether the stack fills its work area, which flips the button between
+    // its maximize and restore glyphs.
+    void SetMaximized(bool maximized);
     // The title bar was double-clicked: the owner opens the rename/edit UI.
     void SetOnTitleDoubleClicked(std::function<void()> callback) { onTitleDoubleClicked_ = std::move(callback); }
     // The taskbar button's "Close window": the stack is being closed. The
@@ -142,6 +156,7 @@ private:
     RECT TitleBarRect(const RECT& client, UINT dpi) const;
     RECT TabAreaRect(const RECT& client, UINT dpi) const;
     RECT MinimizeButtonRect(const RECT& client, UINT dpi) const;
+    RECT MaximizeButtonRect(const RECT& client, UINT dpi) const;
     TabMetrics MetricsFor(UINT dpi) const;
     std::vector<RECT> CurrentTabRects() const;
     void EndDrag();
@@ -152,6 +167,12 @@ private:
     std::wstring title_;
     bool minimizeHovered_ = false;
     bool minimizePressed_ = false;
+    bool maximizeHovered_ = false;
+    bool maximizePressed_ = false;
+    bool focused_ = false;
+    bool topmost_ = true;
+    HWND stackedAbove_ = nullptr;
+    bool maximized_ = false;
     std::vector<StripTab> tabs_;
     size_t activeIndex_ = 0;
     StackAlignment alignment_ = StackAlignment::Horizontal;
@@ -175,6 +196,7 @@ private:
     std::function<void(int, int)> onStripDragged_;
     std::function<void(POINT, std::optional<size_t>)> onContextMenu_;
     std::function<void()> onMinimizeAll_;
+    std::function<void()> onToggleMaximize_;
     std::function<void()> onTitleDoubleClicked_;
     std::function<void()> onTaskbarCloseRequested_;
     std::function<void()> onTaskbarToggle_;

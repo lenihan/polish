@@ -1086,6 +1086,17 @@ current todo list.
     hotkey is Ctrl+Alt+1; a stored Win+Alt+G is migrated on load. Probed with
     UI Automation: a taskbar button appears with the stack and goes when it
     closes. Real taskbar clicks were simulated.
+  - **Accent title bar, maximize, sectioned picker.** The title bar wears the
+    accent color while a member is active and a muted fill otherwise (strip is
+    then non-topmost, placed above the active member via `GetWindow
+    (GW_HWNDPREV)`). A maximize/restore button next to minimize sets the stack
+    rect to the work area (restore rect remembered per stack; derived
+    "maximized" = rect equals work area). The picker sections available
+    windows by `StateGroupOf` (Maximized, Normal, Minimized; stable within a
+    section, minimized wins). Also fixed: `WM_MOUSEMOVE` fell through into
+    `WM_LBUTTONUP`, firing a pressed title-bar button on mouse move.
+    Taskbar stand-in is now minimized exactly when every member is, because
+    the shell sends nothing for a click on an up-and-foreground window.
   - **Verified with a probe** that drives real windows and a real mouse:
     create, shared rect, strip flush above the members, click a tab,
     programmatic resize, border-drag resize, strip drag, drag-in, tear-out,

@@ -1,3 +1,4 @@
+#include "windowtracking/StackCollapse.h"
 #include "hook/StackPickerWindow.h"
 
 #include <dwmapi.h>
@@ -779,7 +780,19 @@ std::vector<HWND> StackPickerWindow::AvailableWindows() const {
             availableWindows.push_back(hwnd);
         }
     }
-    return availableWindows;
+    // Sectioned by state: maximized, normal, minimized. Each section keeps
+    // the order it already had.
+    std::vector<WindowStateGroup> groups;
+    groups.reserve(availableWindows.size());
+    for (HWND hwnd : availableWindows) {
+        groups.push_back(StateGroupOf(IsIconic(hwnd) != 0, IsZoomed(hwnd) != 0));
+    }
+    std::vector<HWND> sectioned;
+    sectioned.reserve(availableWindows.size());
+    for (const size_t index : OrderByStateGroup(groups)) {
+        sectioned.push_back(availableWindows[index]);
+    }
+    return sectioned;
 }
 
 void StackPickerWindow::RefreshLists() {

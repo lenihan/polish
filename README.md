@@ -245,7 +245,10 @@ these yet.
 (tray menu → **New Stack…**, or **Ctrl+Alt+1**) and they all take the same
 rectangle, one on top of the others, with a title bar named for the stack
 and a tab strip above them. The title bar has a minimize button that
-minimizes the whole stack; double-click it to rename the stack. The stack
+minimizes the whole stack and the square next to it maximizes the stack to
+its monitor or puts it back; double-click the title to rename the stack. The
+title bar takes your Windows accent color while one of the stack's windows is
+the active window, and a muted one otherwise. The stack
 also gets one taskbar button of its own (labelled "polish.exe"): click it
 to minimize or bring back the whole stack. Click a
 tab to bring that window forward. The strip is a small always-on-top window
@@ -273,9 +276,11 @@ Calculator and Settings.
   its tab dimmed, and clicking the tab brings it back.
 - **Windows that insist on a minimum size** make the stack grow to fit them.
 
-The strip is only visible while one of the stack's windows is in front,
-because it floats above everything and would otherwise sit over unrelated
-apps. To get back to a hidden stack, switch to any of its windows. See
+When another window is active the strip stays, muted, directly above its
+stack: anything that covers the stack covers its title bar too. A stack
+whose windows are all minimized has no strip. When you create a stack, the
+window list is sectioned into Maximized, Normal and Minimized to make the
+one you want easier to find. See
 [`docs/LIMITATIONS.md`](docs/LIMITATIONS.md) for what follows from stacks
 being ordinary windows.
 

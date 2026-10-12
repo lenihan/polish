@@ -157,6 +157,56 @@ RECT StackStripWindow::MinimizeButtonRect(const RECT& client, UINT dpi) const {
     return RECT{title.right - Scale(kMinimizeButtonDip, dpi), title.top, title.right, title.bottom};
 }
 
+RECT StackStripWindow::MaximizeButtonRect(const RECT& client, UINT dpi) const {
+    RECT rect = MinimizeButtonRect(client, dpi);
+    const int width = rect.right - rect.left;
+    rect.left -= width;
+    rect.right -= width;
+    return rect;
+}
+
+void StackStripWindow::SetStacking(bool topmost, HWND activeMember) {
+    HWND insertAfter = HWND_TOPMOST;
+    if (!topmost) {
+        insertAfter = HWND_NOTOPMOST;
+        if (activeMember != nullptr && IsWindow(activeMember)) {
+            HWND prev = GetWindow(activeMember, GW_HWNDPREV);
+            while (prev != nullptr && prev == window_) {
+                prev = GetWindow(prev, GW_HWNDPREV);
+            }
+            if (prev != nullptr) {
+                insertAfter = prev;
+            }
+        }
+    }
+    if (window_ == nullptr || (topmost_ == topmost && stackedAbove_ == insertAfter)) {
+        return;
+    }
+    topmost_ = topmost;
+    stackedAbove_ = insertAfter;
+    SetWindowPos(window_, insertAfter, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+void StackStripWindow::SetFocused(bool focused) {
+    if (focused_ == focused) {
+        return;
+    }
+    focused_ = focused;
+    if (window_ != nullptr) {
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+}
+
+void StackStripWindow::SetMaximized(bool maximized) {
+    if (maximized_ == maximized) {
+        return;
+    }
+    maximized_ = maximized;
+    if (window_ != nullptr) {
+        InvalidateRect(window_, nullptr, FALSE);
+    }
+}
+
 LRESULT CALLBACK StackStripWindow::TaskbarProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     StackStripWindow* self = nullptr;
     if (message == WM_NCCREATE) {
@@ -229,8 +279,11 @@ void StackStripWindow::PlaceAt(const RECT& screenRect) {
     // HWND_TOPMOST every time, not just at creation: this is what keeps the
     // strip over a stack that has just been raised, and Polish is a
     // background process, so HWND_TOP would silently do nothing.
-    SetWindowPos(window_, HWND_TOPMOST, screenRect.left, screenRect.top, screenRect.right - screenRect.left,
-                 screenRect.bottom - screenRect.top, SWP_NOACTIVATE);
+    // (While the stack is inactive the strip is not topmost, and a move must not
+    // change where it sits -- SetStacking owns that.)
+    SetWindowPos(window_, topmost_ ? HWND_TOPMOST : nullptr, screenRect.left, screenRect.top,
+                 screenRect.right - screenRect.left, screenRect.bottom - screenRect.top,
+                 SWP_NOACTIVATE | (topmost_ ? 0 : SWP_NOZORDER));
 }
 
 void StackStripWindow::Show() {
@@ -300,6 +353,7 @@ void StackStripWindow::EndDrag() {
     tearing_ = false;
     stripDragging_ = false;
     minimizePressed_ = false;
+    maximizePressed_ = false;
     if (window_ != nullptr) {
         InvalidateRect(window_, nullptr, FALSE);
     }
@@ -339,7 +393,13 @@ void StackStripWindow::Paint(HDC hdc, const RECT& client) {
     // than a loose strip of tabs.
     {
         const RECT titleBar = TitleBarRect(client, dpi);
-        const COLORREF titleFill = dark ? RGB(0x12, 0x12, 0x12) : RGB(0xDD, 0xDD, 0xDD);
+        // Accent while one of the stack windows is active, muted otherwise,
+        // the way a caption bar tells you which window has the keyboard.
+        const COLORREF accentFill = GetAccentColor();
+        const int luma = (GetRValue(accentFill) * 299 + GetGValue(accentFill) * 587 + GetBValue(accentFill) * 114) / 1000;
+        const COLORREF onAccent = luma > 150 ? RGB(0, 0, 0) : RGB(0xFF, 0xFF, 0xFF);
+        const COLORREF titleFill = focused_ ? accentFill : (dark ? RGB(0x12, 0x12, 0x12) : RGB(0xDD, 0xDD, 0xDD));
+        const COLORREF titleText = focused_ ? onAccent : dimText;
         HBRUSH titleBrush = CreateSolidBrush(titleFill);
         FillRect(hdc, &titleBar, titleBrush);
         DeleteObject(titleBrush);
@@ -349,29 +409,53 @@ void StackStripWindow::Paint(HDC hdc, const RECT& client) {
         DeleteObject(ruleBrush);
 
         const RECT minimize = MinimizeButtonRect(client, dpi);
-        if (minimizeHovered_ || minimizePressed_) {
-            HBRUSH hover = CreateSolidBrush(dark ? RGB(0x3A, 0x3A, 0x3A) : RGB(0xC8, 0xC8, 0xC8));
-            RECT button = minimize;
+        const RECT maximize = MaximizeButtonRect(client, dpi);
+        const COLORREF hoverTint = focused_ ? onAccent : RGB(0x80, 0x80, 0x80);
+        const auto tintedHover = [&](const RECT& r) {
+            // A translucent wash of the tint over the title fill.
+            const auto mix = [](int base, int tint) { return (base * 82 + tint * 18) / 100; };
+            HBRUSH hover = CreateSolidBrush(RGB(mix(GetRValue(titleFill), GetRValue(hoverTint)),
+                                                mix(GetGValue(titleFill), GetGValue(hoverTint)),
+                                                mix(GetBValue(titleFill), GetBValue(hoverTint))));
+            RECT button = r;
             button.bottom -= 1;
             FillRect(hdc, &button, hover);
             DeleteObject(hover);
+        };
+        if (minimizeHovered_ || minimizePressed_) {
+            tintedHover(minimize);
+        }
+        if (maximizeHovered_ || maximizePressed_) {
+            tintedHover(maximize);
         }
         // The glyph: a short horizontal line, the same shape every caption
         // minimize button draws.
         const int glyphW = Scale(10, dpi);
         const int glyphY = (minimize.top + minimize.bottom) / 2;
-        HPEN glyphPen = CreatePen(PS_SOLID, std::max(1, Scale(1, dpi)), text);
+        HPEN glyphPen = CreatePen(PS_SOLID, std::max(1, Scale(1, dpi)), titleText);
         HGDIOBJ oldPen = SelectObject(hdc, glyphPen);
         MoveToEx(hdc, (minimize.left + minimize.right - glyphW) / 2, glyphY, nullptr);
         LineTo(hdc, (minimize.left + minimize.right + glyphW) / 2, glyphY);
+        // Maximize: one square. Restore (already maximized): two, offset.
+        HGDIOBJ oldBrush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        const int cx = (maximize.left + maximize.right) / 2;
+        const int half = glyphW / 2;
+        if (maximized_) {
+            const int off = std::max(2, Scale(2, dpi));
+            Rectangle(hdc, cx - half, glyphY - half + off, cx + half - off, glyphY + half);
+            Rectangle(hdc, cx - half + off, glyphY - half, cx + half, glyphY + half - off);
+        } else {
+            Rectangle(hdc, cx - half, glyphY - half, cx + half, glyphY + half);
+        }
+        SelectObject(hdc, oldBrush);
         SelectObject(hdc, oldPen);
         DeleteObject(glyphPen);
 
-        RECT nameRect{titleBar.left + Scale(kTitleTextLeftDip, dpi), titleBar.top, minimize.left - Scale(8, dpi),
+        RECT nameRect{titleBar.left + Scale(kTitleTextLeftDip, dpi), titleBar.top, maximize.left - Scale(8, dpi),
                       titleBar.bottom - 1};
         if (nameRect.right > nameRect.left) {
             SelectObject(hdc, boldFont);
-            SetTextColor(hdc, text);
+            SetTextColor(hdc, titleText);
             DrawTextW(hdc, title_.c_str(), -1, &nameRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
             SelectObject(hdc, font);
         }
@@ -545,10 +629,13 @@ LRESULT StackStripWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             const UINT dpiNow = GetDpiForWindow(hwnd);
             const RECT minimizeRect = MinimizeButtonRect(clientNow, dpiNow);
             const RECT titleRect = TitleBarRect(clientNow, dpiNow);
+            const RECT maximizeRect = MaximizeButtonRect(clientNow, dpiNow);
             const auto tab = TabIndexAt(CurrentTabRects(), pt);
             if (PtInRect(&minimizeRect, pt)) {
                 // A button: acted on at release, if still over it.
                 minimizePressed_ = true;
+            } else if (PtInRect(&maximizeRect, pt)) {
+                maximizePressed_ = true;
             } else if (tab.has_value()) {
                 pressedTab_ = tab;
             } else {
@@ -621,12 +708,16 @@ LRESULT StackStripWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             RECT clientNow{};
             GetClientRect(hwnd, &clientNow);
             const RECT minimizeRect = MinimizeButtonRect(clientNow, GetDpiForWindow(hwnd));
+            const RECT maximizeRect = MaximizeButtonRect(clientNow, GetDpiForWindow(hwnd));
             const bool overMinimize = PtInRect(&minimizeRect, pt) != FALSE;
-            if (hover != hoveredTab_ || overMinimize != minimizeHovered_) {
+            const bool overMaximize = PtInRect(&maximizeRect, pt) != FALSE;
+            if (hover != hoveredTab_ || overMinimize != minimizeHovered_ || overMaximize != maximizeHovered_) {
                 hoveredTab_ = hover;
                 minimizeHovered_ = overMinimize;
+                maximizeHovered_ = overMaximize;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
+            return 0;
         }
 
         case WM_LBUTTONUP: {
@@ -634,6 +725,7 @@ LRESULT StackStripWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             // as WM_CAPTURECHANGED, which clears all of this.
             const std::optional<size_t> pressed = pressedTab_;
             const bool wasMinimizePress = minimizePressed_;
+            const bool wasMaximizePress = maximizePressed_;
             const bool wasDragging = tabDragging_;
             const bool wasTearing = tearing_;
             POINT screen{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
@@ -646,12 +738,18 @@ LRESULT StackStripWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             GetClientRect(hwnd, &clientUp);
             const RECT minimizeUp = MinimizeButtonRect(clientUp, GetDpiForWindow(hwnd));
             const bool releasedOnMinimize = PtInRect(&minimizeUp, releasePt) != FALSE;
+            const RECT maximizeUp = MaximizeButtonRect(clientUp, GetDpiForWindow(hwnd));
+            const bool releasedOnMaximize = PtInRect(&maximizeUp, releasePt) != FALSE;
             // The callbacks may tear this stack down. The owner defers any
             // destruction of this window (to a posted message) for exactly
             // that reason, so nothing here touches `this` afterwards.
             if (wasMinimizePress && releasedOnMinimize) {
                 if (onMinimizeAll_) {
                     onMinimizeAll_();
+                }
+            } else if (wasMaximizePress && releasedOnMaximize) {
+                if (onToggleMaximize_) {
+                    onToggleMaximize_();
                 }
             } else if (pressed.has_value()) {
                 if (wasTearing) {
@@ -685,9 +783,10 @@ LRESULT StackStripWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
 
         case WM_MOUSELEAVE:
             trackingMouseLeave_ = false;
-            if (hoveredTab_.has_value() || minimizeHovered_) {
+            if (hoveredTab_.has_value() || minimizeHovered_ || maximizeHovered_) {
                 hoveredTab_.reset();
                 minimizeHovered_ = false;
+                maximizeHovered_ = false;
                 InvalidateRect(hwnd, nullptr, FALSE);
             }
             return 0;
@@ -702,7 +801,8 @@ LRESULT StackStripWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             const UINT dpiNow = GetDpiForWindow(hwnd);
             const RECT title = TitleBarRect(clientNow, dpiNow);
             const RECT minimizeRect = MinimizeButtonRect(clientNow, dpiNow);
-            if (PtInRect(&title, pt) && !PtInRect(&minimizeRect, pt) && onTitleDoubleClicked_) {
+            const RECT maximizeRect = MaximizeButtonRect(clientNow, dpiNow);
+            if (PtInRect(&title, pt) && !PtInRect(&minimizeRect, pt) && !PtInRect(&maximizeRect, pt) && onTitleDoubleClicked_) {
                 onTitleDoubleClicked_();
             }
             return 0;

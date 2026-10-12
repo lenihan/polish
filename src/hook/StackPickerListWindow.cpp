@@ -1,3 +1,4 @@
+#include "windowtracking/StackCollapse.h"
 #include "hook/StackPickerListWindow.h"
 
 #include <commctrl.h>
@@ -22,6 +23,7 @@ constexpr wchar_t kWindowClassName[] = L"PolishStackPickerListWindow";
 // never cached, same convention every other custom-painted window in
 // this codebase uses.
 constexpr int kRowHeight = 40;
+constexpr int kHeadingHeight = 26;
 constexpr int kPaddingX = 14;
 constexpr int kIconSize = 20;
 constexpr int kIconTextGap = 10;
@@ -445,6 +447,12 @@ StackPickerListWindow::RowLayout StackPickerListWindow::ComputeLayout(UINT dpi) 
     layout.rowRects.reserve(rows_.size());
     int top = 0;
     for (size_t i = 0; i < rows_.size(); ++i) {
+        if (i == 0 || rows_[i].group != rows_[i - 1].group) {
+            static const wchar_t* const kHeadingText[] = {L"Maximized", L"Normal", L"Minimized"};
+            const int g = std::clamp(rows_[i].group, 0, 2);
+            layout.headings.push_back({RECT{0, top, width, top + Scale(kHeadingHeight, dpi)}, kHeadingText[g]});
+            top += Scale(kHeadingHeight, dpi);
+        }
         layout.rowRects.push_back(RECT{0, top, width, top + rowHeight});
         top += rowHeight;
     }
@@ -485,6 +493,18 @@ void StackPickerListWindow::Paint(HDC hdc, const RECT& clientRect) const {
     const int rowCornerRadius = Scale(kRowCornerRadius, dpi);
     const int buttonCornerRadius = Scale(kButtonCornerRadius, dpi);
     const int glyphMargin = Scale(kGlyphMargin, dpi);
+
+    {
+        // Section headings: small, quiet text, so the rows stay the focus.
+        const COLORREF headingColor = dark ? RGB(0x9A, 0x9A, 0x9A) : RGB(0x6A, 0x6A, 0x6A);
+        SetTextColor(hdc, headingColor);
+        for (const RowLayout::Heading& heading : layout.headings) {
+            RECT textRect = heading.rect;
+            textRect.left += paddingX;
+            textRect.top += Scale(6, dpi);
+            DrawTextW(hdc, heading.text, -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+        }
+    }
 
     for (size_t i = 0; i < layout.rowRects.size() && i < rows_.size(); ++i) {
         const RECT& rowRect = layout.rowRects[i];
@@ -676,7 +696,9 @@ void StackPickerListWindow::SetWindows(const std::vector<HWND>& candidates) {
     rows_.clear();
     rows_.reserve(candidates.size());
     for (HWND hwnd : candidates) {
-        rows_.push_back(StackPickerRow{hwnd, GetWindowTitle(hwnd), GetWindowIconHandle(hwnd)});
+        StackPickerRow row{hwnd, GetWindowTitle(hwnd), GetWindowIconHandle(hwnd)};
+        row.group = static_cast<int>(StateGroupOf(IsIconic(hwnd) != 0, IsZoomed(hwnd) != 0));
+        rows_.push_back(std::move(row));
     }
     hoveredIndex_.reset();
     // selectedIndex_ deliberately left untouched here -- StackPickerWindow

@@ -6027,6 +6027,30 @@ void SyncStrip(polish::StackId id) {
     stripIt->second->SetTabs(CollectStripTabs(*stack), stack->ActiveIndex().value_or(0));
 }
 
+// The work area of the monitor a stack mostly sits on. A stack is maximized
+// when its outer rect is exactly that, which is derived rather than stored so
+// it stays true however the stack got there (this button, a tile, a resize).
+bool StackWorkArea(const polish::StackState& stack, RECT* work) {
+    if (!stack.HasRect()) {
+        return false;
+    }
+    const RECT rect = stack.Rect();
+    MONITORINFO info{sizeof(info)};
+    if (!GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &info)) {
+        return false;
+    }
+    *work = info.rcWork;
+    return true;
+}
+
+bool StackFillsWorkArea(const polish::StackState& stack) {
+    RECT work{};
+    return StackWorkArea(stack, &work) && EqualRect(&work, &stack.Rect());
+}
+
+// What the stack was before the title bar maximized it, to put back.
+std::map<polish::StackId, RECT> g_stackRestoreRects;
+
 // The strip is shown while one of its stack's members is the foreground
 // window, and hidden otherwise.
 //
@@ -6048,11 +6072,21 @@ void UpdateStripVisibility() {
             }
         }
         strip->SetTaskbarMinimized(!anyUp);
+        strip->SetFocused(active != nullptr && active->Id() == id);
+        strip->SetMaximized(own != nullptr && StackFillsWorkArea(*own));
         const bool strip_is_foreground = foreground == strip->Handle();
         // Every strip while a window is being dragged toward one: the dragged
         // window is the foreground window, so without this the strips would
         // all vanish just when they are wanted as drop targets.
-        if ((active != nullptr && active->Id() == id) || strip_is_foreground || g_joinSubject != nullptr) {
+        const bool isActive = active != nullptr && active->Id() == id;
+        if (isActive || strip_is_foreground || g_joinSubject != nullptr) {
+            strip->SetStacking(true, nullptr);
+            strip->Show();
+        } else if (anyUp) {
+            // Visible but inactive: it reads as a dimmed title bar, and sits just
+            // above its own window so anything covering the stack covers it.
+            const auto activeWindow = own != nullptr ? own->ActiveWindow() : std::nullopt;
+            strip->SetStacking(false, activeWindow.value_or(nullptr));
             strip->Show();
         } else {
             strip->Hide();
@@ -6129,6 +6163,36 @@ void ReflowStackTo(polish::StackId id) {
     g_stackQuietUntilTick = GetTickCount64() + kStackQuietMs;
     SyncStrip(id);
     UpdateStripVisibility();
+}
+
+// The title bar's maximize/restore button. A stack maximizes to its monitor's
+// work area like any window, remembering where it was; pressed again it goes
+// back there (or, if it was already that big when it started, to a centred
+// 70% so the button always does something visible).
+void ToggleStackMaximize(polish::StackId id) {
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    RECT work{};
+    if (stack == nullptr || !StackWorkArea(*stack, &work)) {
+        return;
+    }
+    if (StackFillsWorkArea(*stack)) {
+        RECT back{};
+        if (const auto it = g_stackRestoreRects.find(id); it != g_stackRestoreRects.end() && !EqualRect(&it->second, &work)) {
+            back = it->second;
+        } else {
+            const int w = (work.right - work.left) * 70 / 100;
+            const int h = (work.bottom - work.top) * 70 / 100;
+            back = RECT{work.left + ((work.right - work.left) - w) / 2, work.top + ((work.bottom - work.top) - h) / 2,
+                        work.left + ((work.right - work.left) + w) / 2, work.top + ((work.bottom - work.top) + h) / 2};
+        }
+        polish::LogDebug(std::format(L"[Polish] Stack: restoring stack id={} from maximized", id));
+        stack->SetRect(back);
+    } else {
+        polish::LogDebug(std::format(L"[Polish] Stack: maximizing stack id={}", id));
+        g_stackRestoreRects[id] = stack->Rect();
+        stack->SetRect(work);
+    }
+    ReflowStackTo(id);
 }
 
 // Minimizes every member: the title bar's minimize button, and what
@@ -6646,6 +6710,7 @@ polish::StackId CreateStackFromWindows(const std::vector<HWND>& windows, const s
     strip->SetOnStripDragged([id](int dx, int dy) { OnStripDragged(id, dx, dy); });
     strip->SetOnContextMenu([id](POINT pt, std::optional<size_t> tab) { ShowStackStripMenu(id, pt, tab); });
     strip->SetOnMinimizeAll([id]() { MinimizeStackMembers(id); });
+    strip->SetOnToggleMaximize([id]() { ToggleStackMaximize(id); });
     strip->SetOnTitleDoubleClicked([id]() { EditStackWindows(id); });
     strip->SetOnTaskbarCloseRequested([id]() { DissolveStack(id); });
     strip->SetOnTaskbarToggle([id]() { ToggleStackFromTaskbar(id); });

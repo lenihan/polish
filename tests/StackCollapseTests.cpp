@@ -93,3 +93,24 @@ TEST_CASE("StackIndexOf: finds the stack a window is in, or -1") {
     CHECK(StackIndexOf(stacks, W(20)) == 1);
     CHECK(StackIndexOf(stacks, W(99)) == -1);
 }
+
+TEST_CASE("StateGroupOf: minimized wins over maximized") {
+    CHECK(StateGroupOf(false, false) == WindowStateGroup::Normal);
+    CHECK(StateGroupOf(false, true) == WindowStateGroup::Maximized);
+    CHECK(StateGroupOf(true, false) == WindowStateGroup::Minimized);
+    CHECK(StateGroupOf(true, true) == WindowStateGroup::Minimized);
+}
+
+TEST_CASE("OrderByStateGroup: sections in order, original order kept within each") {
+    const std::vector<WindowStateGroup> groups = {
+        WindowStateGroup::Minimized, WindowStateGroup::Normal,    WindowStateGroup::Maximized,
+        WindowStateGroup::Normal,    WindowStateGroup::Minimized, WindowStateGroup::Maximized};
+    const std::vector<size_t> expected = {2, 5, 1, 3, 0, 4};
+    CHECK(OrderByStateGroup(groups) == expected);
+}
+
+TEST_CASE("OrderByStateGroup: empty and single-group inputs are unchanged") {
+    CHECK(OrderByStateGroup({}).empty());
+    const std::vector<size_t> identity = {0, 1, 2};
+    CHECK(OrderByStateGroup({WindowStateGroup::Normal, WindowStateGroup::Normal, WindowStateGroup::Normal}) == identity);
+}

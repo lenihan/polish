@@ -37,4 +37,17 @@ std::vector<HWND> CollapseStackMembers(const std::vector<HWND>& ordered, const s
 // Which stack (index into `stacks`) hwnd belongs to, or -1.
 int StackIndexOf(const std::vector<StackEntry>& stacks, HWND hwnd);
 
+// How the stack picker sections its list of available windows, in the order
+// the sections appear.
+enum class WindowStateGroup { Maximized = 0, Normal = 1, Minimized = 2 };
+
+// A window that is minimized is Minimized whatever else it is (a minimized
+// window that was maximized is still sitting in the taskbar).
+WindowStateGroup StateGroupOf(bool minimized, bool maximized);
+
+// The indices of `groups` ordered by group, keeping the original relative
+// order within a group (a stable sort), so the picker's list stays in the
+// order the user already knows inside each section.
+std::vector<size_t> OrderByStateGroup(const std::vector<WindowStateGroup>& groups);
+
 }  // namespace polish

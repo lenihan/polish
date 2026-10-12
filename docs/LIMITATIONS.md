@@ -71,11 +71,12 @@ gets a full pass in Phase 3; today it records what's already known.
      one is, does not work: a background process cannot reliably raise
      another process's window (`HWND_TOP` reports success and does
      nothing).
-   - **The tab strip is only shown while one of its stack's members is the
-     foreground window** (or while a window is being dragged toward one).
-     It is topmost, and a topmost strip floating over unrelated apps while
-     its stack is buried looks broken. The way back to a hidden stack is
-     the ordinary one: Alt+Tab or the taskbar onto any member.
+   - **The strip is only topmost while its stack is active.** Otherwise it
+     is placed directly above the stack's active window, so whatever
+     covers the stack covers the title bar too, and it is drawn muted. This
+     is re-evaluated when the foreground window changes, not on every
+     z-order change, so a window raised without activating can briefly
+     leave the strip in the wrong place.
    - **An elevated window cannot join a stack.** UIPI makes `SetWindowPos`
      a silent no-op against it, so it would sit outside its stack forever;
      the picker leaves it out and dragging one onto a strip does nothing.

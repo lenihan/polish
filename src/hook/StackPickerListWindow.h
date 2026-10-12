@@ -17,6 +17,9 @@ struct StackPickerRow {
     HWND hwnd = nullptr;
     std::wstring title;
     HICON icon = nullptr;  // borrowed, may be nullptr (falls back to text-only)
+    // StateGroupOf(): 0 maximized, 1 normal, 2 minimized. Drives the section
+    // headings; the caller has already ordered the rows by it.
+    int group = 1;
 };
 
 // The "Available windows" half of StackPickerWindow's picker: every
@@ -116,6 +119,12 @@ public:
 private:
     struct RowLayout {
         std::vector<RECT> rowRects;  // natural (unshifted-by-scroll) coordinates
+        // A heading band above the first row of each state section.
+        struct Heading {
+            RECT rect;
+            const wchar_t* text;
+        };
+        std::vector<Heading> headings;
         int contentHeight = 0;
     };
 
