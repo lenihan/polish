@@ -65,6 +65,27 @@ struct Settings {
     UINT arrangeFourWayHotkeyModifiers = MOD_CONTROL | MOD_ALT;
     UINT arrangeFourWayHotkeyVirtualKey = '4';
 
+    // Scaled windows: shrink a window to a live thumbnail and click it to
+    // bring it back to 1:1 (see hook/ScaledViewWindow.h). Off restores every
+    // scaled window and makes the hotkeys inert, because switching it off
+    // must never leave a window hidden.
+    bool scaleEnabled = true;
+    // What "scale down" does to a window that is at 1:1.
+    UINT scaleDefaultPercent = 50;
+    // Views float above other windows by default: a window you shrank in
+    // order to keep an eye on it is no use once something is on top of it.
+    bool scaledViewTopmost = true;
+
+    // Scale down / scale up / restore to 1:1. Ctrl+Alt with the zoom keys,
+    // beside the tiling and stack hotkeys; registry only, like those.
+    // 0xBD and 0xBB are VK_OEM_MINUS and VK_OEM_PLUS.
+    UINT scaleDownHotkeyModifiers = MOD_CONTROL | MOD_ALT;
+    UINT scaleDownHotkeyVirtualKey = 0xBD;
+    UINT scaleUpHotkeyModifiers = MOD_CONTROL | MOD_ALT;
+    UINT scaleUpHotkeyVirtualKey = 0xBB;
+    UINT scaleResetHotkeyModifiers = MOD_CONTROL | MOD_ALT;
+    UINT scaleResetHotkeyVirtualKey = '0';
+
     // The "New Stack" global hotkey -- RegisterHotKey's own modifier
     // flags (MOD_ALT/MOD_CONTROL/MOD_SHIFT/MOD_WIN, OR'd together) and
     // a single virtual-key code. Default Ctrl+Alt+1: the tiling commands are

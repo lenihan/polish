@@ -25,6 +25,8 @@
 #include "hook/AltTabHook.h"
 #include "hook/AltTabListWindow.h"
 #include "hook/BullseyeOverlay.h"
+#include "hook/ScaledViewWindow.h"
+#include "hook/WindowParking.h"
 #include "hook/StackHotkeyDialog.h"
 #include "hook/StackPickerWindow.h"
 #include "hook/StackStripWindow.h"
@@ -46,6 +48,8 @@
 #include "util/SwitcherCycle.h"
 #include "util/WindowIcon.h"
 #include "windowtracking/ActivationHistory.h"
+#include "windowtracking/ScaleGeometry.h"
+#include "windowtracking/ScaledWindowSet.h"
 #include "windowtracking/StackCollapse.h"
 #include "windowtracking/StackLayout.h"
 #include "windowtracking/StackManager.h"
@@ -483,6 +487,18 @@ void OnJoinDragStart(HWND hwnd);
 void OnJoinDragMove(HWND hwnd);
 void OnJoinDragEnd(HWND hwnd);
 void OnStackTaskbarForeground(HWND foreground, HWND previous);
+// Scaled windows (see the section above the tray menu ids). A scaled window
+// is parked -- invisible, click-through -- with a live thumbnail view
+// standing in for it, so the window-event handlers need to know about it.
+polish::ScaledWindowSet g_scaledSet;
+std::map<HWND, std::unique_ptr<polish::ScaledViewWindow>> g_scaledViews;
+// Posted by a view that wants its window restored: restoring destroys the
+// view, which cannot happen from inside the view's own message handler.
+constexpr UINT kScaledRestoreMessage = WM_APP + 40;
+void OnScaledWindowForeground(HWND hwnd);
+void OnScaledWindowDestroyed(HWND hwnd);
+void OnScaledWindowLocationChanged(HWND hwnd);
+void OnScaledWindowMinimizeChanged(HWND hwnd, bool minimized);
 // The window that was in front before the current one, for the taskbar-button
 // toggle (see OnStackTaskbarForeground).
 HWND g_lastForeground = nullptr;
@@ -761,7 +777,9 @@ void UpdateActiveWindowHalo(HWND hwnd) {
     if (g_moveModeDimmed) {
         return;
     }
-    if (!g_settings.haloEnabled || g_haloMinimizeSuppressed) {
+    // A scaled window is a ghost: a halo around its invisible full-size
+    // rect would glow around nothing.
+    if (!g_settings.haloEnabled || g_haloMinimizeSuppressed || g_scaledSet.Contains(hwnd)) {
         g_activeWindowHalo->Hide();
         g_haloTarget = nullptr;
         return;
@@ -1048,6 +1066,10 @@ void OnForegroundChanged(HWND newForeground) {
         g_lastForeground = newForeground;
     }
     OnStackTaskbarForeground(newForeground, previousForeground);
+    // A scaled window is parked and must never hold focus: whatever just
+    // activated it (its taskbar button, Alt+Tab, the app itself), the
+    // meaning is "I need this one now".
+    OnScaledWindowForeground(newForeground);
     // A window coming to the front that went into the taskbar earlier is a
     // restore, and is usually how this app hears about one first -- before
     // EVENT_SYSTEM_MINIMIZEEND. Start the hold-off here so the halo is
@@ -1180,6 +1202,8 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 // While a window is being dragged toward a stack, keep the
                 // strip's insertion caret following the pointer.
                 OnJoinDragMove(hwnd);
+                // A scaled window that resized itself: the view follows.
+                OnScaledWindowLocationChanged(hwnd);
             }
             if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF && hwnd != g_stackMovingMember &&
                 g_stackManager.FindStackContaining(hwnd) != nullptr) {
@@ -1284,6 +1308,9 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 // A closing stack member has to leave its stack, or the
                 // strip keeps a tab for a window that no longer exists.
                 OnMemberDestroyed(hwnd);
+                // Drops the view of a scaled window that closed, or the
+                // window would be gone with a thumbnail of nothing left.
+                OnScaledWindowDestroyed(hwnd);
                 if (hwnd == g_stackMovingMember) {
                     g_stackMovingMember = nullptr;
                 }
@@ -1318,6 +1345,7 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
 
         case EVENT_SYSTEM_MINIMIZESTART:
             PostMessageW(g_messageWindow, kStackMinimizeMessage, reinterpret_cast<WPARAM>(hwnd), 0);
+            OnScaledWindowMinimizeChanged(hwnd, true);
             g_minimizedWindows.insert(hwnd);
             if (hwnd == g_haloTarget && g_activeWindowHalo) {
                 // LOCATIONCHANGE fires continuously through Win11's
@@ -1336,6 +1364,7 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
 
         case EVENT_SYSTEM_MINIMIZEEND:
             PostMessageW(g_messageWindow, kStackMinimizeMessage, reinterpret_cast<WPARAM>(hwnd), 0);
+            OnScaledWindowMinimizeChanged(hwnd, false);
             // Stay suppressed until the restore animation has played out;
             // see kHaloRestoreTimerId for why this is a wait rather than a
             // follow. The suppression flag is already respected by both
@@ -5576,7 +5605,7 @@ BOOL CALLBACK EnumArrangeCandidatesProc(HWND hwnd, LPARAM) {
         return FALSE;
     }
     if (IsOwnProcessWindow(hwnd) || !polish::IsCandidateWindow(hwnd) ||
-        IsIconic(hwnd) || polish::IsElevatedWindow(hwnd)) {
+        IsIconic(hwnd) || polish::IsElevatedWindow(hwnd) || g_scaledSet.Contains(hwnd)) {
         return TRUE;
     }
     if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != g_arrangeCollectingMonitor) {
@@ -5609,7 +5638,7 @@ std::vector<HWND> ArrangeCandidates(HMONITOR monitor) {
     std::vector<HWND> windows;
     for (HWND hwnd : g_activationHistory.OrderedWindows()) {
         if (!IsWindow(hwnd) || IsOwnProcessWindow(hwnd) || !polish::IsCandidateWindow(hwnd) ||
-            IsIconic(hwnd) || polish::IsElevatedWindow(hwnd)) {
+            IsIconic(hwnd) || polish::IsElevatedWindow(hwnd) || g_scaledSet.Contains(hwnd)) {
             continue;
         }
         if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != monitor) {
@@ -5966,7 +5995,14 @@ std::wstring FormatHotkey(UINT modifiers, UINT virtualKey) {
     if (modifiers & MOD_CONTROL) text += L"Ctrl+";
     if (modifiers & MOD_ALT) text += L"Alt+";
     if (modifiers & MOD_SHIFT) text += L"Shift+";
-    text += static_cast<wchar_t>(virtualKey);
+    // The zoom keys are not their own ASCII: 0xBD is VK_OEM_MINUS.
+    if (virtualKey == VK_OEM_MINUS) {
+        text += L"-";
+    } else if (virtualKey == VK_OEM_PLUS) {
+        text += L"=";
+    } else {
+        text += static_cast<wchar_t>(virtualKey);
+    }
     return text;
 }
 
@@ -6003,6 +6039,485 @@ void RegisterArrangeHotkeysFromSettings() {
         g_settings.arrangeThreeWayHotkeyVirtualKey, L"tile 3-way");
     reg(kArrangeFourWayHotkeyId, g_settings.arrangeFourWayHotkeyModifiers,
         g_settings.arrangeFourWayHotkeyVirtualKey, L"tile 4-way");
+}
+
+// ===================== Scaled windows =====================
+//
+// Shrink a window to a live thumbnail and click it to get it back at 1:1.
+// The real window is parked (hook/WindowParking.h: invisible, click-
+// through, still painting) and a ScaledViewWindow shows it through a DWM
+// thumbnail. The real window keeps its taskbar button and its place in
+// Alt+Tab, and activating it by any route restores it -- a parked window
+// must never hold the keyboard focus, or the user types into nothing.
+//
+// The geometry is windowtracking/ScaleGeometry.h and the bookkeeping is
+// ScaledWindowSet, both pure and tested; this is the part that touches
+// windows.
+
+constexpr int kScaleDownHotkeyId = 5;
+constexpr int kScaleUpHotkeyId = 6;
+constexpr int kScaleResetHotkeyId = 7;
+
+// Re-checks that parked windows are still parked: apps do reset their own
+// styles now and then, and a window that stopped being a ghost would be
+// sitting visibly over its own thumbnail.
+constexpr UINT_PTR kScaleWatchdogTimerId = 16;
+constexpr UINT kScaleWatchdogMs = 2000;
+// Re-fits a window just restored from a view: the app may resize itself
+// when its DPI changes under it, and the first placement was asynchronous.
+constexpr UINT_PTR kScaleSettleTimerId = 17;
+constexpr UINT kScaleSettleMs = 250;
+std::vector<HWND> g_scaleSettlePending;
+
+// Topmost, so nothing can ever be in front of the ghost: the property
+// Chromium's occlusion tracking would otherwise react to.
+constexpr polish::ParkStrategy kParkStrategy = polish::ParkStrategy::GhostTopmost;
+
+constexpr UINT kMenuIdScaleEnabled = 16;
+constexpr UINT kMenuIdScaleDown = 17;
+constexpr UINT kMenuIdScaleRestoreAll = 18;
+
+void RegisterScaleHotkeysFromSettings() {
+    UnregisterHotKey(g_messageWindow, kScaleDownHotkeyId);
+    UnregisterHotKey(g_messageWindow, kScaleUpHotkeyId);
+    UnregisterHotKey(g_messageWindow, kScaleResetHotkeyId);
+    if (!g_settings.scaleEnabled) {
+        return;
+    }
+    const auto reg = [](int id, UINT modifiers, UINT vk, const wchar_t* what) {
+        if (RegisterHotKey(g_messageWindow, id, modifiers | MOD_NOREPEAT, vk) == FALSE) {
+            polish::LogDebug(std::format(
+                L"[Polish] WARNING: failed to register the {} hotkey for {} (already claimed on this PC?). "
+                L"GetLastError={}. Change it under HKCU\\Software\\Polish.",
+                FormatHotkey(modifiers, vk), what, GetLastError()));
+        } else {
+            polish::LogDebug(
+                std::format(L"[Polish] {} ({}) hotkey registered", FormatHotkey(modifiers, vk), what));
+        }
+    };
+    reg(kScaleDownHotkeyId, g_settings.scaleDownHotkeyModifiers, g_settings.scaleDownHotkeyVirtualKey,
+        L"scale down");
+    reg(kScaleUpHotkeyId, g_settings.scaleUpHotkeyModifiers, g_settings.scaleUpHotkeyVirtualKey, L"scale up");
+    reg(kScaleResetHotkeyId, g_settings.scaleResetHotkeyModifiers, g_settings.scaleResetHotkeyVirtualKey,
+        L"restore to 1:1");
+}
+
+bool IsWindowScaled(HWND hwnd) {
+    return g_scaledSet.Contains(hwnd);
+}
+
+RECT WorkAreaNear(const RECT& rect) {
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &info)) {
+        return info.rcWork;
+    }
+    return {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+}
+
+// Whether the user could mean this window by a scale command. Mirrors what
+// tiling and move mode will act on, plus: not a stack member (its place is
+// the stack's to decide), not already scaled.
+// Why not, as a short reason for the log -- or null when it can.
+const wchar_t* ScaleBlockReason(HWND hwnd) {
+    if (hwnd == nullptr || !IsWindow(hwnd)) return L"no window";
+    if (IsOwnProcessWindow(hwnd)) return L"own process";
+    if (!polish::IsCandidateWindow(hwnd)) return L"not a candidate window";
+    if (polish::IsElevatedWindow(hwnd)) return L"elevated";
+    if (IsIconic(hwnd)) return L"minimized";
+    if (g_scaledSet.Contains(hwnd)) return L"already scaled";
+    if (g_stackManager.FindStackContaining(hwnd) != nullptr) return L"in a stack";
+    return nullptr;
+}
+
+bool CanScaleWindow(HWND hwnd) {
+    return ScaleBlockReason(hwnd) == nullptr;
+}
+
+void UpdateScaleWatchdog() {
+    if (g_scaledSet.Empty()) {
+        KillTimer(g_messageWindow, kScaleWatchdogTimerId);
+    } else {
+        SetTimer(g_messageWindow, kScaleWatchdogTimerId, kScaleWatchdogMs, nullptr);
+    }
+}
+
+bool UnscaleWindow(HWND hwnd, bool activate);
+
+// Moves the view and keeps the set and the window in step. Clamped to a
+// work area so a view dragged half off the screen cannot get lost.
+void SetScaledViewRect(HWND hwnd, const RECT& wanted) {
+    auto it = g_scaledViews.find(hwnd);
+    if (it == g_scaledViews.end()) {
+        return;
+    }
+    const RECT rect = polish::ClampViewToWorkArea(wanted, WorkAreaNear(wanted));
+    g_scaledSet.SetViewRect(hwnd, rect);
+    it->second->SetRect(rect);
+}
+
+void RescaleView(HWND hwnd, double scale) {
+    auto it = g_scaledViews.find(hwnd);
+    if (it == g_scaledViews.end() || !g_scaledSet.Rescale(hwnd, scale)) {
+        return;
+    }
+    const polish::ScaledEntry* entry = g_scaledSet.Find(hwnd);
+    SetScaledViewRect(hwnd, entry->viewRect);
+}
+
+// Shrinks `hwnd` to `scale`. With no `topLeft`, the view goes where it was
+// last time, or at the window's own top-left the first time -- the window
+// shrinks toward its corner, which is the least surprising place.
+bool ScaleWindow(HWND hwnd, double scale, std::optional<POINT> topLeft = std::nullopt) {
+    if (!g_settings.scaleEnabled || !CanScaleWindow(hwnd)) {
+        return false;
+    }
+    RECT visible{};
+    if (!polish::GetVisibleWindowRect(hwnd, visible)) {
+        return false;
+    }
+    const SIZE real{visible.right - visible.left, visible.bottom - visible.top};
+    if (real.cx <= 0 || real.cy <= 0) {
+        return false;
+    }
+    scale = std::clamp(scale, polish::kMinScale, polish::kMaxScale);
+    if (scale >= polish::kMaxScale) {
+        return false;  // 1:1 is not a scaled window
+    }
+
+    POINT origin{visible.left, visible.top};
+    if (topLeft.has_value()) {
+        origin = *topLeft;
+    } else if (const auto remembered = g_scaledSet.Remembered(hwnd)) {
+        origin = {remembered->viewRect.left, remembered->viewRect.top};
+    }
+    RECT view = polish::ScaledViewRect(real, scale, origin);
+    view = polish::ClampViewToWorkArea(view, WorkAreaNear(view));
+
+    const std::optional<polish::ParkRecord> park = polish::ParkWindow(hwnd, kParkStrategy);
+    if (!park.has_value()) {
+        return false;
+    }
+
+    polish::ScaledEntry entry;
+    entry.hwnd = hwnd;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    entry.pid = pid;
+    // The requested scale, not one read back from the rounded rect.
+    entry.scale = scale;
+    entry.viewRect = view;
+    entry.realSize = real;
+    entry.wasMaximized = IsZoomed(hwnd) != FALSE;
+    entry.park = *park;
+    g_scaledSet.Scale(entry);
+
+    polish::ScaledViewWindow::Callbacks callbacks;
+    callbacks.onRestore = [hwnd]() {
+        PostMessageW(g_messageWindow, kScaledRestoreMessage, reinterpret_cast<WPARAM>(hwnd), 0);
+    };
+    callbacks.onViewChanged = [hwnd](const RECT& rect) { SetScaledViewRect(hwnd, rect); };
+    callbacks.onSetScale = [hwnd](double s) { RescaleView(hwnd, s); };
+    callbacks.onClose = [hwnd]() { PostMessageW(hwnd, WM_CLOSE, 0, 0); };
+    callbacks.onTopmostChanged = [](bool topmost) {
+        g_settings.scaledViewTopmost = topmost;
+        polish::SaveSettings(g_settings);
+        for (auto& [window, viewWindow] : g_scaledViews) {
+            viewWindow->SetTopmost(topmost);
+        }
+    };
+    auto viewWindow = std::make_unique<polish::ScaledViewWindow>(GetModuleHandleW(nullptr), hwnd, real, view,
+                                                                  g_settings.scaledViewTopmost, std::move(callbacks));
+    if (!viewWindow->IsValid()) {
+        polish::LogDebug(L"[Polish] Scale: could not register a thumbnail; putting the window back");
+        g_scaledSet.Unscale(hwnd);
+        polish::UnparkWindow(hwnd, *park);
+        return false;
+    }
+    viewWindow->Show();
+    g_scaledViews[hwnd] = std::move(viewWindow);
+
+    // Focus stays with the window. It is invisible but its thumbnail is
+    // live, so typing into it (a terminal being watched) is meaningful, and
+    // repeated scale commands keep acting on the window just scaled. What
+    // does not make sense is a halo around the ghost.
+    UpdateActiveWindowHalo(hwnd);
+    UpdateScaleWatchdog();
+    wchar_t title[128] = L"";
+    GetWindowTextW(hwnd, title, 128);
+    polish::LogDebug(std::format(L"[Polish] Scale: \"{}\" -> {}%", title, static_cast<int>(scale * 100.0 + 0.5)));
+    return true;
+}
+
+// Puts a scaled window back at 1:1, growing out of where its view was.
+bool UnscaleWindow(HWND hwnd, bool activate) {
+    const std::optional<polish::ScaledEntry> entry = g_scaledSet.Unscale(hwnd);
+    if (!entry.has_value()) {
+        return false;
+    }
+    RECT viewRect = entry->viewRect;
+    if (auto it = g_scaledViews.find(hwnd); it != g_scaledViews.end()) {
+        viewRect = it->second->Rect();
+        g_scaledViews.erase(it);  // destroys the view and its thumbnail
+    }
+    polish::UnparkWindow(hwnd, entry->park);
+    UpdateScaleWatchdog();
+
+    if (IsWindow(hwnd) && !IsIconic(hwnd)) {
+        const RECT work = WorkAreaNear(viewRect);
+        const HMONITOR viewMonitor = MonitorFromRect(&viewRect, MONITOR_DEFAULTTONEAREST);
+        if (entry->wasMaximized) {
+            // Maximized stays maximized, on whichever monitor the view
+            // was left on.
+            if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != viewMonitor) {
+                ShowWindow(hwnd, SW_RESTORE);
+                SetWindowPos(hwnd, nullptr, work.left + 40, work.top + 40, (work.right - work.left) * 3 / 4,
+                             (work.bottom - work.top) * 3 / 4, SWP_NOACTIVATE | SWP_NOZORDER);
+                ShowWindow(hwnd, SW_MAXIMIZE);
+            }
+        } else {
+            polish::PlaceWindowVisible(
+                hwnd, polish::UnscaledRectAt(entry->realSize, {viewRect.left, viewRect.top}, work));
+            g_scaleSettlePending.push_back(hwnd);
+            SetTimer(g_messageWindow, kScaleSettleTimerId, kScaleSettleMs, nullptr);
+        }
+        if (activate) {
+            ActivateWindowFromTaskbar(hwnd);
+        }
+    }
+    polish::LogDebug(std::format(L"[Polish] Scale: restored {}", reinterpret_cast<void*>(hwnd)));
+    return true;
+}
+
+void UnscaleAll() {
+    std::vector<HWND> all;
+    for (const polish::ScaledEntry& entry : g_scaledSet.Entries()) {
+        all.push_back(entry.hwnd);
+    }
+    for (HWND hwnd : all) {
+        UnscaleWindow(hwnd, /*activate=*/false);
+    }
+}
+
+void OnScaledWindowForeground(HWND hwnd) {
+    if (hwnd != nullptr && g_scaledSet.Contains(hwnd)) {
+        // Already becoming foreground; no activation needed.
+        UnscaleWindow(hwnd, /*activate=*/false);
+    }
+}
+
+void OnScaledWindowDestroyed(HWND hwnd) {
+    if (!g_scaledSet.Contains(hwnd)) {
+        return;
+    }
+    g_scaledViews.erase(hwnd);
+    // The window is gone, so there is nothing to put back; the journal
+    // entry is dropped with it.
+    if (const polish::ScaledEntry* entry = g_scaledSet.Find(hwnd)) {
+        polish::UnparkWindow(hwnd, entry->park);
+    }
+    g_scaledSet.OnRealDestroyed(hwnd);
+    UpdateScaleWatchdog();
+}
+
+void OnScaledWindowLocationChanged(HWND hwnd) {
+    const polish::ScaledEntry* entry = g_scaledSet.Find(hwnd);
+    if (entry == nullptr) {
+        return;
+    }
+    RECT visible{};
+    if (!polish::GetVisibleWindowRect(hwnd, visible)) {
+        return;
+    }
+    const SIZE size{visible.right - visible.left, visible.bottom - visible.top};
+    if (std::abs(size.cx - entry->realSize.cx) <= 1 && std::abs(size.cy - entry->realSize.cy) <= 1) {
+        return;
+    }
+    if (g_scaledSet.OnRealResized(hwnd, size)) {
+        if (auto it = g_scaledViews.find(hwnd); it != g_scaledViews.end()) {
+            it->second->SetRealSize(size);
+            SetScaledViewRect(hwnd, g_scaledSet.Find(hwnd)->viewRect);
+        }
+    }
+}
+
+void OnScaledWindowMinimizeChanged(HWND hwnd, bool minimized) {
+    if (!g_scaledSet.Contains(hwnd)) {
+        return;
+    }
+    g_scaledSet.SetMinimized(hwnd, minimized);
+    if (auto it = g_scaledViews.find(hwnd); it != g_scaledViews.end()) {
+        if (minimized) {
+            it->second->Hide();
+        } else {
+            it->second->Show();
+        }
+    }
+}
+
+// The scaled window whose view is under the cursor, if any -- the "act on
+// what you point at" rule the Alt+Tab panel already follows.
+HWND ScaledWindowUnderCursor() {
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) {
+        return nullptr;
+    }
+    for (const auto& [hwnd, view] : g_scaledViews) {
+        if (view->Visible() && PtInRect(&view->Rect(), cursor)) {
+            return hwnd;
+        }
+    }
+    return nullptr;
+}
+
+// The scaled window a keyboard scale command means: the view under the
+// cursor, else the scaled window that still has the keyboard focus -- which
+// is the one just scaled, so pressing the key again keeps going on it.
+HWND ScaledCommandTarget() {
+    if (const HWND underCursor = ScaledWindowUnderCursor()) {
+        return underCursor;
+    }
+    const HWND foreground = GetForegroundWindow();
+    if (foreground != nullptr && g_scaledSet.Contains(foreground)) {
+        return foreground;
+    }
+    return nullptr;
+}
+
+// The window a scale-down means when no scaled one is the target: the one
+// in front, else the most recently used real one.
+HWND ScaleTargetWindow() {
+    const HWND foreground = GetForegroundWindow();
+    if (CanScaleWindow(foreground)) {
+        return foreground;
+    }
+    for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+        if (CanScaleWindow(hwnd)) {
+            return hwnd;
+        }
+    }
+    return nullptr;
+}
+
+double DefaultScale() {
+    return static_cast<double>(g_settings.scaleDefaultPercent) / 100.0;
+}
+
+// Ctrl+Alt+-: smaller. Over a view, steps that view down the presets;
+// otherwise scales the window in front to where its view last was.
+void ScaleDownCommand() {
+    if (!g_settings.scaleEnabled) {
+        return;
+    }
+    if (const HWND scaled = ScaledCommandTarget()) {
+        const polish::ScaledEntry* entry = g_scaledSet.Find(scaled);
+        if (const auto next = polish::StepScale(entry->scale, -1)) {
+            RescaleView(scaled, *next);
+        }
+        return;
+    }
+    if (const HWND target = ScaleTargetWindow()) {
+        double scale = DefaultScale();
+        if (const auto remembered = g_scaledSet.Remembered(target)) {
+            scale = remembered->scale;
+        }
+        const bool ok = ScaleWindow(target, scale);
+        polish::LogDebug(std::format(L"[Polish] Scale: down on {} -> {}", reinterpret_cast<void*>(target),
+                                      ok ? L"scaled" : L"refused"));
+    } else {
+        const HWND foreground = GetForegroundWindow();
+        wchar_t cls[64] = L"";
+        if (foreground != nullptr) {
+            GetClassNameW(foreground, cls, 64);
+        }
+        const wchar_t* reason = ScaleBlockReason(foreground);
+        polish::LogDebug(std::format(L"[Polish] Scale: down found no target; foreground={} class={} reason={}",
+                                      reinterpret_cast<void*>(foreground), cls, reason != nullptr ? reason : L"ok"));
+    }
+}
+
+// Ctrl+Alt+=: bigger, and past the largest preset means back to 1:1.
+void ScaleUpCommand() {
+    if (!g_settings.scaleEnabled) {
+        return;
+    }
+    HWND scaled = ScaledCommandTarget();
+    if (scaled == nullptr) {
+        scaled = g_scaledSet.MostRecent();
+    }
+    if (scaled == nullptr) {
+        return;
+    }
+    const polish::ScaledEntry* entry = g_scaledSet.Find(scaled);
+    if (const auto next = polish::StepScale(entry->scale, +1)) {
+        RescaleView(scaled, *next);
+    } else {
+        UnscaleWindow(scaled, /*activate=*/true);
+    }
+}
+
+// Ctrl+Alt+0: straight back to 1:1.
+void ScaleResetCommand() {
+    if (!g_settings.scaleEnabled) {
+        return;
+    }
+    HWND scaled = ScaledCommandTarget();
+    if (scaled == nullptr) {
+        scaled = g_scaledSet.MostRecent();
+    }
+    if (scaled != nullptr) {
+        UnscaleWindow(scaled, /*activate=*/true);
+    }
+}
+
+// Every 2 s while anything is scaled: drop entries whose window vanished
+// without an event, and re-park any window whose app undid the styles.
+void ScaleWatchdogTick() {
+    std::vector<HWND> gone;
+    for (const polish::ScaledEntry& entry : g_scaledSet.Entries()) {
+        if (!IsWindow(entry.hwnd)) {
+            gone.push_back(entry.hwnd);
+        } else if (!polish::IsStillParked(entry.hwnd, kParkStrategy)) {
+            polish::LogDebug(std::format(L"[Polish] Scale: {} was un-parked by its app; re-parking",
+                                          reinterpret_cast<void*>(entry.hwnd)));
+            polish::ReapplyPark(entry.hwnd, kParkStrategy);
+        }
+    }
+    for (HWND hwnd : gone) {
+        OnScaledWindowDestroyed(hwnd);
+    }
+}
+
+void ScaleSettleTick() {
+    KillTimer(g_messageWindow, kScaleSettleTimerId);
+    std::vector<HWND> pending;
+    pending.swap(g_scaleSettlePending);
+    for (HWND hwnd : pending) {
+        if (!IsWindow(hwnd) || IsIconic(hwnd) || IsZoomed(hwnd) || g_scaledSet.Contains(hwnd)) {
+            continue;
+        }
+        RECT visible{};
+        if (!polish::GetVisibleWindowRect(hwnd, visible)) {
+            continue;
+        }
+        const RECT fitted = polish::ClampViewToWorkArea(visible, WorkAreaNear(visible));
+        if (!polish::RectsApproximatelyEqual(visible, fitted)) {
+            polish::PlaceWindowVisible(hwnd, fitted);
+        }
+    }
+}
+
+// A monitor came or went: pull every view back onto a screen.
+void ClampScaledViewsToScreens() {
+    std::vector<HWND> all;
+    for (const polish::ScaledEntry& entry : g_scaledSet.Entries()) {
+        all.push_back(entry.hwnd);
+    }
+    for (HWND hwnd : all) {
+        if (const polish::ScaledEntry* entry = g_scaledSet.Find(hwnd)) {
+            SetScaledViewRect(hwnd, entry->viewRect);
+        }
+    }
 }
 
 void ChangeStackHotkey() {
@@ -7037,6 +7552,30 @@ void PopulateTrayMenu(HMENU menu) {
                           g_settings.arrangeFourWayHotkeyVirtualKey, arrangeCandidateCount,
                           misfitFor(polish::ArrangeKind::FourWay));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    // Scaled windows sit with the other layout commands. The two commands
+    // act on the most recently used window, for the same reason move/
+    // resize does: opening this menu has already taken the foreground.
+    AppendMenuW(menu, MF_STRING | (g_settings.scaleEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdScaleEnabled,
+                L"Scaled windows (live thumbnail)");
+    {
+        HWND scaleTarget = nullptr;
+        for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+            if (CanScaleWindow(hwnd)) {
+                scaleTarget = hwnd;
+                break;
+            }
+        }
+        const std::wstring downLabel =
+            L"Scale down\t" + FormatHotkey(g_settings.scaleDownHotkeyModifiers, g_settings.scaleDownHotkeyVirtualKey);
+        AppendMenuW(menu, MF_STRING | (g_settings.scaleEnabled && scaleTarget != nullptr ? MF_ENABLED : MF_GRAYED),
+                    kMenuIdScaleDown, downLabel.c_str());
+        const std::wstring resetLabel =
+            L"Restore scaled windows\t" +
+            FormatHotkey(g_settings.scaleResetHotkeyModifiers, g_settings.scaleResetHotkeyVirtualKey);
+        AppendMenuW(menu, MF_STRING | (g_scaledSet.Empty() ? MF_GRAYED : MF_ENABLED), kMenuIdScaleRestoreAll,
+                    resetLabel.c_str());
+    }
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuIdNewStack,
                 (L"New Stack...\t" + FormatHotkey(g_settings.stackHotkeyModifiers, g_settings.stackHotkeyVirtualKey))
                     .c_str());
@@ -7133,6 +7672,35 @@ void HandleTrayCommand(UINT commandId) {
         case kMenuIdArrangeFourWay:
             ArrangeWindows(polish::ArrangeKind::FourWay);
             break;
+        case kMenuIdScaleEnabled:
+            g_settings.scaleEnabled = !g_settings.scaleEnabled;
+            polish::SaveSettings(g_settings);
+            polish::LogDebug(
+                std::format(L"[Polish] Scaled windows {}", g_settings.scaleEnabled ? L"enabled" : L"disabled"));
+            if (!g_settings.scaleEnabled) {
+                // Never leave a window hidden behind a switched-off feature.
+                UnscaleAll();
+            }
+            RegisterScaleHotkeysFromSettings();
+            break;
+        case kMenuIdScaleDown: {
+            // The most recently used window: the foreground is Polish's own
+            // message window by now (see ArrangeTargetMonitor).
+            for (HWND hwnd : g_activationHistory.OrderedWindows()) {
+                if (CanScaleWindow(hwnd)) {
+                    double scale = DefaultScale();
+                    if (const auto remembered = g_scaledSet.Remembered(hwnd)) {
+                        scale = remembered->scale;
+                    }
+                    ScaleWindow(hwnd, scale);
+                    break;
+                }
+            }
+            break;
+        }
+        case kMenuIdScaleRestoreAll:
+            UnscaleAll();
+            break;
         case kMenuIdNewStack:
             TriggerNewStack(nullptr);
             break;
@@ -7195,6 +7763,10 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                     }
                 }
                 g_arrangeSyncPending.clear();
+            } else if (wParam == kScaleWatchdogTimerId) {
+                ScaleWatchdogTick();
+            } else if (wParam == kScaleSettleTimerId) {
+                ScaleSettleTick();
             } else if (wParam == kMoveModeDimTimerId) {
                 OnMoveModeDimTimer();
             } else if (wParam == kHaloRenderTimerId) {
@@ -7351,6 +7923,27 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 ArrangeWindows(polish::ArrangeKind::ThreeWay);
             } else if (wParam == kArrangeFourWayHotkeyId) {
                 ArrangeWindows(polish::ArrangeKind::FourWay);
+            } else if (wParam == kScaleDownHotkeyId) {
+                polish::LogDebug(L"[Polish] Scale: hotkey down");
+                ScaleDownCommand();
+            } else if (wParam == kScaleUpHotkeyId) {
+                polish::LogDebug(L"[Polish] Scale: hotkey up");
+                ScaleUpCommand();
+            } else if (wParam == kScaleResetHotkeyId) {
+                polish::LogDebug(L"[Polish] Scale: hotkey reset");
+                ScaleResetCommand();
+            }
+            return 0;
+
+        case kScaledRestoreMessage:
+            UnscaleWindow(reinterpret_cast<HWND>(wParam), /*activate=*/true);
+            return 0;
+
+        case WM_ENDSESSION:
+            // Logging off or shutting down with windows parked: put them
+            // back now, there may be no next start to replay the journal.
+            if (wParam != 0) {
+                UnscaleAll();
             }
             return 0;
 
@@ -7360,6 +7953,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             // new reality. See RefreshAltTabPanels' own comment for the
             // real, human-reported bug this fixes.
             RefreshAltTabPanels();
+            ClampScaledViewsToScreens();
             // Monitor topology changing can change which monitor the
             // halo's own target is on (and therefore its DPI and flush-
             // edge inflation) without any LOCATIONCHANGE for the target
@@ -7427,6 +8021,13 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         }
 
         case WM_DESTROY:
+            // First: nothing may be left parked when the process goes.
+            UnscaleAll();
+            KillTimer(hwnd, kScaleWatchdogTimerId);
+            KillTimer(hwnd, kScaleSettleTimerId);
+            UnregisterHotKey(hwnd, kScaleDownHotkeyId);
+            UnregisterHotKey(hwnd, kScaleUpHotkeyId);
+            UnregisterHotKey(hwnd, kScaleResetHotkeyId);
             RemoveClipboardFormatListener(hwnd);
             KillTimer(hwnd, kBullseyeFrameTimerId);
             KillTimer(hwnd, kMoveModeDimTimerId);
@@ -7553,6 +8154,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                                       static_cast<unsigned long>(comInitResult)));
     }
 
+    // Before anything can park a window: a previous run that was killed
+    // may have left some invisible, and putting them back is the first
+    // thing a new run owes the user.
+    polish::RestoreParkedFromJournal();
+    polish::InstallParkingCrashHandler();
+
     g_settings = polish::LoadSettings();
     polish::LogDebug(std::format(
         L"[Polish] settings loaded: restoreSyncEnabled={} altTabEnabled={} haloEnabled={} bullseyeEnabled={} "
@@ -7606,6 +8213,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         std::format(L"Polish {}\nAdd fit and finish to Windows", polish::BuildStamp()));
 
     RegisterArrangeHotkeysFromSettings();
+    RegisterScaleHotkeysFromSettings();
 
     if (!RegisterStackHotkeyFromSettings()) {
         polish::LogDebug(std::format(

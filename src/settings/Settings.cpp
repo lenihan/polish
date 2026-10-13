@@ -48,6 +48,18 @@ Settings LoadSettings() {
         settings.arrangeFourWayHotkeyModifiers =
             ReadDword(key, L"ArrangeFourWayHotkeyModifiers", MOD_CONTROL | MOD_ALT);
         settings.arrangeFourWayHotkeyVirtualKey = ReadDword(key, L"ArrangeFourWayHotkeyVirtualKey", '4');
+        settings.scaleEnabled = ReadDword(key, L"ScaleEnabled", 1) != 0;
+        settings.scaleDefaultPercent = ReadDword(key, L"ScaleDefaultPercent", 50);
+        if (settings.scaleDefaultPercent < 10 || settings.scaleDefaultPercent > 90) {
+            settings.scaleDefaultPercent = 50;
+        }
+        settings.scaledViewTopmost = ReadDword(key, L"ScaledViewTopmost", 1) != 0;
+        settings.scaleDownHotkeyModifiers = ReadDword(key, L"ScaleDownHotkeyModifiers", MOD_CONTROL | MOD_ALT);
+        settings.scaleDownHotkeyVirtualKey = ReadDword(key, L"ScaleDownHotkeyVirtualKey", 0xBD);
+        settings.scaleUpHotkeyModifiers = ReadDword(key, L"ScaleUpHotkeyModifiers", MOD_CONTROL | MOD_ALT);
+        settings.scaleUpHotkeyVirtualKey = ReadDword(key, L"ScaleUpHotkeyVirtualKey", 0xBB);
+        settings.scaleResetHotkeyModifiers = ReadDword(key, L"ScaleResetHotkeyModifiers", MOD_CONTROL | MOD_ALT);
+        settings.scaleResetHotkeyVirtualKey = ReadDword(key, L"ScaleResetHotkeyVirtualKey", '0');
         // The stack hotkey used to be the group hotkey, stored under the old
         // names. Read those as the default, so a combination the user chose
         // before the rename survives it; the new names win once saved.
@@ -91,6 +103,15 @@ void SaveSettings(const Settings& settings) {
     WriteDword(key, L"ArrangeThreeWayHotkeyVirtualKey", settings.arrangeThreeWayHotkeyVirtualKey);
     WriteDword(key, L"ArrangeFourWayHotkeyModifiers", settings.arrangeFourWayHotkeyModifiers);
     WriteDword(key, L"ArrangeFourWayHotkeyVirtualKey", settings.arrangeFourWayHotkeyVirtualKey);
+    WriteDword(key, L"ScaleEnabled", settings.scaleEnabled ? 1 : 0);
+    WriteDword(key, L"ScaleDefaultPercent", settings.scaleDefaultPercent);
+    WriteDword(key, L"ScaledViewTopmost", settings.scaledViewTopmost ? 1 : 0);
+    WriteDword(key, L"ScaleDownHotkeyModifiers", settings.scaleDownHotkeyModifiers);
+    WriteDword(key, L"ScaleDownHotkeyVirtualKey", settings.scaleDownHotkeyVirtualKey);
+    WriteDword(key, L"ScaleUpHotkeyModifiers", settings.scaleUpHotkeyModifiers);
+    WriteDword(key, L"ScaleUpHotkeyVirtualKey", settings.scaleUpHotkeyVirtualKey);
+    WriteDword(key, L"ScaleResetHotkeyModifiers", settings.scaleResetHotkeyModifiers);
+    WriteDword(key, L"ScaleResetHotkeyVirtualKey", settings.scaleResetHotkeyVirtualKey);
     WriteDword(key, L"StackHotkeyModifiers", settings.stackHotkeyModifiers);
     WriteDword(key, L"StackHotkeyVirtualKey", settings.stackHotkeyVirtualKey);
     RegCloseKey(key);

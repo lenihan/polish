@@ -60,6 +60,11 @@ RECT UnscaledRectAt(SIZE real, POINT viewTopLeft, const RECT& work);
 // to the top-left, like UnscaledRectAt.
 RECT ClampViewToWorkArea(const RECT& view, const RECT& work);
 
+// A view of `real` at exactly `scale`, with the corner opposite `grabbed`
+// held where it is in `start`. What a drag settles on after its scale has
+// been snapped to a preset.
+RECT RectAtScaleKeepingCorner(const RECT& start, Corner grabbed, double scale, SIZE real);
+
 // Dragging `grabbed` of a view: the opposite corner stays fixed and the
 // grabbed one follows the pointer, with the aspect ratio of `real` locked.
 //

@@ -143,6 +143,19 @@ TEST_CASE("CornerDragAspectLocked: clamped to the min and max scale") {
     CHECK(huge.bottom - huge.top == kReal.cy);
 }
 
+TEST_CASE("RectAtScaleKeepingCorner: the corner opposite the grabbed one does not move") {
+    const RECT start = ScaledViewRect(kReal, 0.25, {500, 400});  // 500..800, 400..600
+
+    const RECT fromBottomRight = RectAtScaleKeepingCorner(start, Corner::BottomRight, 0.5, kReal);
+    CHECK(Same(fromBottomRight, {500, 400, 1100, 800}));
+
+    const RECT fromTopLeft = RectAtScaleKeepingCorner(start, Corner::TopLeft, 0.5, kReal);
+    CHECK(Same(fromTopLeft, {200, 200, 800, 600}));
+
+    const RECT fromTopRight = RectAtScaleKeepingCorner(start, Corner::TopRight, 0.5, kReal);
+    CHECK(Same(fromTopRight, {500, 200, 1100, 600}));
+}
+
 TEST_CASE("SnapScale: lands on a preset within tolerance, otherwise leaves it alone") {
     CHECK(SnapScale(0.51) == doctest::Approx(0.5));
     CHECK(SnapScale(0.32) == doctest::Approx(0.33));
@@ -166,6 +179,18 @@ TEST_CASE("StepScale: walks the presets up, and past the largest means restore")
     CHECK(*StepScale(0.33, +1) == doctest::Approx(0.5));
     CHECK_FALSE(StepScale(0.5, +1).has_value());
     CHECK_FALSE(StepScale(1.0, +1).has_value());
+}
+
+TEST_CASE("StepScale: a scale read back from a rounded rect steps like its preset") {
+    // 50% of a 1445 px wide window is 723 px, which reads back as 0.5003.
+    const double readBack = ScaleOf({0, 0, 723, 450}, {1445, 900});
+    REQUIRE(readBack > 0.5);
+    CHECK(*StepScale(readBack, -1) == doctest::Approx(0.33));
+    CHECK_FALSE(StepScale(readBack, +1).has_value());
+
+    // And from just below a preset, going up.
+    CHECK(*StepScale(0.3294, +1) == doctest::Approx(0.5));
+    CHECK(*StepScale(0.3294, -1) == doctest::Approx(0.25));
 }
 
 TEST_CASE("StepScale: an arbitrary dragged scale steps to the nearest preset in that direction") {

@@ -62,10 +62,24 @@ RECT ClampViewToWorkArea(const RECT& view, const RECT& work) {
     return ShiftInto(view, work);
 }
 
+RECT RectAtScaleKeepingCorner(const RECT& start, Corner grabbed, double scale, SIZE real) {
+    const bool growsLeft = grabbed == Corner::TopLeft || grabbed == Corner::BottomLeft;
+    const bool growsUp = grabbed == Corner::TopLeft || grabbed == Corner::TopRight;
+    const LONG anchorX = growsLeft ? start.right : start.left;
+    const LONG anchorY = growsUp ? start.bottom : start.top;
+    const SIZE size = ScaledSize(real, scale);
+    RECT result;
+    result.left = growsLeft ? anchorX - size.cx : anchorX;
+    result.right = result.left + size.cx;
+    result.top = growsUp ? anchorY - size.cy : anchorY;
+    result.bottom = result.top + size.cy;
+    return result;
+}
+
 RECT CornerDragAspectLocked(const RECT& start, Corner grabbed, POINT pointer, SIZE real, double minScale,
                             double maxScale) {
     // The corner that does not move, and which way the view extends from
-    // it: +1 grows right/down from the anchor, -1 left/up.
+    // it: the view grows left/up when the grabbed corner is a left/top one.
     const bool growsLeft = grabbed == Corner::TopLeft || grabbed == Corner::BottomLeft;
     const bool growsUp = grabbed == Corner::TopLeft || grabbed == Corner::TopRight;
     const LONG anchorX = growsLeft ? start.right : start.left;
@@ -83,14 +97,7 @@ RECT CornerDragAspectLocked(const RECT& start, Corner grabbed, POINT pointer, SI
         scale = std::max(fromX, fromY);
     }
     scale = std::clamp(scale, minScale, maxScale);
-
-    const SIZE size = ScaledSize(real, scale);
-    RECT result;
-    result.left = growsLeft ? anchorX - size.cx : anchorX;
-    result.right = result.left + size.cx;
-    result.top = growsUp ? anchorY - size.cy : anchorY;
-    result.bottom = result.top + size.cy;
-    return result;
+    return RectAtScaleKeepingCorner(start, grabbed, scale, real);
 }
 
 double SnapScale(double scale, double tolerance) {
@@ -110,6 +117,11 @@ double SnapScale(double scale, double tolerance) {
 }
 
 std::optional<double> StepScale(double current, int direction) {
+    // A scale read back from a rounded rect is a hair off its preset: 50%
+    // of 1445 px is 723 px, which reads back as 0.5003 -- above the preset,
+    // so "the next one down" would be 0.5 again and the step would do
+    // nothing. Anything within a pixel's worth of a preset is that preset.
+    current = SnapScale(current, 0.01);
     if (direction == 0) {
         return current;
     }
