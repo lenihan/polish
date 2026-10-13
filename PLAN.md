@@ -1296,6 +1296,7 @@ Shrink a window to a live thumbnail; click it to get it back at 1:1.
 
 ## Left to do
 
+- Bullseye should use accent color
 - Add support for "frozen windows"...they are still listed in taskbar (Under Frozen), but they take
   zero resources. If you click on a frozen window it gets loaded. This lets a user jump back and forth
   between various apps (like vs code) quickly without needing to figure out how to get app/document loaded.
