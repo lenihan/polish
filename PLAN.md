@@ -1250,6 +1250,10 @@ requestAnimationFrame counter. 12 s per run, scale 0.33, uncovered:
 
 ## Left to do
 
+- Add support for "frozen windows"...they are still listed in taskbar (Under Frozen), but they take
+  zero resources. If you click on a frozen window it gets loaded. This lets a user jump back and forth
+  between various apps (like vs code) quickly without needing to figure out how to get app/document loaded.
+  There should be a frozen option for all non-frozen states. Frozen should have a thaw button.
 - Virtual desktop gets a taskbar button. Can we do something similar to handle
   moving, resizing, scaling, layout of windows?
 - Support individual scaling so you can resize a window and it looks like a thumbnail
