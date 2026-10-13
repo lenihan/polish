@@ -4,9 +4,6 @@
 #include <string>
 #include <utility>
 
-#include <uxtheme.h>
-
-#include "util/DarkMode.h"
 #include "util/UiFont.h"
 
 namespace polish {
@@ -14,9 +11,6 @@ namespace polish {
 namespace {
 
 constexpr wchar_t kWindowClassName[] = L"PolishSettingsWindow";
-constexpr COLORREF kDarkBackground = RGB(32, 32, 32);
-constexpr COLORREF kDarkEditBackground = RGB(45, 45, 45);
-constexpr COLORREF kDarkText = RGB(240, 240, 240);
 
 constexpr int kFirstCheckId = 3000;
 constexpr int kFirstHotkeyButtonId = 3100;
@@ -59,10 +53,6 @@ SettingsWindow::~SettingsWindow() {
     if (headingFont_ != nullptr) {
         DeleteObject(headingFont_);
     }
-    if (darkBackground_ != nullptr) {
-        DeleteObject(darkBackground_);
-        DeleteObject(darkEditBackground_);
-    }
 }
 
 LRESULT CALLBACK SettingsWindow::WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -81,6 +71,10 @@ LRESULT CALLBACK SettingsWindow::WindowProcThunk(HWND hwnd, UINT message, WPARAM
 }
 
 LRESULT SettingsWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    LRESULT themed = 0;
+    if (theme_.Handle(hwnd, message, wParam, &themed)) {
+        return themed;
+    }
     switch (message) {
         case WM_COMMAND: {
             const int id = LOWORD(wParam);
@@ -128,34 +122,6 @@ LRESULT SettingsWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LP
             }
             return 0;
         }
-
-        case WM_ERASEBKGND:
-            if (dark_) {
-                RECT client{};
-                GetClientRect(hwnd, &client);
-                FillRect(reinterpret_cast<HDC>(wParam), &client, darkBackground_);
-                return 1;
-            }
-            return DefWindowProcW(hwnd, message, wParam, lParam);
-
-        case WM_CTLCOLORSTATIC:
-        case WM_CTLCOLORBTN:
-            if (dark_) {
-                const HDC dc = reinterpret_cast<HDC>(wParam);
-                SetTextColor(dc, kDarkText);
-                SetBkMode(dc, TRANSPARENT);
-                return reinterpret_cast<LRESULT>(darkBackground_);
-            }
-            return DefWindowProcW(hwnd, message, wParam, lParam);
-
-        case WM_CTLCOLOREDIT:
-            if (dark_) {
-                const HDC dc = reinterpret_cast<HDC>(wParam);
-                SetTextColor(dc, kDarkText);
-                SetBkColor(dc, kDarkEditBackground);
-                return reinterpret_cast<LRESULT>(darkEditBackground_);
-            }
-            return DefWindowProcW(hwnd, message, wParam, lParam);
 
         case WM_CLOSE:
             ShowWindow(hwnd, SW_HIDE);
@@ -290,31 +256,6 @@ void SettingsWindow::CreateControls() {
                  SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-// Follows the system's app theme, re-checked on every Show() so a change
-// made while Polish is running is picked up. Controls are themed with the
-// same "DarkMode_Explorer" pseudo-theme the menus and tooltips use; the
-// background and the static/edit colours are ours (the WM_CTLCOLOR cases).
-void SettingsWindow::ApplyTheme() {
-    dark_ = IsDarkModeEnabled();
-    if (darkBackground_ == nullptr) {
-        darkBackground_ = CreateSolidBrush(kDarkBackground);
-        darkEditBackground_ = CreateSolidBrush(kDarkEditBackground);
-    }
-    ApplyDarkTitleBar(window_, dark_);
-    // Opts the process in to dark theming (SetWindowTheme does nothing
-    // otherwise) and themes the window itself.
-    ApplyDarkModeToMenu(window_);
-    const wchar_t* theme = dark_ ? L"DarkMode_Explorer" : nullptr;
-    for (HWND child = GetWindow(window_, GW_CHILD); child != nullptr; child = GetWindow(child, GW_HWNDNEXT)) {
-        wchar_t className[16] = L"";
-        GetClassNameW(child, className, 16);
-        if (_wcsicmp(className, L"STATIC") != 0) {
-            SetWindowTheme(child, theme, nullptr);
-        }
-    }
-    RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
-}
-
 void SettingsWindow::Refresh() {
     for (const Row& row : rows_) {
         SendMessageW(row.check, BM_SETCHECK, callbacks_.isEnabled(row.feature) ? BST_CHECKED : BST_UNCHECKED,
@@ -352,7 +293,7 @@ void SettingsWindow::Show() {
         SetWindowPos(window_, nullptr, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
     Refresh();
-    ApplyTheme();
+    theme_.Apply(window_);
     ShowWindow(window_, SW_SHOW);
     SetForegroundWindow(window_);
     if (!rows_.empty()) {

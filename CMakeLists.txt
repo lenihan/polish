@@ -82,6 +82,7 @@ add_library(polish_core STATIC
     src/util/TaskbarState.cpp
     src/util/SwitcherCycle.cpp
     src/util/DarkMode.cpp
+    src/util/WindowTheme.cpp
     src/util/DialogKeyboard.cpp
     src/util/UiFont.cpp
     src/util/WindowIcon.cpp

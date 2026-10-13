@@ -104,6 +104,10 @@ LRESULT CALLBACK StackHotkeyDialog::WindowProcThunk(HWND hwnd, UINT message, WPA
 }
 
 LRESULT StackHotkeyDialog::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    LRESULT themed = 0;
+    if (theme_.Handle(hwnd, message, wParam, &themed)) {
+        return themed;
+    }
     switch (message) {
         case WM_CREATE:
             CreateControls(hwnd);
@@ -292,6 +296,7 @@ std::optional<HotkeyChoice> StackHotkeyDialog::ShowModal(HWND owner, const Hotke
         return std::nullopt;
     }
 
+    theme_.Apply(window_);
     ShowWindow(window_, SW_SHOW);
     SetForegroundWindow(window_);
     // Start on the first modifier checkbox -- the first of CycleFocus's

@@ -4,6 +4,8 @@
 
 #include <optional>
 
+#include "util/WindowTheme.h"
+
 namespace polish {
 
 struct HotkeyChoice {
@@ -62,6 +64,7 @@ private:
     HWND window_ = nullptr;
     // Owned -- see CreateControls. Deleted in ShowModal's cleanup.
     HFONT dialogFont_ = nullptr;
+    WindowTheme theme_;
     HWND ctrlCheck_ = nullptr;
     HWND altCheck_ = nullptr;
     HWND shiftCheck_ = nullptr;

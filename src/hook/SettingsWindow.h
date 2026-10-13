@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "settings/FeatureCatalog.h"
+#include "util/WindowTheme.h"
 
 namespace polish {
 
@@ -63,7 +64,6 @@ private:
 
     void CreateControls();
     void Refresh();
-    void ApplyTheme();
 
     struct Row {
         Feature feature;
@@ -88,9 +88,7 @@ private:
     // Set while Refresh() writes the edit boxes, so that is not taken for
     // the user typing.
     bool refreshing_ = false;
-    bool dark_ = false;
-    HBRUSH darkBackground_ = nullptr;
-    HBRUSH darkEditBackground_ = nullptr;
+    WindowTheme theme_;
     HWND window_ = nullptr;
     HFONT font_ = nullptr;
     HFONT headingFont_ = nullptr;
