@@ -48,6 +48,7 @@ add_library(polish_core STATIC
     src/windowtracking/WindowZOrder.cpp
     src/windowtracking/TaskbarButtons.cpp
     src/windowtracking/TaskbarReadPolicy.cpp
+    src/windowtracking/TaskbarPlacement.cpp
     src/tray/TrayIcon.cpp
     src/hook/ActiveWindowHalo.cpp
     src/hook/BullseyeOverlay.cpp
@@ -63,7 +64,8 @@ add_library(polish_core STATIC
     src/hook/StackPickerSelectedListWindow.cpp
     src/hook/StackHotkeyDialog.cpp
     src/hook/StackStripWindow.cpp
-    src/hook/LayoutTaskbarButton.cpp
+    src/hook/PolishTaskbarButton.cpp
+    src/hook/TaskbarVisuals.cpp
     src/hook/WindowParking.cpp
     src/hook/ScaledViewWindow.cpp
     src/hook/TaskbarShield.cpp
@@ -75,6 +77,7 @@ add_library(polish_core STATIC
     src/util/AppIdentity.cpp
     src/util/AppResolver.cpp
     src/util/ClipboardSnapshot.cpp
+    src/util/TaskbarState.cpp
     src/util/SwitcherCycle.cpp
     src/util/DarkMode.cpp
     src/util/DialogKeyboard.cpp

@@ -178,6 +178,15 @@ public:
         // disable the taskbar features on this machine and leave the
         // shell completely alone, rather than act on a half-read tree.
         bool taskbarUsable = false;
+        // The primary taskbar's own rect and its Start button, for placing
+        // Polish's button beside it (windowtracking/TaskbarPlacement.h).
+        // Start is read separately from the app buttons because
+        // ReadOneTaskbar matches on the app-button class and Start is not
+        // one; startFound is false when it could not be found, which is
+        // not an error -- placement falls back to the app buttons.
+        RECT primaryTaskbar{};
+        bool startFound = false;
+        RECT start{};
     };
 
     struct TaskbarEmptyResult {

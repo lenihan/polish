@@ -1330,7 +1330,49 @@ Shrink a window to a live thumbnail; click it to get it back at 1:1.
 - **Stacks**: adding a scaled window to a stack (picker or join) restores it
   first, so the stack lays it out at real size.
 
-## Layout taskbar button: built
+## Polish taskbar button: now an overlay (supersedes the stand-in below)
+
+The stand-in *app* window below gave the button a running-app bar, an Alt+Tab
+entry and Windows' own labelling -- all wrong for something meant to sit
+beside Start like Task View does. Windows 11 has no API for a third-party
+shell button, so it is now a plain Polish window laid over free taskbar space
+(`hook/PolishTaskbarButton`), the same technique `TaskbarShield` uses for its
+hover highlight:
+
+- `WS_EX_LAYERED|TOPMOST|NOACTIVATE|TOOLWINDOW`, per-pixel alpha (min alpha 1
+  so it stays in the hit-test). Tool window = not in Alt+Tab, no taskbar entry.
+- **Placement is pure** (`windowtracking/TaskbarPlacement`, tested): Start's
+  size and row; centered -> immediately left of Start; left-aligned -> just
+  after the last app button (Start is leftmost, so there is nothing to its
+  left); hidden rather than clamped when there is no room or it would reach
+  the tray (rightmost quarter).
+- **Geometry** comes from the taskbar read already done for the hover list:
+  `UiaWorker` now also returns the primary taskbar's rect and the Start button
+  (`AutomationId == "StartButton"`). Alignment is `TaskbarAl` in the registry,
+  auto-hide `SHAppBarMessage(ABM_GETSTATE)` (`util/TaskbarState`).
+- **Independent of the taskbar feature**: `MarkTaskbarDirty` and
+  `RequestTaskbarRefresh` used to return early when `taskbarEnabled` was off;
+  they now also run for the button. `ApplyTaskbarRead` updates the button
+  first and only then does the shield/hook work.
+- **Follows the re-centering**: a centered group re-centres with an
+  animation and UIA's rects trail it, so a changed placement schedules one
+  more read ~250 ms later; it costs nothing when nothing moved.
+- Hover/pressed fill is `DrawTaskbarFill` in `hook/TaskbarVisuals`, shared with
+  the shield so the two highlights are the same highlight. Pressed is fainter
+  and nudges the icon down a pixel. It is an approximation of the XAML
+  control's fill (no animation).
+- Hidden for full-screen presentations, a window covering its whole monitor,
+  and an auto-hidden taskbar that is off-screen. Raised again when the shell
+  takes the foreground (a click on the taskbar raises it over the button).
+- Known limit, as for the shield (LIMITATIONS #24): with Start or Search open
+  the taskbar is in a higher z-band than plain `polish.exe` and covers the
+  button. The UIAccess build is unaffected.
+- Left click still opens the layout menu (a placeholder until the Actions
+  strip, phase 4); right click: Settings (greyed, phase 3) and Exit.
+- Registry value `PolishButton` (the old `LayoutButtonEnabled` is honoured as
+  its default).
+
+## Layout taskbar button: built (the stand-in window; superseded above)
 
 A Polish-owned taskbar button, "Layout", whose click opens the layout
 commands as a menu.

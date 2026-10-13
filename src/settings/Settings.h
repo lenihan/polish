@@ -81,10 +81,12 @@ struct Settings {
     // order to keep an eye on it is no use once something is on top of it.
     bool scaledViewTopmost = true;
 
-    // Polish's own taskbar button ("Layout"): click it for a menu of the
+    // Polish's own button on the taskbar, beside Start: click it for the
     // layout commands, the discoverable way in to what is otherwise tray
-    // menu and hotkeys (see hook/LayoutTaskbarButton.h).
-    bool layoutButtonEnabled = true;
+    // menu and hotkeys (see hook/PolishTaskbarButton.h). Registry value
+    // "PolishButton"; it was "LayoutButtonEnabled" when it was a stand-in
+    // app window, and that older value is still honoured as the default.
+    bool polishButtonEnabled = true;
     // Opens that same menu from the keyboard, over the window in front.
     // Ctrl+Alt+Space (0x20 is VK_SPACE), beside the other layout hotkeys.
     UINT layoutHotkeyModifiers = MOD_CONTROL | MOD_ALT;

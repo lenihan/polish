@@ -25,7 +25,7 @@
 #include "hook/AltTabHook.h"
 #include "hook/AltTabListWindow.h"
 #include "hook/BullseyeOverlay.h"
-#include "hook/LayoutTaskbarButton.h"
+#include "hook/PolishTaskbarButton.h"
 #include "hook/ScaledViewWindow.h"
 #include "hook/WindowParking.h"
 #include "hook/StackHotkeyDialog.h"
@@ -48,6 +48,7 @@
 #include "util/AppResolver.h"
 #include "util/Logging.h"
 #include "util/SwitcherCycle.h"
+#include "util/TaskbarState.h"
 #include "util/WindowIcon.h"
 #include "windowtracking/ActivationHistory.h"
 #include "windowtracking/ScaleGeometry.h"
@@ -61,6 +62,7 @@
 #include "windowtracking/WindowLayout.h"
 #include "windowtracking/WindowPlacement.h"
 #include "windowtracking/TaskbarButtons.h"
+#include "windowtracking/TaskbarPlacement.h"
 #include "windowtracking/TaskbarReadPolicy.h"
 #include "windowtracking/WindowFilters.h"
 #include "windowtracking/WindowZOrder.h"
@@ -506,16 +508,24 @@ std::map<HWND, std::unique_ptr<polish::ScaledViewWindow>> g_scaledViews;
 // Posted by a view that wants its window restored: restoring destroys the
 // view, which cannot happen from inside the view's own message handler.
 constexpr UINT kScaledRestoreMessage = WM_APP + 40;
-// The Layout taskbar button (hook/LayoutTaskbarButton.h) and the real
+// Polish's own taskbar button (hook/PolishTaskbarButton.h) and the real
 // window the user was in when they clicked it -- the one its menu is about.
-// The click arrives as the stand-in being activated, so it is posted as a
-// message rather than handled inside that window's own activation.
-std::unique_ptr<polish::LayoutTaskbarButton> g_layoutButton;
+// A click arrives inside the button's own window procedure, so it is posted
+// as a message rather than acted on there.
+std::unique_ptr<polish::PolishTaskbarButton> g_polishButton;
 HWND g_layoutPrevious = nullptr;
 bool g_layoutMenuOpen = false;
-constexpr UINT kLayoutButtonMessage = WM_APP + 41;
-constexpr WPARAM kLayoutButtonClicked = 0;
-constexpr WPARAM kLayoutButtonCloseRequested = 1;
+constexpr UINT kPolishButtonMessage = WM_APP + 41;
+constexpr WPARAM kPolishButtonClicked = 0;
+constexpr WPARAM kPolishButtonRightClicked = 1;
+// Where the button goes, from the last taskbar read. Kept so a change that
+// is not a read (a full-screen window, an alignment setting) can re-place it
+// without waiting for the next one.
+polish::TaskbarGeometry g_polishGeometry;
+bool g_polishGeometryValid = false;
+RECT g_polishButtonRect{};
+void UpdatePolishButtonPlacement();
+void ApplyPolishButtonSetting();
 // "  (33%)" for a scaled window, else nothing -- for the list panels' rows,
 // so a window you cannot see at its real size says what size it is.
 std::wstring ScaledTitleSuffix(HWND hwnd) {
@@ -1161,6 +1171,15 @@ void OnForegroundChanged(HWND newForeground) {
     // activated it (its taskbar button, Alt+Tab, the app itself), the
     // meaning is "I need this one now".
     OnScaledWindowForeground(newForeground);
+    // Clicking the taskbar raises it over Polish's button (both topmost);
+    // put the button back. And a full-screen window coming to the front
+    // should take the button down with it.
+    if (g_polishButton != nullptr) {
+        if (IsShellTaskbarWindow(newForeground)) {
+            g_polishButton->ReassertTopmost();
+        }
+        UpdatePolishButtonPlacement();
+    }
     // A window coming to the front that went into the taskbar earlier is a
     // restore, and is usually how this app hears about one first -- before
     // EVENT_SYSTEM_MINIMIZEEND. Start the hold-off here so the halo is
@@ -3331,7 +3350,9 @@ bool IsTaskbarOwnedWindow(HWND hwnd) {
 // every button on a centered taskbar, so this is called in bursts and a
 // read per event would be pure waste.
 void MarkTaskbarDirty() {
-    if (!g_settings.taskbarEnabled) {
+    // Polish's own button needs the same read, whether or not the taskbar
+    // feature (the hover list and click-to-cycle) is on.
+    if (!g_settings.taskbarEnabled && !g_settings.polishButtonEnabled) {
         return;
     }
     SetTimer(g_messageWindow, kTaskbarDirtyTimerId, kTaskbarDirtyDebounceMs, nullptr);
@@ -3494,7 +3515,7 @@ void RebuildTaskbarTargets() {
 // comes back identical is dropped by TaskbarButtonsEqual, and a request
 // made while one is already queued is skipped outright.
 void RequestTaskbarRefresh() {
-    if (!g_settings.taskbarEnabled || g_uiaWorker == nullptr) {
+    if ((!g_settings.taskbarEnabled && !g_settings.polishButtonEnabled) || g_uiaWorker == nullptr) {
         return;
     }
     if (g_taskbarRefreshInFlight) {
@@ -3545,13 +3566,53 @@ void RemapOpenTaskbarPanelButton() {
     CloseTaskbarPanel();
 }
 
+// Where Polish's button goes, from a finished taskbar read; then places it.
+//
+// Runs for every read, ahead of -- and independent of -- the taskbar
+// feature's own handling below, so the button works with that feature off.
+// A failed read leaves the last good geometry alone: the button staying put
+// for a moment is better than it blinking out on a transient failure.
+void UpdatePolishGeometryFromRead(const polish::UiaWorker::TaskbarSnapshot& snapshot) {
+    if (!snapshot.taskbarUsable) {
+        return;
+    }
+    const HMONITOR primary = MonitorFromRect(&snapshot.primaryTaskbar, MONITOR_DEFAULTTONEAREST);
+    polish::TaskbarGeometry geometry;
+    geometry.taskbar = snapshot.primaryTaskbar;
+    if (snapshot.startFound) {
+        geometry.start = snapshot.start;
+    }
+    for (const polish::TaskbarButton& button : snapshot.buttons) {
+        if (button.taskbar == primary) {
+            geometry.appButtons.push_back(button.rect);
+        }
+    }
+    g_polishGeometry = std::move(geometry);
+    g_polishGeometryValid = true;
+
+    const RECT before = g_polishButtonRect;
+    UpdatePolishButtonPlacement();
+    // The centered group re-centres with an animation, and UIA's rects trail
+    // it: a button placed from the first read can land where the group was
+    // a moment ago. A second read once the move has settled corrects it, and
+    // costs nothing when nothing moved (the rects come back equal and no
+    // further read is asked for).
+    if (!EqualRect(&before, &g_polishButtonRect)) {
+        SetTimer(g_messageWindow, kTaskbarDirtyTimerId, 250, nullptr);
+    }
+}
+
 void ApplyTaskbarRead(uint64_t generation) {
-    if (!g_settings.taskbarEnabled || g_uiaWorker == nullptr || g_taskbarShield == nullptr ||
-        g_taskbarHook == nullptr) {
+    if (g_uiaWorker == nullptr) {
         return;
     }
     const polish::UiaWorker::TaskbarSnapshot snapshot = g_uiaWorker->LatestTaskbarButtons();
     if (snapshot.generation != generation || !snapshot.resolved) {
+        return;
+    }
+    UpdatePolishGeometryFromRead(snapshot);
+    // The rest is the taskbar feature's: the shield and the hook.
+    if (!g_settings.taskbarEnabled || g_taskbarShield == nullptr || g_taskbarHook == nullptr) {
         return;
     }
 
@@ -3647,7 +3708,7 @@ bool PointOverTaskbar(POINT pt) {
     wchar_t className[32] = L"";
     return root != nullptr && GetClassNameW(root, className, 32) > 0 &&
            (wcscmp(className, L"Shell_TrayWnd") == 0 || wcscmp(className, L"Shell_SecondaryTrayWnd") == 0 ||
-            wcscmp(className, L"PolishTaskbarShield") == 0);
+            wcscmp(className, L"PolishTaskbarShield") == 0 || wcscmp(className, L"PolishTaskbarButton") == 0);
 }
 
 // How long the pointer may be away from the taskbar and the switcher before
@@ -4710,9 +4771,14 @@ void ApplyTaskbarSetting() {
             g_taskbarHook->SetTargets(g_taskbarGeneration, {});
         }
         CloseTaskbarPanel();
-        KillTimer(g_messageWindow, kTaskbarRefreshTimerId);
         KillTimer(g_messageWindow, kTaskbarHoverTimerId);
-        KillTimer(g_messageWindow, kTaskbarDirtyTimerId);
+        if (g_settings.polishButtonEnabled) {
+            // The read keeps running for Polish's own button.
+            RequestTaskbarRefresh();
+        } else {
+            KillTimer(g_messageWindow, kTaskbarRefreshTimerId);
+            KillTimer(g_messageWindow, kTaskbarDirtyTimerId);
+        }
         polish::LogDebug(L"[Polish] Taskbar: disabled -- shield uncovered, native taskbar untouched");
         return;
     }
@@ -6190,12 +6256,84 @@ constexpr UINT kMenuIdLayoutButton = 19;
 
 constexpr int kLayoutHotkeyId = 8;
 
-// Creates or removes the Layout taskbar button to match the setting, and
-// the hotkey that opens the same menu with it: no button, no hotkey.
-void ApplyLayoutButtonSetting() {
+// Puts Polish's button where the last taskbar read says it goes, or hides
+// it. Cheap, and called from the read, from foreground changes (a
+// full-screen window takes the button down) and from the safety timer.
+void UpdatePolishButtonPlacement() {
+    if (g_polishButton == nullptr) {
+        return;
+    }
+    const auto hide = [](const wchar_t* why) {
+        if (g_polishButton->Visible()) {
+            polish::LogDebug(std::format(L"[Polish] Button: hidden ({})", why));
+        }
+        g_polishButton->SetRect(std::nullopt);
+        g_polishButtonRect = RECT{};
+    };
+    if (!g_settings.polishButtonEnabled || !g_polishGeometryValid) {
+        hide(L"no geometry");
+        return;
+    }
+    // A full-screen game or presentation, or a window that covers its whole
+    // monitor (an F11 browser): the taskbar is not showing, and a button
+    // floating over it would be.
+    if (IsPresentationOrFullScreenGame()) {
+        hide(L"full screen");
+        return;
+    }
+    const HWND foreground = GetForegroundWindow();
+    if (foreground != nullptr && !IsShellTaskbarWindow(foreground) && !IsOwnProcessWindow(foreground) &&
+        CoversWholeMonitor(foreground) &&
+        MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) ==
+            MonitorFromRect(&g_polishGeometry.taskbar, MONITOR_DEFAULTTONEAREST)) {
+        hide(L"a window covers the monitor");
+        return;
+    }
+    // An auto-hidden taskbar slides off-screen and leaves its rect mostly
+    // outside the monitor; the button goes with it, and comes back when it
+    // slides in (that is a location change, which re-reads).
+    if (polish::IsTaskbarAutoHide()) {
+        MONITORINFO monitor{};
+        monitor.cbSize = sizeof(monitor);
+        RECT visible{};
+        if (GetMonitorInfoW(MonitorFromRect(&g_polishGeometry.taskbar, MONITOR_DEFAULTTONEAREST), &monitor) &&
+            (!IntersectRect(&visible, &g_polishGeometry.taskbar, &monitor.rcMonitor) ||
+             visible.bottom - visible.top < 4 || visible.right - visible.left < 4)) {
+            hide(L"taskbar is auto-hidden");
+            return;
+        }
+    }
+
+    polish::TaskbarGeometry geometry = g_polishGeometry;
+    geometry.alignment = polish::ReadTaskbarAlignment();
+    geometry.dpi = std::max<UINT>(96, GetDpiForWindow(g_polishButton->Handle()));
+    const std::optional<RECT> rect = polish::PolishButtonRect(geometry);
+    if (!rect.has_value()) {
+        hide(L"no room");
+        return;
+    }
+    if (!g_polishButton->Visible() || !EqualRect(&g_polishButtonRect, &*rect)) {
+        polish::LogDebug(std::format(L"[Polish] Button: placed at ({},{})-({},{}) alignment={} start={}", rect->left,
+                                      rect->top, rect->right, rect->bottom,
+                                      geometry.alignment == polish::TaskbarAlignment::Left ? L"left" : L"center",
+                                      geometry.start.has_value() ? L"read" : L"missing"));
+    }
+    g_polishButton->SetRect(rect);
+    g_polishButtonRect = *rect;
+}
+
+// Creates or removes Polish's taskbar button to match the setting, and the
+// hotkey that opens the same menu with it: no button, no hotkey.
+void ApplyPolishButtonSetting() {
     UnregisterHotKey(g_messageWindow, kLayoutHotkeyId);
-    if (!g_settings.layoutButtonEnabled) {
-        g_layoutButton.reset();
+    if (!g_settings.polishButtonEnabled) {
+        g_polishButton.reset();
+        g_polishButtonRect = RECT{};
+        if (!g_settings.taskbarEnabled) {
+            // Nothing else is using the taskbar read.
+            KillTimer(g_messageWindow, kTaskbarRefreshTimerId);
+            KillTimer(g_messageWindow, kTaskbarDirtyTimerId);
+        }
         return;
     }
     if (RegisterHotKey(g_messageWindow, kLayoutHotkeyId, g_settings.layoutHotkeyModifiers | MOD_NOREPEAT,
@@ -6205,16 +6343,22 @@ void ApplyLayoutButtonSetting() {
             L"PC?). GetLastError={}. Change it under HKCU\\Software\\Polish.",
             FormatHotkey(g_settings.layoutHotkeyModifiers, g_settings.layoutHotkeyVirtualKey), GetLastError()));
     }
-    if (g_layoutButton != nullptr) {
-        return;
+    // The read that places it needs its timers and its first request.
+    SetTimer(g_messageWindow, kTaskbarRefreshTimerId, kTaskbarRefreshIntervalMs, nullptr);
+    if (g_polishButton == nullptr) {
+        polish::PolishTaskbarButton::Callbacks callbacks;
+        callbacks.onClick = []() { PostMessageW(g_messageWindow, kPolishButtonMessage, kPolishButtonClicked, 0); };
+        callbacks.onRightClick = []() {
+            PostMessageW(g_messageWindow, kPolishButtonMessage, kPolishButtonRightClicked, 0);
+        };
+        g_polishButton = std::make_unique<polish::PolishTaskbarButton>(GetModuleHandleW(nullptr), std::move(callbacks));
+        if (!g_polishButton->IsValid()) {
+            g_polishButton.reset();
+            return;
+        }
     }
-    g_layoutButton = std::make_unique<polish::LayoutTaskbarButton>(
-        GetModuleHandleW(nullptr),
-        []() { PostMessageW(g_messageWindow, kLayoutButtonMessage, kLayoutButtonClicked, 0); },
-        []() { PostMessageW(g_messageWindow, kLayoutButtonMessage, kLayoutButtonCloseRequested, 0); });
-    if (!g_layoutButton->IsValid()) {
-        g_layoutButton.reset();
-    }
+    RequestTaskbarRefresh();
+    UpdatePolishButtonPlacement();
 }
 
 void RegisterScaleHotkeysFromSettings() {
@@ -7729,9 +7873,9 @@ void PopulateTrayMenu(HMENU menu) {
                 L"Hold Win to move/resize any window");
     AppendMenuW(menu, MF_STRING | (g_settings.scaleEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdScaleEnabled,
                 L"Scaled windows (live thumbnail)");
-    AppendMenuW(menu, MF_STRING | (g_settings.layoutButtonEnabled ? MF_CHECKED : MF_UNCHECKED),
+    AppendMenuW(menu, MF_STRING | (g_settings.polishButtonEnabled ? MF_CHECKED : MF_UNCHECKED),
                 kMenuIdLayoutButton,
-                (L"Layout button on taskbar\t" +
+                (L"Polish button on taskbar\t" +
                  FormatHotkey(g_settings.layoutHotkeyModifiers, g_settings.layoutHotkeyVirtualKey))
                     .c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
@@ -7859,11 +8003,11 @@ void HandleTrayCommand(UINT commandId) {
             UnscaleAll();
             break;
         case kMenuIdLayoutButton:
-            g_settings.layoutButtonEnabled = !g_settings.layoutButtonEnabled;
+            g_settings.polishButtonEnabled = !g_settings.polishButtonEnabled;
             polish::SaveSettings(g_settings);
-            polish::LogDebug(std::format(L"[Polish] Layout button {}",
-                                          g_settings.layoutButtonEnabled ? L"enabled" : L"disabled"));
-            ApplyLayoutButtonSetting();
+            polish::LogDebug(std::format(L"[Polish] Polish button {}",
+                                          g_settings.polishButtonEnabled ? L"enabled" : L"disabled"));
+            ApplyPolishButtonSetting();
             break;
         case kMenuIdNewStack:
             TriggerNewStack(nullptr);
@@ -7953,6 +8097,10 @@ void OpenLayoutMenu(bool fromHotkey = false) {
     }
 
     g_layoutMenuOpen = true;
+    // The button stays drawn pressed while its menu is up.
+    if (g_polishButton != nullptr) {
+        g_polishButton->SetActive(true);
+    }
     // Same dance as the tray menu: the menu needs a foreground owner of
     // ours to dismiss on an outside click, which is also why every command
     // acts on the MRU window and not on the foreground one.
@@ -7960,12 +8108,53 @@ void OpenLayoutMenu(bool fromHotkey = false) {
     const UINT command = static_cast<UINT>(TrackPopupMenuEx(
         menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | align, cursor.x, cursor.y, g_messageWindow, &exclude));
     g_layoutMenuOpen = false;
+    if (g_polishButton != nullptr) {
+        g_polishButton->SetActive(false);
+    }
     DestroyMenu(menu);
     PostMessageW(g_messageWindow, WM_NULL, 0, 0);
     polish::LogDebug(std::format(L"[Polish] Layout button: menu for {} -> command {}", reinterpret_cast<void*>(target),
                                   command));
     if (command != 0) {
         HandleTrayCommand(command);
+    }
+}
+
+// Right click on Polish's button: the things that are about Polish itself
+// rather than about the windows. With the tray icon going, this is where
+// Exit lives; Settings arrives with the Settings window.
+void ShowPolishButtonMenu() {
+    constexpr UINT kSettings = 1;
+    constexpr UINT kExit = 2;
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, kSettings, L"Settings... (coming soon)");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kExit, L"Exit Polish");
+    polish::ApplyDarkModeToMenu(g_messageWindow);
+
+    RECT button = g_polishButton != nullptr ? g_polishButton->Rect() : RECT{};
+    POINT anchor{};
+    GetCursorPos(&anchor);
+    if (button.right > button.left) {
+        anchor = {(button.left + button.right) / 2, button.top};
+    }
+    if (g_polishButton != nullptr) {
+        g_polishButton->SetActive(true);
+    }
+    SetForegroundWindow(g_messageWindow);
+    const UINT command = static_cast<UINT>(TrackPopupMenuEx(
+        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN | TPM_CENTERALIGN, anchor.x, anchor.y,
+        g_messageWindow, nullptr));
+    if (g_polishButton != nullptr) {
+        g_polishButton->SetActive(false);
+    }
+    DestroyMenu(menu);
+    PostMessageW(g_messageWindow, WM_NULL, 0, 0);
+    if (command == kExit) {
+        DestroyWindow(g_messageWindow);
     }
 }
 
@@ -8069,6 +8258,13 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                     UpdateTaskbarHoverHighlight();
                 }
             } else if (wParam == kTaskbarRefreshTimerId) {
+                if (!g_settings.taskbarEnabled) {
+                    // Only Polish's button is using this read: none of the
+                    // shield's housekeeping applies.
+                    RequestTaskbarRefresh();
+                    UpdatePolishButtonPlacement();
+                    return 0;
+                }
                 UpdateTaskbarShieldBypassed();
                 // The shield should never be open at an idle sample: it
                 // opens only for a gesture the taskbar is being handed,
@@ -8192,14 +8388,9 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             UnscaleWindow(reinterpret_cast<HWND>(wParam), /*activate=*/true);
             return 0;
 
-        case kLayoutButtonMessage:
-            if (wParam == kLayoutButtonCloseRequested) {
-                // "Close window" on the button's jump list: take it as
-                // switching the button off, which is what closing a
-                // button-only window can sensibly mean.
-                g_settings.layoutButtonEnabled = false;
-                polish::SaveSettings(g_settings);
-                ApplyLayoutButtonSetting();
+        case kPolishButtonMessage:
+            if (wParam == kPolishButtonRightClicked) {
+                ShowPolishButtonMenu();
             } else {
                 OpenLayoutMenu();
             }
@@ -8241,6 +8432,11 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             // live.
             if (lParam != 0 && lstrcmpiW(reinterpret_cast<LPCWSTR>(lParam), L"ImmersiveColorSet") == 0) {
                 UpdateActiveWindowHalo(GetForegroundWindow());
+            }
+            // Taskbar alignment (and position, size) changes announce
+            // themselves as "TraySettings"; the button follows Start.
+            if (lParam != 0 && lstrcmpiW(reinterpret_cast<LPCWSTR>(lParam), L"TraySettings") == 0) {
+                MarkTaskbarDirty();
             }
             return 0;
 
@@ -8289,7 +8485,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         case WM_DESTROY:
             // First: nothing may be left parked when the process goes.
             UnscaleAll();
-            g_layoutButton.reset();
+            g_polishButton.reset();
             KillTimer(hwnd, kScaleWatchdogTimerId);
             KillTimer(hwnd, kScaleSettleTimerId);
             UnregisterHotKey(hwnd, kScaleDownHotkeyId);
@@ -8488,7 +8684,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     RegisterArrangeHotkeysFromSettings();
     RegisterScaleHotkeysFromSettings();
-    ApplyLayoutButtonSetting();
+    ApplyPolishButtonSetting();
 
     if (!RegisterStackHotkeyFromSettings()) {
         polish::LogDebug(std::format(

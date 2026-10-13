@@ -218,6 +218,44 @@ bool ReadOneTaskbar(IUIAutomation* uia, HWND taskbar, std::vector<TaskbarButton>
     return true;
 }
 
+// The Start button's rect on one taskbar. Windows 11 gives it the UIA
+// AutomationId "StartButton" (verified in docs/LIMITATIONS.md #24); it is
+// not one of the app-button class, which is why ReadOneTaskbar does not
+// return it. Returns false when it cannot be found, which callers treat as
+// "place from the app buttons instead", not as a failed read.
+bool ReadStartButton(IUIAutomation* uia, HWND taskbar, RECT& out) {
+    ComPtr<IUIAutomationElement> root;
+    if (FAILED(uia->ElementFromHandle(taskbar, &root)) || !root) {
+        return false;
+    }
+    VARIANT id;
+    VariantInit(&id);
+    id.vt = VT_BSTR;
+    id.bstrVal = SysAllocString(L"StartButton");
+    ComPtr<IUIAutomationCondition> isStart;
+    const HRESULT conditionHr = uia->CreatePropertyCondition(UIA_AutomationIdPropertyId, id, &isStart);
+    VariantClear(&id);
+    if (FAILED(conditionHr) || !isStart) {
+        return false;
+    }
+    ComPtr<IUIAutomationCacheRequest> cache;
+    if (FAILED(uia->CreateCacheRequest(&cache)) || !cache) {
+        return false;
+    }
+    cache->AddProperty(UIA_BoundingRectanglePropertyId);
+    cache->put_TreeScope(TreeScope_Element);
+    ComPtr<IUIAutomationElement> start;
+    if (FAILED(root->FindFirstBuildCache(TreeScope_Descendants, isStart.Get(), cache.Get(), &start)) || !start) {
+        return false;
+    }
+    RECT rect{};
+    if (FAILED(start->get_CachedBoundingRectangle(&rect)) || rect.right <= rect.left || rect.bottom <= rect.top) {
+        return false;
+    }
+    out = rect;
+    return true;
+}
+
 }  // namespace
 
 struct UiaWorker::WorkerState {
@@ -699,6 +737,9 @@ void UiaWorker::EnumerateTaskbarButtons(const Request& request) {
     const ULONGLONG startTick = GetTickCount64();
     std::vector<TaskbarButton> buttons;
     bool usable = false;
+    bool startFound = false;
+    RECT start{};
+    RECT primaryRect{};
 
     IUIAutomation* uia = state_->uia.Get();
     if (uia != nullptr) {
@@ -708,6 +749,8 @@ void UiaWorker::EnumerateTaskbarButtons(const Request& request) {
         // Shell_SecondaryTrayWnd per additional monitor.
         if (HWND primary = FindWindowExW(nullptr, nullptr, L"Shell_TrayWnd", nullptr)) {
             usable = ReadOneTaskbar(uia, primary, buttons);
+            GetWindowRect(primary, &primaryRect);
+            startFound = ReadStartButton(uia, primary, start);
         }
         HWND secondary = nullptr;
         while ((secondary = FindWindowExW(nullptr, secondary, L"Shell_SecondaryTrayWnd", nullptr)) != nullptr) {
@@ -723,6 +766,9 @@ void UiaWorker::EnumerateTaskbarButtons(const Request& request) {
         taskbarSnapshot_.generation = request.generation;
         taskbarSnapshot_.resolved = true;
         taskbarSnapshot_.taskbarUsable = usable;
+        taskbarSnapshot_.primaryTaskbar = primaryRect;
+        taskbarSnapshot_.startFound = startFound;
+        taskbarSnapshot_.start = start;
     }
 
     if (!usable) {

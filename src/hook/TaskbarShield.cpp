@@ -1,13 +1,8 @@
 #include "hook/TaskbarShield.h"
 
-// objidl.h before gdiplus.h: GDI+ headers use IStream and friends
-// without declaring them, and this project builds WIN32_LEAN_AND_MEAN.
-#include <objidl.h>
-
-#include <gdiplus.h>
-
 #include <algorithm>
 
+#include "hook/TaskbarVisuals.h"
 #include "windowtracking/TaskbarReadPolicy.h"
 
 namespace polish {
@@ -19,78 +14,6 @@ constexpr wchar_t kClassName[] = L"PolishTaskbarShield";
 // Out of 255, and it must not be 0 -- see the class comment. This is the
 // smallest value that still leaves the window in the hit-test.
 constexpr BYTE kShieldAlpha = 1;
-
-// The hover highlight, in logical pixels, scaled to the monitor's DPI at
-// paint time. Sized against a Windows 11 button (44x48 logical): the fill
-// sits a few pixels inside the button on every side, the way the native
-// one does, rather than filling the whole cell edge to edge.
-constexpr int kHighlightInsetXDip = 4;
-constexpr int kHighlightInsetYDip = 5;
-constexpr int kHighlightRadiusDip = 6;
-
-// How strongly the fill reads against the taskbar. Deliberately faint:
-// this is "the pointer is here", not a selection. Light-on-dark and
-// dark-on-light, matching whichever way the taskbar itself is painted.
-constexpr BYTE kHighlightAlphaDark = 30;
-constexpr BYTE kHighlightAlphaLight = 26;
-
-// GDI+ needs one-time process startup. Same function-local-static shape,
-// and for the same reason, as AltTabHighlightBorder's own copy: this app
-// is tray-resident for its whole lifetime and exits the process directly,
-// so there is no meaningful moment to call GdiplusShutdown.
-void EnsureGdiplusStarted() {
-    static const struct GdiplusInit {
-        ULONG_PTR token = 0;
-        GdiplusInit() {
-            Gdiplus::GdiplusStartupInput input;
-            Gdiplus::GdiplusStartup(&token, &input, nullptr);
-        }
-    } kInit;
-    (void)kInit;
-}
-
-// The taskbar follows "Windows mode" (SystemUsesLightTheme), which is a
-// different setting from the app theme every other window in this app
-// asks polish::IsDarkModeEnabled() about (AppsUseLightTheme). The two can
-// be set independently, and this paint lands on the taskbar.
-bool TaskbarIsDark() {
-    HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER,
-                      L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", 0, KEY_READ,
-                      &key) != ERROR_SUCCESS) {
-        return true;  // dark is the default, and the safer guess on failure
-    }
-    DWORD value = 0;
-    DWORD size = sizeof(value);
-    DWORD type = REG_DWORD;
-    const bool ok = RegQueryValueExW(key, L"SystemUsesLightTheme", nullptr, &type,
-                                     reinterpret_cast<BYTE*>(&value), &size) == ERROR_SUCCESS &&
-                    type == REG_DWORD;
-    RegCloseKey(key);
-    return ok ? value == 0 : true;
-}
-
-// Premultiplies B/G/R by A in place -- required before UpdateLayeredWindow
-// with ULW_ALPHA, and not something GDI+ does when drawing into a buffer
-// we own.
-void PremultiplyAlpha(BYTE* pixels, int pixelCount) {
-    for (int i = 0; i < pixelCount; ++i) {
-        BYTE* p = pixels + i * 4;
-        const BYTE a = p[3];
-        p[0] = static_cast<BYTE>(p[0] * a / 255);
-        p[1] = static_cast<BYTE>(p[1] * a / 255);
-        p[2] = static_cast<BYTE>(p[2] * a / 255);
-    }
-}
-
-void AddRoundedRectPath(Gdiplus::GraphicsPath& path, float x, float y, float w, float h, float radius) {
-    const float d = radius * 2;
-    path.AddArc(x, y, d, d, 180.0f, 90.0f);
-    path.AddArc(x + w - d, y, d, d, 270.0f, 90.0f);
-    path.AddArc(x + w - d, y + h - d, d, d, 0.0f, 90.0f);
-    path.AddArc(x, y + h - d, d, d, 90.0f, 90.0f);
-    path.CloseFigure();
-}
 
 LRESULT CALLBACK ShieldProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     if (msg == WM_NCHITTEST) {
@@ -239,26 +162,15 @@ void TaskbarShield::Render(Shield& shield) {
     if (showHighlight) {
         EnsureGdiplusStarted();
         const UINT dpi = GetDpiForWindow(shield.window);
-        const auto scale = [dpi](int dip) { return MulDiv(dip, static_cast<int>(dpi), 96); };
-        const float insetX = static_cast<float>(scale(kHighlightInsetXDip));
-        const float insetY = static_cast<float>(scale(kHighlightInsetYDip));
-        const float radius = static_cast<float>(scale(kHighlightRadiusDip));
-        const float x = static_cast<float>(wanted.left - shield.rect.left) + insetX;
-        const float y = static_cast<float>(wanted.top - shield.rect.top) + insetY;
-        const float w = static_cast<float>(wanted.right - wanted.left) - insetX * 2;
-        const float h = static_cast<float>(wanted.bottom - wanted.top) - insetY * 2;
-        if (w > 0 && h > 0) {
-            const bool dark = TaskbarIsDark();
-            const Gdiplus::Color fill(dark ? kHighlightAlphaDark : kHighlightAlphaLight, dark ? 255 : 0,
-                                      dark ? 255 : 0, dark ? 255 : 0);
-            Gdiplus::Bitmap bitmap(width, height, width * 4, PixelFormat32bppARGB, pixels);
-            Gdiplus::Graphics graphics(&bitmap);
-            graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-            Gdiplus::GraphicsPath path;
-            AddRoundedRectPath(path, x, y, w, h, std::min(radius, std::min(w, h) / 2));
-            Gdiplus::SolidBrush brush(fill);
-            graphics.FillPath(&brush, &path);
-        }
+        Gdiplus::Bitmap bitmap(width, height, width * 4, PixelFormat32bppARGB, pixels);
+        Gdiplus::Graphics graphics(&bitmap);
+        // The fill itself lives in TaskbarVisuals, shared with the Polish
+        // button so the two highlights are the same highlight.
+        const Gdiplus::RectF cell(static_cast<float>(wanted.left - shield.rect.left),
+                                  static_cast<float>(wanted.top - shield.rect.top),
+                                  static_cast<float>(wanted.right - wanted.left),
+                                  static_cast<float>(wanted.bottom - wanted.top));
+        DrawTaskbarFill(graphics, cell, dpi, 1.0f);
     }
 
     PremultiplyAlpha(pixels, width * height);
