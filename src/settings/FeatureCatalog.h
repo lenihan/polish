@@ -26,6 +26,7 @@ enum class Feature {
     MoveMode,
     Scale,
     PolishButton,
+    ScaledTopmost,
 };
 
 struct FeatureInfo {
@@ -47,6 +48,28 @@ const FeatureInfo& FeatureFor(Feature id);
 
 bool IsFeatureEnabled(const Settings& settings, Feature id);
 void SetFeatureEnabled(Settings& settings, Feature id, bool enabled);
+
+// Numeric settings the Settings window edits, each with the range it is
+// kept to (the same range the registry loader enforces, where it has one).
+enum class Number {
+    SnapDistance,
+    ScalePercent,
+};
+
+struct NumberInfo {
+    Number id;
+    const wchar_t* name;
+    const wchar_t* unit;
+    UINT min;
+    UINT max;
+    UINT Settings::* member;
+};
+
+const std::vector<NumberInfo>& AllNumbers();
+const NumberInfo& NumberFor(Number id);
+UINT GetNumber(const Settings& settings, Number id);
+// Clamped to the entry's range.
+void SetNumber(Settings& settings, Number id, UINT value);
 
 // The same idea for the global hotkeys: each one's name and the pair of
 // Settings members (RegisterHotKey modifiers and virtual key) that hold its

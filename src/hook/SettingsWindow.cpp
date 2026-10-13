@@ -1,5 +1,7 @@
 #include "hook/SettingsWindow.h"
 
+#include <format>
+#include <string>
 #include <utility>
 
 #include "util/UiFont.h"
@@ -12,6 +14,7 @@ constexpr wchar_t kWindowClassName[] = L"PolishSettingsWindow";
 constexpr int kFirstCheckId = 3000;
 constexpr int kFirstHotkeyButtonId = 3100;
 constexpr int kStartAtLoginId = 3200;
+constexpr int kFirstNumberEditId = 3300;
 
 // Logical (96 DPI) layout constants.
 constexpr int kClientWidth = 520;
@@ -72,6 +75,27 @@ LRESULT SettingsWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LP
             const int id = LOWORD(wParam);
             if (id == IDCANCEL) {  // Esc, via IsDialogMessage
                 ShowWindow(hwnd, SW_HIDE);
+                return 0;
+            }
+            if (id >= kFirstNumberEditId && static_cast<size_t>(id - kFirstNumberEditId) < numberRows_.size()) {
+                const NumberRow& row = numberRows_[static_cast<size_t>(id - kFirstNumberEditId)];
+                if (HIWORD(wParam) == EN_CHANGE && !refreshing_) {
+                    wchar_t text[16] = L"";
+                    GetWindowTextW(row.edit, text, 16);
+                    // Applied as it is typed. Half-typed values below the
+                    // minimum (a "5" on the way to "50") are left alone
+                    // rather than clamped under the user's fingers.
+                    if (text[0] != L'\0') {
+                        const UINT value = static_cast<UINT>(wcstoul(text, nullptr, 10));
+                        const NumberInfo& info = NumberFor(row.number);
+                        if (value >= info.min && value <= info.max) {
+                            callbacks_.setNumber(row.number, value);
+                        }
+                    }
+                } else if (HIWORD(wParam) == EN_KILLFOCUS) {
+                    // Leaving the box shows what is actually in effect.
+                    Refresh();
+                }
                 return 0;
             }
             if (HIWORD(wParam) == BN_CLICKED) {
@@ -153,6 +177,37 @@ void SettingsWindow::CreateControls() {
     SendMessageW(startAtLoginCheck_, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
     y += checkHeight + Scale(kRowGap, dpi);
 
+    // Numbers: label, edit, unit.
+    {
+        const int editWidth = Scale(56, dpi);
+        const int editHeight = Scale(24, dpi);
+        const int labelWidth = Scale(kHotkeyNameWidth, dpi) - indent;
+        int editId = kFirstNumberEditId;
+        for (const NumberInfo& info : AllNumbers()) {
+            NumberRow row;
+            row.number = info.id;
+            HWND label = CreateWindowExW(0, L"STATIC", info.name, WS_CHILD | WS_VISIBLE | SS_NOPREFIX, margin + indent,
+                                         y + Scale(3, dpi), labelWidth, checkHeight, window_, nullptr, instance_,
+                                         nullptr);
+            row.edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                       WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_NUMBER | ES_CENTER,
+                                       margin + indent + labelWidth, y, editWidth, editHeight, window_,
+                                       reinterpret_cast<HMENU>(static_cast<INT_PTR>(editId++)), instance_, nullptr);
+            SendMessageW(row.edit, EM_SETLIMITTEXT, 3, 0);
+            const std::wstring unit = std::format(L"{} ({}-{})", info.unit, info.min, info.max);
+            HWND unitLabel =
+                CreateWindowExW(0, L"STATIC", unit.c_str(), WS_CHILD | WS_VISIBLE | SS_NOPREFIX,
+                                margin + indent + labelWidth + editWidth + Scale(8, dpi), y + Scale(3, dpi),
+                                Scale(180, dpi), checkHeight, window_, nullptr, instance_, nullptr);
+            for (HWND control : {label, row.edit, unitLabel}) {
+                SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+            }
+            numberRows_.push_back(row);
+            y += editHeight + Scale(6, dpi);
+        }
+        y += Scale(kRowGap, dpi) - Scale(6, dpi);
+    }
+
     // Shortcuts: name, current combination, Change... button.
     if (headingFont_ != nullptr) {
         DeleteObject(headingFont_);
@@ -201,6 +256,11 @@ void SettingsWindow::Refresh() {
         SendMessageW(row.check, BM_SETCHECK, callbacks_.isEnabled(row.feature) ? BST_CHECKED : BST_UNCHECKED,
                     0);
     }
+    refreshing_ = true;
+    for (const NumberRow& row : numberRows_) {
+        SetWindowTextW(row.edit, std::to_wstring(callbacks_.getNumber(row.number)).c_str());
+    }
+    refreshing_ = false;
     SendMessageW(startAtLoginCheck_, BM_SETCHECK, callbacks_.startAtLogin() ? BST_CHECKED : BST_UNCHECKED, 0);
     for (const HotkeyRow& row : hotkeyRows_) {
         SetWindowTextW(row.combination, callbacks_.hotkeyText(row.hotkey).c_str());

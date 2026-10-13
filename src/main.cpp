@@ -7972,6 +7972,12 @@ void ApplyFeatureToggle(polish::Feature feature, bool enabled) {
         case polish::Feature::PolishButton:
             ApplyPolishButtonSetting();
             break;
+        case polish::Feature::ScaledTopmost:
+            // Views already on screen follow the setting at once.
+            for (auto& [window, viewWindow] : g_scaledViews) {
+                viewWindow->SetTopmost(enabled);
+            }
+            break;
         case polish::Feature::RestoreSync:
         case polish::Feature::AltTab:
         case polish::Feature::KeepClipboard:
@@ -7995,6 +8001,13 @@ void ShowSettingsWindow() {
             return FormatHotkey(combination.modifiers, combination.virtualKey);
         };
         callbacks.changeHotkey = [](polish::Hotkey hotkey) { ChangeHotkey(hotkey); };
+        callbacks.getNumber = [](polish::Number number) { return polish::GetNumber(g_settings, number); };
+        callbacks.setNumber = [](polish::Number number, UINT value) {
+            polish::SetNumber(g_settings, number, value);
+            polish::SaveSettings(g_settings);
+            polish::LogDebug(std::format(L"[Polish] {} set to {}", polish::NumberFor(number).name,
+                                          polish::GetNumber(g_settings, number)));
+        };
         callbacks.startAtLogin = []() { return polish::IsStartAtLoginEnabled(); };
         callbacks.setStartAtLogin = [](bool enabled) {
             polish::SetStartAtLoginEnabled(enabled);

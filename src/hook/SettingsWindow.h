@@ -34,6 +34,9 @@ public:
         SetEnabledFn setEnabled;
         HotkeyTextFn hotkeyText;
         ChangeHotkeyFn changeHotkey;
+        std::function<UINT(Number)> getNumber;
+        // Called with whatever the user typed; the app clamps it.
+        std::function<void(Number, UINT)> setNumber;
         // "Start with Windows" is not a feature switch in Settings -- it is
         // the Run registry value -- so it has its own pair.
         std::function<bool()> startAtLogin;
@@ -76,6 +79,14 @@ private:
     HINSTANCE instance_;
     Callbacks callbacks_;
     HWND startAtLoginCheck_ = nullptr;
+    struct NumberRow {
+        Number number;
+        HWND edit = nullptr;
+    };
+    std::vector<NumberRow> numberRows_;
+    // Set while Refresh() writes the edit boxes, so that is not taken for
+    // the user typing.
+    bool refreshing_ = false;
     HWND window_ = nullptr;
     HFONT font_ = nullptr;
     HFONT headingFont_ = nullptr;

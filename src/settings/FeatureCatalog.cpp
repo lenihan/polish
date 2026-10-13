@@ -33,6 +33,10 @@ const std::vector<FeatureInfo>& AllFeatures() {
          L"Shrink a window to a small live thumbnail you can keep an eye on, then click it to bring the window "
          L"back at full size. Nothing is resized -- the window is simply hidden behind its own thumbnail.",
          &Settings::scaleEnabled},
+        {Feature::ScaledTopmost, L"Scaled windows stay on top",
+         L"A window you shrank to keep an eye on is no use once something covers it, so its thumbnail floats "
+         L"above other windows. Turn this off to let them be covered like any other window.",
+         &Settings::scaledViewTopmost},
         {Feature::RestoreSync, L"Restore remembers Snap position",
          L"When you maximize a window you had snapped or moved, Windows can restore it to a stale spot. Polish "
          L"keeps its idea of the restored position in step with where you actually left the window.",
@@ -63,6 +67,31 @@ bool IsFeatureEnabled(const Settings& settings, Feature id) {
 
 void SetFeatureEnabled(Settings& settings, Feature id, bool enabled) {
     settings.*(FeatureFor(id).member) = enabled;
+}
+
+const std::vector<NumberInfo>& AllNumbers() {
+    static const std::vector<NumberInfo> kNumbers = {
+        {Number::SnapDistance, L"Snap distance", L"pixels", 0, 60, &Settings::moveModeSnapThresholdPx},
+        // 10..90 is what LoadSettings accepts; anything else it resets to 50.
+        {Number::ScalePercent, L"Scaled window size", L"percent", 10, 90, &Settings::scaleDefaultPercent},
+    };
+    return kNumbers;
+}
+
+const NumberInfo& NumberFor(Number id) {
+    for (const NumberInfo& info : AllNumbers()) {
+        if (info.id == id) {
+            return info;
+        }
+    }
+    return AllNumbers().front();  // see FeatureFor
+}
+
+UINT GetNumber(const Settings& settings, Number id) { return settings.*(NumberFor(id).member); }
+
+void SetNumber(Settings& settings, Number id, UINT value) {
+    const NumberInfo& info = NumberFor(id);
+    settings.*(info.member) = value < info.min ? info.min : (value > info.max ? info.max : value);
 }
 
 const std::vector<HotkeyInfo>& AllHotkeys() {

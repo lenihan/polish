@@ -10,7 +10,7 @@ using namespace polish;
 TEST_CASE("FeatureCatalog: every Feature enumerator has exactly one entry") {
     // The last enumerator; adding one to the enum without a table row makes
     // the count below disagree.
-    constexpr int kFeatureCount = static_cast<int>(Feature::PolishButton) + 1;
+    constexpr int kFeatureCount = static_cast<int>(Feature::ScaledTopmost) + 1;
     CHECK(static_cast<int>(AllFeatures().size()) == kFeatureCount);
 
     std::set<int> seen;
@@ -112,5 +112,27 @@ TEST_CASE("HotkeyCatalog: set changes only the one hotkey") {
             CHECK(now.modifiers == was.modifiers);
             CHECK(now.virtualKey == was.virtualKey);
         }
+    }
+}
+
+TEST_CASE("NumberCatalog: set clamps to the entry's range") {
+    Settings settings;
+    SetNumber(settings, Number::ScalePercent, 5);
+    CHECK(GetNumber(settings, Number::ScalePercent) == 10);
+    SetNumber(settings, Number::ScalePercent, 500);
+    CHECK(GetNumber(settings, Number::ScalePercent) == 90);
+    SetNumber(settings, Number::ScalePercent, 33);
+    CHECK(GetNumber(settings, Number::ScalePercent) == 33);
+    // The other number is untouched.
+    CHECK(GetNumber(settings, Number::SnapDistance) == GetNumber(Settings{}, Number::SnapDistance));
+}
+
+TEST_CASE("NumberCatalog: every default sits inside its own range") {
+    const Settings defaults;
+    for (const NumberInfo& info : AllNumbers()) {
+        CHECK(std::wstring(info.name).size() > 3);
+        CHECK(info.min < info.max);
+        CHECK(GetNumber(defaults, info.id) >= info.min);
+        CHECK(GetNumber(defaults, info.id) <= info.max);
     }
 }
