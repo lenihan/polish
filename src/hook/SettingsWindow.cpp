@@ -11,6 +11,7 @@ namespace {
 constexpr wchar_t kWindowClassName[] = L"PolishSettingsWindow";
 constexpr int kFirstCheckId = 3000;
 constexpr int kFirstHotkeyButtonId = 3100;
+constexpr int kStartAtLoginId = 3200;
 
 // Logical (96 DPI) layout constants.
 constexpr int kClientWidth = 520;
@@ -26,13 +27,8 @@ int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USE
 
 }  // namespace
 
-SettingsWindow::SettingsWindow(HINSTANCE instance, IsEnabledFn isEnabled, SetEnabledFn setEnabled,
-                               HotkeyTextFn hotkeyText, ChangeHotkeyFn changeHotkey)
-    : instance_(instance),
-      isEnabled_(std::move(isEnabled)),
-      setEnabled_(std::move(setEnabled)),
-      hotkeyText_(std::move(hotkeyText)),
-      changeHotkey_(std::move(changeHotkey)) {
+SettingsWindow::SettingsWindow(HINSTANCE instance, Callbacks callbacks)
+    : instance_(instance), callbacks_(std::move(callbacks)) {
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
     windowClass.lpfnWndProc = WindowProcThunk;
@@ -83,12 +79,15 @@ LRESULT SettingsWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LP
                 if (index < rows_.size()) {
                     const Row& row = rows_[index];
                     const bool enabled = SendMessageW(row.check, BM_GETCHECK, 0, 0) == BST_CHECKED;
-                    setEnabled_(row.feature, enabled);
+                    callbacks_.setEnabled(row.feature, enabled);
+                }
+                if (id == kStartAtLoginId) {
+                    callbacks_.setStartAtLogin(SendMessageW(startAtLoginCheck_, BM_GETCHECK, 0, 0) == BST_CHECKED);
                 }
                 const size_t hotkeyIndex = static_cast<size_t>(id - kFirstHotkeyButtonId);
                 if (hotkeyIndex < hotkeyRows_.size()) {
                     // Modal: returns when the dialog is done.
-                    changeHotkey_(hotkeyRows_[hotkeyIndex].hotkey);
+                    callbacks_.changeHotkey(hotkeyRows_[hotkeyIndex].hotkey);
                     Refresh();
                 }
             }
@@ -147,6 +146,13 @@ void SettingsWindow::CreateControls() {
     SelectObject(dc, previousFont);
     ReleaseDC(window_, dc);
 
+    startAtLoginCheck_ =
+        CreateWindowExW(0, L"BUTTON", L"Start Polish with Windows", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+                        margin, y, clientWidth - 2 * margin, checkHeight, window_,
+                        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kStartAtLoginId)), instance_, nullptr);
+    SendMessageW(startAtLoginCheck_, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+    y += checkHeight + Scale(kRowGap, dpi);
+
     // Shortcuts: name, current combination, Change... button.
     if (headingFont_ != nullptr) {
         DeleteObject(headingFont_);
@@ -192,10 +198,12 @@ void SettingsWindow::CreateControls() {
 
 void SettingsWindow::Refresh() {
     for (const Row& row : rows_) {
-        SendMessageW(row.check, BM_SETCHECK, isEnabled_(row.feature) ? BST_CHECKED : BST_UNCHECKED, 0);
+        SendMessageW(row.check, BM_SETCHECK, callbacks_.isEnabled(row.feature) ? BST_CHECKED : BST_UNCHECKED,
+                    0);
     }
+    SendMessageW(startAtLoginCheck_, BM_SETCHECK, callbacks_.startAtLogin() ? BST_CHECKED : BST_UNCHECKED, 0);
     for (const HotkeyRow& row : hotkeyRows_) {
-        SetWindowTextW(row.combination, hotkeyText_(row.hotkey).c_str());
+        SetWindowTextW(row.combination, callbacks_.hotkeyText(row.hotkey).c_str());
     }
 }
 

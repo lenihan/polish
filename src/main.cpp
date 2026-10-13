@@ -7987,15 +7987,20 @@ void ToggleFeature(polish::Feature feature) {
 // path as the tray menu's.
 void ShowSettingsWindow() {
     if (!g_settingsWindow) {
-        g_settingsWindow = std::make_unique<polish::SettingsWindow>(
-            GetModuleHandleW(nullptr),
-            [](polish::Feature feature) { return polish::IsFeatureEnabled(g_settings, feature); },
-            [](polish::Feature feature, bool enabled) { ApplyFeatureToggle(feature, enabled); },
-            [](polish::Hotkey hotkey) {
-                const polish::HotkeyCombination combination = polish::GetHotkey(g_settings, hotkey);
-                return FormatHotkey(combination.modifiers, combination.virtualKey);
-            },
-            [](polish::Hotkey hotkey) { ChangeHotkey(hotkey); });
+        polish::SettingsWindow::Callbacks callbacks;
+        callbacks.isEnabled = [](polish::Feature feature) { return polish::IsFeatureEnabled(g_settings, feature); };
+        callbacks.setEnabled = [](polish::Feature feature, bool enabled) { ApplyFeatureToggle(feature, enabled); };
+        callbacks.hotkeyText = [](polish::Hotkey hotkey) {
+            const polish::HotkeyCombination combination = polish::GetHotkey(g_settings, hotkey);
+            return FormatHotkey(combination.modifiers, combination.virtualKey);
+        };
+        callbacks.changeHotkey = [](polish::Hotkey hotkey) { ChangeHotkey(hotkey); };
+        callbacks.startAtLogin = []() { return polish::IsStartAtLoginEnabled(); };
+        callbacks.setStartAtLogin = [](bool enabled) {
+            polish::SetStartAtLoginEnabled(enabled);
+            polish::LogDebug(std::format(L"[Polish] start with Windows {}", enabled ? L"enabled" : L"disabled"));
+        };
+        g_settingsWindow = std::make_unique<polish::SettingsWindow>(GetModuleHandleW(nullptr), std::move(callbacks));
     }
     g_settingsWindow->Show();
 }

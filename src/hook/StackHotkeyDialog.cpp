@@ -31,6 +31,40 @@ constexpr int kLabelHeight = 20;
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
+// The key field holds one character. Letters and digits are their own
+// virtual-key codes; Space, minus and plus/equals are not, and are the
+// default keys of the layout and scale hotkeys, so they have to be typeable
+// or those could never be set again once changed.
+std::optional<UINT> VirtualKeyForChar(wchar_t c) {
+    if ((c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9')) {
+        return static_cast<UINT>(c);
+    }
+    switch (c) {
+        case L' ':
+            return VK_SPACE;
+        case L'-':
+            return VK_OEM_MINUS;
+        case L'=':
+        case L'+':
+            return VK_OEM_PLUS;
+        default:
+            return std::nullopt;
+    }
+}
+
+wchar_t CharForVirtualKey(UINT virtualKey) {
+    switch (virtualKey) {
+        case VK_SPACE:
+            return L' ';
+        case VK_OEM_MINUS:
+            return L'-';
+        case VK_OEM_PLUS:
+            return L'=';
+        default:
+            return static_cast<wchar_t>(virtualKey);
+    }
+}
+
 }  // namespace
 
 StackHotkeyDialog::StackHotkeyDialog(HINSTANCE instance) : instance_(instance) {
@@ -159,7 +193,7 @@ void StackHotkeyDialog::CreateControls(HWND hwnd) {
     // without requiring the user to select/clear the field first.
     SendMessageW(keyEdit_, EM_SETLIMITTEXT, 4, 0);
     if (initialChoice_.virtualKey != 0) {
-        const wchar_t keyChar[2] = {static_cast<wchar_t>(initialChoice_.virtualKey), L'\0'};
+        const wchar_t keyChar[2] = {CharForVirtualKey(initialChoice_.virtualKey), L'\0'};
         SetWindowTextW(keyEdit_, keyChar);
     }
 
@@ -220,14 +254,15 @@ void StackHotkeyDialog::Commit() {
     const wchar_t keyChar = keyText[0];
 
     const bool hasModifier = modifiers != 0;
-    const bool hasValidKey = (keyChar >= L'A' && keyChar <= L'Z') || (keyChar >= L'0' && keyChar <= L'9');
-    if (!hasModifier || !hasValidKey) {
-        MessageBoxW(window_, L"Pick at least one modifier (Ctrl/Alt/Shift/Win) and a single letter or digit key.",
+    const std::optional<UINT> virtualKey = VirtualKeyForChar(keyChar);
+    if (!hasModifier || !virtualKey.has_value()) {
+        MessageBoxW(window_,
+                    L"Pick at least one modifier (Ctrl/Alt/Shift/Win) and a single letter, digit, Space, - or = key.",
                     L"Invalid shortcut", MB_OK | MB_ICONWARNING);
         return;
     }
 
-    result_ = HotkeyChoice{modifiers, static_cast<UINT>(keyChar)};
+    result_ = HotkeyChoice{modifiers, *virtualKey};
     done_ = true;
 }
 

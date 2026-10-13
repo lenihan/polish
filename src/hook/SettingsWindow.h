@@ -29,8 +29,18 @@ public:
     // Runs the app's change-hotkey flow (modal; returns when it is done).
     using ChangeHotkeyFn = std::function<void(Hotkey)>;
 
-    SettingsWindow(HINSTANCE instance, IsEnabledFn isEnabled, SetEnabledFn setEnabled, HotkeyTextFn hotkeyText,
-                   ChangeHotkeyFn changeHotkey);
+    struct Callbacks {
+        IsEnabledFn isEnabled;
+        SetEnabledFn setEnabled;
+        HotkeyTextFn hotkeyText;
+        ChangeHotkeyFn changeHotkey;
+        // "Start with Windows" is not a feature switch in Settings -- it is
+        // the Run registry value -- so it has its own pair.
+        std::function<bool()> startAtLogin;
+        std::function<void(bool)> setStartAtLogin;
+    };
+
+    SettingsWindow(HINSTANCE instance, Callbacks callbacks);
     ~SettingsWindow();
 
     SettingsWindow(const SettingsWindow&) = delete;
@@ -64,10 +74,8 @@ private:
     };
 
     HINSTANCE instance_;
-    IsEnabledFn isEnabled_;
-    SetEnabledFn setEnabled_;
-    HotkeyTextFn hotkeyText_;
-    ChangeHotkeyFn changeHotkey_;
+    Callbacks callbacks_;
+    HWND startAtLoginCheck_ = nullptr;
     HWND window_ = nullptr;
     HFONT font_ = nullptr;
     HFONT headingFont_ = nullptr;
