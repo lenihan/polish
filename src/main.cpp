@@ -495,6 +495,15 @@ std::map<HWND, std::unique_ptr<polish::ScaledViewWindow>> g_scaledViews;
 // Posted by a view that wants its window restored: restoring destroys the
 // view, which cannot happen from inside the view's own message handler.
 constexpr UINT kScaledRestoreMessage = WM_APP + 40;
+// "  (33%)" for a scaled window, else nothing -- for the list panels' rows,
+// so a window you cannot see at its real size says what size it is.
+std::wstring ScaledTitleSuffix(HWND hwnd) {
+    const polish::ScaledEntry* entry = g_scaledSet.Find(hwnd);
+    if (entry == nullptr) {
+        return L"";
+    }
+    return std::format(L"  ({}%)", static_cast<int>(entry->scale * 100.0 + 0.5));
+}
 void OnScaledWindowForeground(HWND hwnd);
 void OnScaledWindowDestroyed(HWND hwnd);
 void OnScaledWindowLocationChanged(HWND hwnd);
@@ -1472,7 +1481,7 @@ std::wstring AltTabRowTitle(HWND hwnd) {
     }
     wchar_t title[256] = L"";
     GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
-    return title;
+    return std::wstring(title) + ScaledTitleSuffix(hwnd);
 }
 
 BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
@@ -1926,9 +1935,14 @@ void ApplyAltTabDimming() {
             : nullptr;
     for (size_t i = 0; i < g_altTabDimTargets.size(); ++i) {
         HWND hwnd = g_altTabDimTargets[i];
-        if (hwnd == highlightedWindow) {
+        if (hwnd == highlightedWindow || g_scaledSet.Contains(hwnd)) {
             // Handled last, below -- but clear any dim left over from the
             // previous cycle, when some other window held the highlight.
+            //
+            // A scaled window is never dimmed or re-stacked: what is on
+            // screen is its thumbnail, not the invisible full-size ghost,
+            // and demoting the ghost from topmost would be undone by the
+            // watchdog a moment later.
             g_altTabOverlays[i]->Hide();
             continue;
         }
@@ -1945,7 +1959,17 @@ void ApplyAltTabDimming() {
 
     ULONGLONG t2 = t1;
     ULONGLONG t3 = t1;
-    if (highlightedWindow != nullptr) {
+    if (highlightedWindow != nullptr && g_scaledSet.Contains(highlightedWindow)) {
+        // The highlight goes around the thumbnail, which is the only thing
+        // of this window on screen. Nothing is promoted: committing the row
+        // activates the window, and that restores it.
+        const auto viewIt = g_scaledViews.find(highlightedWindow);
+        if (g_activeWindowHalo && viewIt != g_scaledViews.end() && viewIt->second->Visible()) {
+            g_activeWindowHalo->ShowAroundTarget(viewIt->second->Handle());
+        } else if (g_activeWindowHalo) {
+            g_activeWindowHalo->Hide();
+        }
+    } else if (highlightedWindow != nullptr) {
         const HWND highlighted = highlightedWindow;
         const bool promoted = polish::PromoteWindowToFront(highlighted);
         if (!promoted) {
@@ -3813,7 +3837,7 @@ void OpenTaskbarPanel(int index) {
         row.hwnd = hwnd;
         wchar_t title[256] = L"";
         GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
-        row.title = title;
+        row.title = std::wstring(title) + ScaledTitleSuffix(hwnd);
         row.icon = TaskbarRowIcon(hwnd);
         // The panel draws minimized rows muted, below a divider -- the
         // same distinction the taskbar button itself hides. Its rows must
@@ -3989,10 +4013,12 @@ void CancelTaskbarPreview() {
 // A row was hovered (or left, with nullptr). Arms the dwell; the actual
 // activation happens in the timer.
 void OnTaskbarRowHovered(HWND hwnd) {
-    if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd)) {
+    if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd) || g_scaledSet.Contains(hwnd)) {
         // Minimized rows are deliberately not previewed: showing one
         // means restoring it, which is a change the user did not ask for
-        // and which un-minimizing back would not perfectly undo.
+        // and which un-minimizing back would not perfectly undo. A scaled
+        // window is the same: previewing means activating, and activating
+        // a scaled window restores it for good.
         KillTimer(g_messageWindow, kTaskbarPreviewTimerId);
         g_taskbarPreviewPending = nullptr;
         return;
@@ -4013,7 +4039,7 @@ void ShowTaskbarPreview() {
     KillTimer(g_messageWindow, kTaskbarPreviewTimerId);
     HWND target = g_taskbarPreviewPending;
     g_taskbarPreviewPending = nullptr;
-    if (target == nullptr || !IsWindow(target) || IsIconic(target)) {
+    if (target == nullptr || !IsWindow(target) || IsIconic(target) || g_scaledSet.Contains(target)) {
         return;
     }
     if (!g_taskbarPreviewing) {
@@ -7274,6 +7300,9 @@ polish::StackId CreateStackFromWindows(const std::vector<HWND>& windows, const s
         if (!IsWindow(hwnd)) {
             continue;
         }
+        // A scaled window is parked, and a stack lays its members out at
+        // real size: put it back first.
+        UnscaleWindow(hwnd, /*activate=*/false);
         if (polish::IsElevatedWindow(hwnd)) {
             polish::LogDebug(std::format(L"[Polish] New Stack: skipping elevated hwnd={}", reinterpret_cast<void*>(hwnd)));
             continue;
@@ -7367,6 +7396,7 @@ void JoinStack(polish::StackId id, HWND hwnd, size_t index) {
     if (stack == nullptr || !CanJoinStack(hwnd)) {
         return;
     }
+    UnscaleWindow(hwnd, /*activate=*/false);  // see CreateStackFromWindows
     stack->AddWindow(hwnd);
     const size_t last = stack->MemberCount() - 1;
     if (index < last) {

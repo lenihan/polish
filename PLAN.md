@@ -1248,15 +1248,71 @@ requestAnimationFrame counter. 12 s per run, scale 0.33, uncovered:
 
 **Gate: GO** on the ghost strategies.
 
+## Scaled windows: built
+
+Shrink a window to a live thumbnail; click it to get it back at 1:1.
+
+- **Parking** (`hook/WindowParking`): the window becomes `WS_EX_LAYERED |
+  WS_EX_TRANSPARENT`, alpha 1, topmost -- invisible, click-through, still
+  painting. It is the only code that touches a foreign window's styles, and
+  every park is journalled to `HKCU\Software\Polish\Parked` *before* it is
+  applied. Windows go back on exit/logoff, from an unhandled-exception
+  filter on a crash, and by journal replay at the next start after a hard
+  kill (matched on handle and pid). Elevated windows and windows layered
+  through `UpdateLayeredWindow` are refused. A 2 s watchdog re-parks a
+  window whose app undid the styles.
+- **View** (`hook/ScaledViewWindow`): a tool window, no-activate, with a
+  DWM thumbnail. Click = restore at the view's position; drag = move;
+  corner drag = rescale, aspect locked, snapping to 50/33/25% (dragging up
+  to full size restores); right-click = presets, always on top, close.
+  There is no hover chip: the thumbnail paints over anything the view
+  draws, so the scale lives in the menu header.
+- **Pure parts**: `windowtracking/ScaleGeometry` and `ScaledWindowSet`,
+  both tested.
+- **Keyboard**: Ctrl+Alt+`-` smaller, `=` larger (past 50% restores),
+  `0` back to 1:1. They act on the view under the cursor, else the scaled
+  window that still has focus, else (down only) the window in front.
+  Registry-only hotkeys, like the tiling ones.
+- **Focus stays with the scaled window** rather than moving to the next
+  one: an earlier version moved it away on the reasoning that you would
+  type into nothing, but the thumbnail is live so typing into it is
+  meaningful, and moving focus made a second press scale a different
+  window. No halo is drawn around a ghost.
+- **Steps are rounding-tolerant**: 50% of 1445 px is 723 px, which reads
+  back as 0.5003 -- above the preset, so "next one down" was 0.5 again and
+  repeated presses did nothing. `StepScale` snaps within a pixel's worth,
+  and an entry stores the scale that was asked for.
+- Tiling skips scaled windows; stack members cannot be scaled; scaling is
+  off-able from the tray, which restores everything.
+- **Alt+Tab and the taskbar panel**: a scaled window's row carries its
+  scale ("  (33%)"). The Alt+Tab highlight halo goes around the *view*, and
+  the ghost is never dimmed or re-stacked (demoting it from topmost would be
+  undone by the watchdog). Committing the row activates the window, which
+  restores it. The taskbar panel's hover-preview skips scaled windows, as it
+  does minimized ones: previewing means activating, and activating a scaled
+  window restores it for good.
+- **Stacks**: adding a scaled window to a stack (picker or join) restores it
+  first, so the stack lays it out at real size.
+
 ## Left to do
 
 - Add support for "frozen windows"...they are still listed in taskbar (Under Frozen), but they take
   zero resources. If you click on a frozen window it gets loaded. This lets a user jump back and forth
   between various apps (like vs code) quickly without needing to figure out how to get app/document loaded.
   There should be a frozen option for all non-frozen states. Frozen should have a thaw button.
-- Virtual desktop gets a taskbar button. Can we do something similar to handle
-  moving, resizing, scaling, layout of windows?
-- Support individual scaling so you can resize a window and it looks like a thumbnail
+- Scaled windows, remaining (see "Scaled windows: built"):
+  - Not yet checked on real VS Code, Windows Terminal and Explorer windows
+    (only a WinForms window, Edge and Notepad so far).
+  - Move mode (Hold Win) ignores views; dragging the view itself moves it.
+- Layout taskbar button + panel, like Windows' virtual-desktops button: a
+  Polish-owned taskbar button whose click opens a panel anchored to it,
+  acting on the window that was in front -- Move/resize, Tile 2/3/4-way,
+  Stack, Scale (50/33/25%, 1:1), each row showing its shortcut. Copy the
+  stack stand-in pattern (`StackStripWindow`: 1 px `WS_EX_APPWINDOW` popup
+  with its own AUMID, click seen as it becoming foreground). New panel
+  class rather than `AltTabListWindow` (that one assumes an HWND per row);
+  pull the anchor placement into a pure, tested helper. Extract the tray
+  menu's enabled/"won't fit" logic into one command model both use.
 - User click/drag taskbar button should allow reorder...currently is noop
 - Right click start should provide normal utility menu....currently is noop
 - A scrollable way to see all notifications (like snipping tool) once they are gone
