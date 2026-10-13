@@ -1391,9 +1391,19 @@ and its description beneath. A click applies at once through `ApplyFeatureToggle
 (no Save/Cancel); closing hides it and the next open re-reads the switches,
 since the tray menu may have flipped them. It opens from the tray menu and the
 Polish button's right-click menu, and gets Tab/Esc through `PreTranslate` in
-the main loop. Not yet: dark colours (it matches StackHotkeyDialog, which is
-light), hotkey editing, and the registry-only values (snap threshold, scale
-percent).
+the main loop.
+
+Below the features it holds "Start Polish with Windows", the numbers from the
+catalog's `Number` table (snap distance, scaled window size -- applied as typed,
+clamped to their range), and a Shortcuts list of the catalog's `Hotkey` table
+with a Change... button each. Changing one goes through `ChangeHotkey` in
+main.cpp: the new combination is test-registered first, so a taken one brings
+the dialog back with an error and the working hotkey is never given up. The
+dialog's key field takes letters, digits, Space, `-` and `=`.
+
+It follows the system's app theme, re-checked each time it is shown (dark
+title bar, `DarkMode_Explorer` on the controls, our own background and text
+colours). StackHotkeyDialog is still light.
 
 ## Layout taskbar button: built (the stand-in window; superseded above)
 
