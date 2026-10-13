@@ -219,6 +219,8 @@ constexpr UINT kBullseyeFrameIntervalMs = 16;
 // Some apps write the clipboard more than once per user-visible copy;
 // updates closer together than this count as one.
 constexpr ULONGLONG kBullseyeCopyDebounceMs = 150;
+// A copy this soon after a mouse button event is taken to be the click's.
+constexpr ULONGLONG kBullseyeMouseCopyWindowMs = 400;
 
 HWND g_messageWindow = nullptr;
 HWINEVENTHOOK g_foregroundHook = nullptr;
@@ -333,6 +335,15 @@ std::unique_ptr<polish::UiaWorker> g_uiaWorker;
 // PlayBullseye. Unset whenever no animation is pending an anchor.
 std::optional<polish::BullseyePhase> g_pendingBullseyePhase;
 uint64_t g_pendingBullseyeGeneration = 0;
+// True when that pending bullseye follows a mouse click: a copy button, or
+// Copy picked from a context menu. The caret is then where the user was
+// typing, not where they just clicked -- see ResolveBullseyeAnchor.
+bool g_pendingBullseyeFromMouse = false;
+// Tick of the last mouse button press or release, from a hook that does
+// nothing else. The clipboard update lands after the button is already up,
+// so polling the button state at that point would miss it.
+ULONGLONG g_lastMouseButtonTick = 0;
+HHOOK g_clickHook = nullptr;
 // The window whose tabs this session is over, and the rule its tabs are
 // read with. Frozen when the session opens: re-deriving either mid-
 // session would let the session drift onto another window.
@@ -849,6 +860,8 @@ void PlayBullseye(polish::BullseyePhase phase) {
         return;
     }
     g_pendingBullseyePhase = phase;
+    g_pendingBullseyeFromMouse = phase == polish::BullseyePhase::Copy &&
+                                 GetTickCount64() - g_lastMouseButtonTick < kBullseyeMouseCopyWindowMs;
     g_pendingBullseyeGeneration = g_uiaWorker->RequestSelectionRect();
     SetTimer(g_messageWindow, kBullseyeAnchorTimerId, kBullseyeAnchorTimeoutMs, nullptr);
 }
@@ -862,6 +875,8 @@ void ResolveBullseyeAnchor(bool timedOut) {
     }
     const polish::BullseyePhase phase = *g_pendingBullseyePhase;
     g_pendingBullseyePhase.reset();
+    const bool fromMouse = g_pendingBullseyeFromMouse;
+    g_pendingBullseyeFromMouse = false;
 
     if (!timedOut && g_uiaWorker != nullptr) {
         const polish::UiaWorker::SelectionSnapshot selection = g_uiaWorker->LatestSelection();
@@ -871,6 +886,16 @@ void ResolveBullseyeAnchor(bool timedOut) {
                                    (selection.bounds.top + selection.bounds.bottom) / 2};
                 StartBullseyeAt(phase, centre, L"selection");
                 return;
+            }
+            // A click made this copy and nothing is selected: a "Copy
+            // code" button, say. The caret is the text prompt the user was
+            // typing in, nowhere near what they clicked.
+            if (fromMouse) {
+                POINT cursor;
+                if (GetCursorPos(&cursor)) {
+                    StartBullseyeAt(phase, cursor, L"cursor-click");
+                    return;
+                }
             }
             // No selection -- a paste, typically. The accessibility caret
             // is the next best thing and, unlike the Win32 one, exists in
@@ -890,7 +915,34 @@ void ResolveBullseyeAnchor(bool timedOut) {
             }
         }
     }
+    // Worker silent or found nothing at all: after a click, the click is
+    // still the best guess.
+    if (fromMouse) {
+        POINT cursor;
+        if (GetCursorPos(&cursor)) {
+            StartBullseyeAt(phase, cursor, L"cursor-click");
+            return;
+        }
+    }
     StartBullseyeFromFallbackAnchor(phase);
+}
+
+LRESULT CALLBACK ClickTickHookProc(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HC_ACTION) {
+        switch (wParam) {
+            case WM_LBUTTONDOWN:
+            case WM_LBUTTONUP:
+            case WM_RBUTTONDOWN:
+            case WM_RBUTTONUP:
+            case WM_MBUTTONDOWN:
+            case WM_MBUTTONUP:
+                g_lastMouseButtonTick = GetTickCount64();
+                break;
+            default:
+                break;
+        }
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
 // True if `descendant` has `ancestor` somewhere up its parent-process chain.
@@ -7414,6 +7466,10 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             // Before the shield, so no mouse event can arrive for a
             // strip that is on its way out.
             g_taskbarHook.reset();
+            if (g_clickHook != nullptr) {
+                UnhookWindowsHookEx(g_clickHook);
+                g_clickHook = nullptr;
+            }
             g_taskbarPanel.reset();
             g_taskbarShield.reset();
             g_appResolver.reset();
@@ -7738,6 +7794,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             }
             UpdateActiveWindowHalo(GetForegroundWindow());
         });
+        g_clickHook = SetWindowsHookExW(WH_MOUSE_LL, ClickTickHookProc, GetModuleHandleW(nullptr), 0);
         // Installed whether or not the feature is on: with no targets the
         // hook hit-tests nothing and swallows nothing, and this way the
         // tray toggle never has to install a low-level hook at a moment

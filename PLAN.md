@@ -312,7 +312,11 @@ current todo list.
   the centre of the selected text where there is a selection, else the
   caret via MSAA `OBJID_CARET`, else the caret via a UIA collapsed range
   (cloned and stretched a character so it has a measurable rect), else
-  caret → mouse → window centre (`ResolveInteractionAnchor`). All resolved
+  caret → mouse → window centre (`ResolveInteractionAnchor`). A copy within
+  400 ms of a mouse button event (a "Copy code" button; a hook that only
+  stamps the tick) skips the caret rungs and anchors at the cursor when
+  nothing is selected -- the caret is the prompt the user was typing in,
+  not what they clicked. All resolved
   on `UiaWorker`'s thread at 4-12 ms with a 90 ms timeout. The three-API
   ladder is not over-engineering: no single one of them works everywhere,
   and the order matters because the last lies in Chromium
@@ -1218,7 +1222,6 @@ release has to exist before the signing application can even go in.
 
 ## Left to do
 
-- Bugfix: copy via mouse click doesn't show bullseye in correct location
 - Virtual desktop gets a taskbar button. Can we do something similar to handle
   moving, resizing, scaling, layout of windows?
 - Support individual scaling so you can resize a window and it looks like a thumbnail
