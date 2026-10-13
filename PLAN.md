@@ -1218,6 +1218,7 @@ release has to exist before the signing application can even go in.
 
 ## Left to do
 
+- Bugfix: copy via mouse click doesn't show bullseye in correct location
 - Virtual desktop gets a taskbar button. Can we do something similar to handle
   moving, resizing, scaling, layout of windows?
 - Support individual scaling so you can resize a window and it looks like a thumbnail
