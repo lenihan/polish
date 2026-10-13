@@ -12,6 +12,8 @@ add_executable(polish_tests
     MoveSnapTests.cpp
     ArrangeSelectionTests.cpp
     WindowLayoutTests.cpp
+    ScaleGeometryTests.cpp
+    ScaledWindowSetTests.cpp
     ActivationHistoryTests.cpp
     TabSwitchingTests.cpp
     StackCollapseTests.cpp

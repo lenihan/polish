@@ -34,6 +34,8 @@ add_library(polish_core STATIC
     src/windowtracking/RectUtils.cpp
     src/windowtracking/MoveSnap.cpp
     src/windowtracking/ArrangeSelection.cpp
+    src/windowtracking/ScaleGeometry.cpp
+    src/windowtracking/ScaledWindowSet.cpp
     src/windowtracking/StackCollapse.cpp
     src/windowtracking/StackLayout.cpp
     src/windowtracking/StackStripLayout.cpp
