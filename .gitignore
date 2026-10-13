@@ -5,3 +5,4 @@ out/
 *.suo
 build-x64/
 dist/
+tools/icon-out/
