@@ -175,6 +175,19 @@ if(MSVC)
     target_link_options(polish_uia PRIVATE /MANIFEST:NO)
 endif()
 
+# Phase-0 spike for scaled windows (see tools/scalespike). Standalone: it
+# deliberately does not link polish_core, so its measurements cannot be
+# contaminated by Polish's own hooks.
+option(POLISH_BUILD_SPIKE "Build the scaled-window liveness spike" OFF)
+if(POLISH_BUILD_SPIKE)
+    add_executable(scalespike tools/scalespike/scalespike.cpp)
+    target_compile_definitions(scalespike PRIVATE UNICODE _UNICODE _WIN32_WINNT=0x0A00 WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_link_libraries(scalespike PRIVATE user32 dwmapi gdi32 advapi32)
+    if(MSVC)
+        target_compile_options(scalespike PRIVATE /W4 /permissive- /utf-8)
+    endif()
+endif()
+
 enable_testing()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     add_subdirectory(tests)

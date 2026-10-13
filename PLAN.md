@@ -1220,6 +1220,34 @@ release has to exist before the signing application can even go in.
   first-run consent, the Start-open shield case, a run with every feature
   switched off, and that uninstall leaves nothing behind.
 
+## Scaled windows: spike results (2026-10-13)
+
+`tools/scalespike` (standalone, `-DPOLISH_BUILD_SPIKE=ON`, log in
+`%TEMP%\scalespike.log`). Measures liveness from the *screen* (BitBlt of the
+view), so "live" means a user would see it move. Test windows: a WinForms form
+ticking every 100 ms, and an isolated-profile Edge `--app` window running a
+requestAnimationFrame counter. 12 s per run, scale 0.33, uncovered:
+
+| strategy       | WinForms | Edge (Chromium)    |
+|----------------|----------|--------------------|
+| none (control) | live     | live               |
+| offscreen      | live     | **frozen**         |
+| ghost          | live     | live               |
+| ghost-topmost  | live     | live               |
+| printwindow    | ~1 fps   | frozen (offscreen) |
+
+- Off-screen parking is out: Chromium stops painting an off-screen window.
+- Ghost (`WS_EX_LAYERED|WS_EX_TRANSPARENT`, alpha 1) works and the DWM
+  thumbnail of an alpha-1 source composites at full opacity (coverage 100%).
+  Removing the styles restored the window exactly; journal cleared.
+- Covered case (white window over the monitor, Edge only): even the
+  untouched control stayed live, so this run does not separate ghost from
+  ghost-topmost. Chromium's occlusion tracker apparently does not freeze a
+  thumbnail source here. Not yet checked: Windows Terminal, Explorer, a real
+  VS Code window. Default to ghost-topmost anyway (cannot be covered).
+
+**Gate: GO** on the ghost strategies.
+
 ## Left to do
 
 - Virtual desktop gets a taskbar button. Can we do something similar to handle
