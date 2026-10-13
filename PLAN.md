@@ -1414,6 +1414,8 @@ commands as a menu.
 
 ## Left to do
 
+- When you paste/copy via a menu (like a right click), i'd expect bullseye to function. It doesn't in vs code
+  source control > changes > right click message > Paste
 - Add support for "frozen windows"...they are still listed in taskbar (Under Frozen), but they take
   zero resources. If you click on a frozen window it gets loaded. This lets a user jump back and forth
   between various apps (like vs code) quickly without needing to figure out how to get app/document loaded.
