@@ -122,7 +122,10 @@ current todo list.
   apps are started through their real AppUserModelID; everything else
   through the executable behind one of its existing windows, because a
   plain Win32 app's AUMID is shell-synthesized and ActivateApplication
-  rejects it.
+  rejects it. VS Code and its forks are single-instance, so a bare relaunch
+  only focuses an existing window: they get `--new-window`. The launch also
+  clears `ELECTRON_RUN_AS_NODE`, which polish inherits when started from a
+  VS Code terminal and which makes any spawned Electron app exit silently.
 - Taskbar: click-to-cycle skips minimized windows -- cycling is for moving
   between the windows in front of you, and landing on a minimized one
   turns a switch into an un-minimize nobody asked for. They stay
@@ -1218,7 +1221,6 @@ release has to exist before the signing application can even go in.
 - Virtual desktop gets a taskbar button. Can we do something similar to handle
   moving, resizing, scaling, layout of windows?
 - Support individual scaling so you can resize a window and it looks like a thumbnail
-- Bugfix: I selected new window from taskbar an nothing happened for vs code
 - User click/drag taskbar button should allow reorder...currently is noop
 - Right click start should provide normal utility menu....currently is noop
 - A scrollable way to see all notifications (like snipping tool) once they are gone

@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cwctype>
+#include <filesystem>
 #include <format>
 #include <map>
 #include <set>
@@ -3825,9 +3827,25 @@ bool LaunchNewWindowForButton(size_t buttonIndex) {
         polish::LogDebug(L"[Polish] Taskbar: new window failed -- no executable path for this app");
         return false;
     }
+    // Single-instance Electron editors forward a bare relaunch to the
+    // running process, which just focuses an existing window. They need
+    // the flag that says "a new one".
+    const wchar_t* arguments = nullptr;
+    {
+        std::wstring name = std::filesystem::path(*executable).filename().wstring();
+        std::ranges::transform(name, name.begin(), [](wchar_t c) { return static_cast<wchar_t>(towlower(c)); });
+        if (name == L"code.exe" || name == L"code - insiders.exe" || name == L"cursor.exe" ||
+            name == L"windsurf.exe" || name == L"vscodium.exe") {
+            arguments = L"--new-window";
+        }
+    }
+    // Polish started from a VS Code terminal inherits ELECTRON_RUN_AS_NODE,
+    // which makes any Electron app we spawn behave as a bare Node
+    // interpreter -- it exits without opening a window.
+    SetEnvironmentVariableW(L"ELECTRON_RUN_AS_NODE", nullptr);
     // ShellExecuteW's success threshold is the documented > 32, not zero.
     const auto result = reinterpret_cast<INT_PTR>(
-        ShellExecuteW(nullptr, L"open", executable->c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+        ShellExecuteW(nullptr, L"open", executable->c_str(), arguments, nullptr, SW_SHOWNORMAL));
     const bool launched = result > 32;
     polish::LogDebug(std::format(L"[Polish] Taskbar: new window via \"{}\" -> {}", *executable,
                                  launched ? L"started" : L"failed"));
