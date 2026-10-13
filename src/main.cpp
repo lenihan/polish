@@ -72,6 +72,10 @@
 namespace {
 
 constexpr wchar_t kSingleInstanceMutexName[] = L"Local\\Polish_SingleInstance_Mutex";
+// Given to the elevated copy that "Restart as Administrator" starts, so it
+// waits out the copy that is exiting instead of treating it as a second
+// instance.
+constexpr wchar_t kRestartArgument[] = L"--restarted";
 constexpr wchar_t kMessageWindowClassName[] = L"PolishMessageWindow";
 
 // Debounce for treating a window as "settled" after it stops
@@ -530,6 +534,7 @@ bool g_polishGeometryValid = false;
 RECT g_polishButtonRect{};
 void UpdatePolishButtonPlacement();
 void ApplyPolishButtonSetting();
+bool IsProcessElevated();
 // "  (33%)" for a scaled window, else nothing -- for the list panels' rows,
 // so a window you cannot see at its real size says what size it is.
 std::wstring ScaledTitleSuffix(HWND hwnd) {
@@ -6258,6 +6263,7 @@ constexpr UINT kMenuIdScaleDown = 17;
 constexpr UINT kMenuIdScaleRestoreAll = 18;
 constexpr UINT kMenuIdLayoutButton = 19;
 constexpr UINT kMenuIdSettings = 20;
+constexpr UINT kMenuIdRestartAdmin = 21;
 
 constexpr int kLayoutHotkeyId = 8;
 
@@ -7922,6 +7928,9 @@ void PopulateTrayMenu(HMENU menu) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (polish::IsStartAtLoginEnabled() ? MF_CHECKED : MF_UNCHECKED),
                 kMenuIdStartAtLogin, L"Start with Windows");
+    if (!IsProcessElevated()) {
+        AppendMenuW(menu, MF_STRING, kMenuIdRestartAdmin, L"Restart as Administrator");
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuIdAbout, L"By David Lenihan. Hire me!");
     AppendMenuW(menu, MF_STRING, kMenuIdExit, L"Exit");
@@ -7987,6 +7996,50 @@ void ApplyFeatureToggle(polish::Feature feature, bool enabled) {
 
 void ToggleFeature(polish::Feature feature) {
     ApplyFeatureToggle(feature, !polish::IsFeatureEnabled(g_settings, feature));
+}
+
+// Whether this process runs with an elevated token. An elevated Polish can
+// manage elevated windows (UIPI stops a normal one touching them); a normal
+// one cannot, which is what "Restart as Administrator" is for.
+bool IsProcessElevated() {
+    static const bool elevated = []() {
+        HANDLE token = nullptr;
+        TOKEN_ELEVATION elevation{};
+        DWORD returned = 0;
+        bool result = false;
+        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+            result = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &returned) &&
+                     elevation.TokenIsElevated != 0;
+            CloseHandle(token);
+        }
+        return result;
+    }();
+    return elevated;
+}
+
+// Starts a second copy of this exe elevated and, if the user accepts the
+// UAC prompt, quits this one. The new copy is told it is a restart so it
+// waits for this one's single-instance mutex to go (see wWinMain) rather
+// than finding it taken and exiting. Declining the prompt changes nothing.
+void RestartAsAdministrator() {
+    wchar_t path[MAX_PATH * 2] = L"";
+    if (GetModuleFileNameW(nullptr, path, static_cast<DWORD>(std::size(path))) == 0) {
+        return;
+    }
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOASYNC;
+    info.lpVerb = L"runas";
+    info.lpFile = path;
+    info.lpParameters = kRestartArgument;
+    info.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&info)) {
+        polish::LogDebug(std::format(L"[Polish] Restart as administrator: not started, GetLastError={}{}",
+                                      GetLastError(), GetLastError() == ERROR_CANCELLED ? L" (declined)" : L""));
+        return;
+    }
+    polish::LogDebug(L"[Polish] Restart as administrator: elevated copy started, exiting this one");
+    DestroyWindow(g_messageWindow);
 }
 
 // The Settings window's toggles go through ApplyFeatureToggle, the same
@@ -8110,6 +8163,9 @@ void HandleTrayCommand(UINT commandId) {
             break;
         case kMenuIdExit:
             DestroyWindow(g_messageWindow);
+            break;
+        case kMenuIdRestartAdmin:
+            RestartAsAdministrator();
             break;
         default:
             break;
@@ -8677,10 +8733,23 @@ void LogUiAccessMode() {
                                  uiAccess != 0 ? L"yes" : L"no", uiAccess != 0 ? L"beats" : L"loses to"));
 }
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     HANDLE singleInstanceMutex = CreateMutexW(nullptr, TRUE, kSingleInstanceMutexName);
     if (singleInstanceMutex == nullptr) {
         return 1;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS && commandLine != nullptr &&
+        wcsstr(commandLine, kRestartArgument) != nullptr) {
+        // Started by the copy that is quitting to hand over to this one:
+        // give it a moment to finish and release the mutex.
+        for (int attempt = 0; attempt < 50 && GetLastError() == ERROR_ALREADY_EXISTS; ++attempt) {
+            CloseHandle(singleInstanceMutex);
+            Sleep(100);
+            singleInstanceMutex = CreateMutexW(nullptr, TRUE, kSingleInstanceMutexName);
+            if (singleInstanceMutex == nullptr) {
+                return 1;
+            }
+        }
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(singleInstanceMutex);
