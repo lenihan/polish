@@ -71,6 +71,7 @@ add_library(polish_core STATIC
     src/hook/TaskbarShield.cpp
     src/hook/TaskbarHook.cpp
     src/settings/Settings.cpp
+    src/settings/FeatureCatalog.cpp
     src/tabs/TabSwitching.cpp
     src/tabs/UiaWorker.cpp
     src/util/AnchorPoint.cpp

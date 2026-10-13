@@ -36,6 +36,7 @@
 #include "hook/MoveModeZoneOverlay.h"
 #include "hook/TaskbarHook.h"
 #include "hook/TaskbarShield.h"
+#include "settings/FeatureCatalog.h"
 #include "settings/Settings.h"
 #include "tabs/TabSwitching.h"
 #include "tabs/UiaWorker.h"
@@ -7889,48 +7890,78 @@ void PopulateTrayMenu(HMENU menu) {
     AppendMenuW(menu, MF_STRING, kMenuIdExit, L"Exit");
 }
 
-void HandleTrayCommand(UINT commandId) {
-    switch (commandId) {
-        case kMenuIdRestoreSync:
-            g_settings.restoreSyncEnabled = !g_settings.restoreSyncEnabled;
-            polish::SaveSettings(g_settings);
-            polish::LogDebug(std::format(L"[Polish] restore-position sync {}",
-                                          g_settings.restoreSyncEnabled ? L"enabled" : L"disabled"));
-            break;
-        case kMenuIdAltTab:
-            g_settings.altTabEnabled = !g_settings.altTabEnabled;
-            polish::SaveSettings(g_settings);
-            polish::LogDebug(
-                std::format(L"[Polish] Alt+Tab {}", g_settings.altTabEnabled ? L"enabled" : L"disabled"));
-            break;
-        case kMenuIdHalo:
-            g_settings.haloEnabled = !g_settings.haloEnabled;
-            polish::SaveSettings(g_settings);
-            polish::LogDebug(std::format(L"[Polish] Halo {}", g_settings.haloEnabled ? L"enabled" : L"disabled"));
+// Turns a feature on or off: sets and saves the switch, then does whatever
+// the app has to do *now* for the new state to be true. Everything that
+// flips a feature goes through here -- the tray menu today, the Settings
+// window next -- so a toggle can never leave half of it undone.
+//
+// The side effects are only ever for turning something *off* or re-reading
+// a setting; most features simply consult their switch live and need
+// nothing.
+void ApplyFeatureToggle(polish::Feature feature, bool enabled) {
+    polish::SetFeatureEnabled(g_settings, feature, enabled);
+    polish::SaveSettings(g_settings);
+    polish::LogDebug(std::format(L"[Polish] {} {}", polish::FeatureFor(feature).name,
+                                  enabled ? L"enabled" : L"disabled"));
+    switch (feature) {
+        case polish::Feature::Halo:
             UpdateActiveWindowHalo(GetForegroundWindow());
             break;
-        case kMenuIdBullseye:
-            g_settings.bullseyeEnabled = !g_settings.bullseyeEnabled;
-            polish::SaveSettings(g_settings);
-            polish::LogDebug(
-                std::format(L"[Polish] Bullseye {}", g_settings.bullseyeEnabled ? L"enabled" : L"disabled"));
-            if (!g_settings.bullseyeEnabled && g_bullseye) {
-                // Mid-animation toggle-off should disappear now, not
-                // after the ring finishes; the frame timer's next tick
-                // sees an inactive overlay and kills itself.
+        case polish::Feature::Bullseye:
+            if (!enabled && g_bullseye) {
+                // Mid-animation toggle-off should disappear now, not after
+                // the ring finishes; the frame timer's next tick sees an
+                // inactive overlay and kills itself.
                 g_bullseye->Hide();
             }
             break;
-        case kMenuIdMoveMode:
-            g_settings.moveModeEnabled = !g_settings.moveModeEnabled;
-            polish::SaveSettings(g_settings);
-            polish::LogDebug(
-                std::format(L"[Polish] MoveMode {}", g_settings.moveModeEnabled ? L"enabled" : L"disabled"));
-            if (!g_settings.moveModeEnabled) {
+        case polish::Feature::MoveMode:
+            if (!enabled) {
                 // Toggled off mid-hold: the dim must come down now, not
                 // whenever the key happens to be released.
                 EndMoveModeSession();
             }
+            break;
+        case polish::Feature::Taskbar:
+            ApplyTaskbarSetting();
+            break;
+        case polish::Feature::Scale:
+            if (!enabled) {
+                // Never leave a window hidden behind a switched-off feature.
+                UnscaleAll();
+            }
+            RegisterScaleHotkeysFromSettings();
+            break;
+        case polish::Feature::PolishButton:
+            ApplyPolishButtonSetting();
+            break;
+        case polish::Feature::RestoreSync:
+        case polish::Feature::AltTab:
+        case polish::Feature::KeepClipboard:
+            break;  // read live where used
+    }
+}
+
+void ToggleFeature(polish::Feature feature) {
+    ApplyFeatureToggle(feature, !polish::IsFeatureEnabled(g_settings, feature));
+}
+
+void HandleTrayCommand(UINT commandId) {
+    switch (commandId) {
+        case kMenuIdRestoreSync:
+            ToggleFeature(polish::Feature::RestoreSync);
+            break;
+        case kMenuIdAltTab:
+            ToggleFeature(polish::Feature::AltTab);
+            break;
+        case kMenuIdHalo:
+            ToggleFeature(polish::Feature::Halo);
+            break;
+        case kMenuIdBullseye:
+            ToggleFeature(polish::Feature::Bullseye);
+            break;
+        case kMenuIdMoveMode:
+            ToggleFeature(polish::Feature::MoveMode);
             break;
         case kMenuIdMoveModeStart: {
             const HWND target = MoveModeMenuTarget();
@@ -7951,11 +7982,7 @@ void HandleTrayCommand(UINT commandId) {
             break;
         }
         case kMenuIdTaskbar:
-            g_settings.taskbarEnabled = !g_settings.taskbarEnabled;
-            polish::SaveSettings(g_settings);
-            polish::LogDebug(
-                std::format(L"[Polish] Taskbar {}", g_settings.taskbarEnabled ? L"enabled" : L"disabled"));
-            ApplyTaskbarSetting();
+            ToggleFeature(polish::Feature::Taskbar);
             break;
         case kMenuIdStartAtLogin: {
             const bool newValue = !polish::IsStartAtLoginEnabled();
@@ -7974,15 +8001,7 @@ void HandleTrayCommand(UINT commandId) {
             ArrangeWindows(polish::ArrangeKind::FourWay);
             break;
         case kMenuIdScaleEnabled:
-            g_settings.scaleEnabled = !g_settings.scaleEnabled;
-            polish::SaveSettings(g_settings);
-            polish::LogDebug(
-                std::format(L"[Polish] Scaled windows {}", g_settings.scaleEnabled ? L"enabled" : L"disabled"));
-            if (!g_settings.scaleEnabled) {
-                // Never leave a window hidden behind a switched-off feature.
-                UnscaleAll();
-            }
-            RegisterScaleHotkeysFromSettings();
+            ToggleFeature(polish::Feature::Scale);
             break;
         case kMenuIdScaleDown: {
             // The most recently used window: the foreground is Polish's own
@@ -8003,11 +8022,7 @@ void HandleTrayCommand(UINT commandId) {
             UnscaleAll();
             break;
         case kMenuIdLayoutButton:
-            g_settings.polishButtonEnabled = !g_settings.polishButtonEnabled;
-            polish::SaveSettings(g_settings);
-            polish::LogDebug(std::format(L"[Polish] Polish button {}",
-                                          g_settings.polishButtonEnabled ? L"enabled" : L"disabled"));
-            ApplyPolishButtonSetting();
+            ToggleFeature(polish::Feature::PolishButton);
             break;
         case kMenuIdNewStack:
             TriggerNewStack(nullptr);

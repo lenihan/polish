@@ -27,6 +27,7 @@ add_executable(polish_tests
     TaskbarButtonsTests.cpp
     TaskbarReadPolicyTests.cpp
     TaskbarPlacementTests.cpp
+    FeatureCatalogTests.cpp
 )
 
 target_link_libraries(polish_tests PRIVATE polish_core doctest::doctest)

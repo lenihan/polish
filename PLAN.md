@@ -1372,6 +1372,18 @@ hover highlight:
 - Registry value `PolishButton` (the old `LayoutButtonEnabled` is honoured as
   its default).
 
+## One place for feature toggles
+
+`settings/FeatureCatalog` is the table of every on/off feature -- id, the name
+it is shown as, a plain-language description, and which `Settings` member holds
+its switch. It exists because the same facts are wanted by the tray menu, by
+the toggle handling and by the Settings window, and a feature renamed in one
+and not the others is the drift it prevents. It is data only; what turning a
+feature on or off *does* is `ApplyFeatureToggle` in main.cpp, which the tray
+menu goes through and the Settings window will too. The log line for a toggle
+now carries the catalog's name (e.g. "Halo around active window enabled")
+rather than a hand-written one per feature.
+
 ## Layout taskbar button: built (the stand-in window; superseded above)
 
 A Polish-owned taskbar button, "Layout", whose click opens the layout
