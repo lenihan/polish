@@ -10,6 +10,7 @@ namespace {
 
 constexpr wchar_t kWindowClassName[] = L"PolishSettingsWindow";
 constexpr int kFirstCheckId = 3000;
+constexpr int kFirstHotkeyButtonId = 3100;
 
 // Logical (96 DPI) layout constants.
 constexpr int kClientWidth = 520;
@@ -17,13 +18,21 @@ constexpr int kMargin = 16;
 constexpr int kCheckHeight = 22;
 constexpr int kDescriptionIndent = 24;
 constexpr int kRowGap = 14;
+constexpr int kHotkeyRowHeight = 28;
+constexpr int kHotkeyNameWidth = 200;
+constexpr int kHotkeyButtonWidth = 90;
 
 int Scale(int value, UINT dpi) { return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI); }
 
 }  // namespace
 
-SettingsWindow::SettingsWindow(HINSTANCE instance, IsEnabledFn isEnabled, SetEnabledFn setEnabled)
-    : instance_(instance), isEnabled_(std::move(isEnabled)), setEnabled_(std::move(setEnabled)) {
+SettingsWindow::SettingsWindow(HINSTANCE instance, IsEnabledFn isEnabled, SetEnabledFn setEnabled,
+                               HotkeyTextFn hotkeyText, ChangeHotkeyFn changeHotkey)
+    : instance_(instance),
+      isEnabled_(std::move(isEnabled)),
+      setEnabled_(std::move(setEnabled)),
+      hotkeyText_(std::move(hotkeyText)),
+      changeHotkey_(std::move(changeHotkey)) {
     WNDCLASSEXW windowClass{};
     windowClass.cbSize = sizeof(windowClass);
     windowClass.lpfnWndProc = WindowProcThunk;
@@ -40,6 +49,9 @@ SettingsWindow::~SettingsWindow() {
     }
     if (font_ != nullptr) {
         DeleteObject(font_);
+    }
+    if (headingFont_ != nullptr) {
+        DeleteObject(headingFont_);
     }
 }
 
@@ -72,6 +84,12 @@ LRESULT SettingsWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, LP
                     const Row& row = rows_[index];
                     const bool enabled = SendMessageW(row.check, BM_GETCHECK, 0, 0) == BST_CHECKED;
                     setEnabled_(row.feature, enabled);
+                }
+                const size_t hotkeyIndex = static_cast<size_t>(id - kFirstHotkeyButtonId);
+                if (hotkeyIndex < hotkeyRows_.size()) {
+                    // Modal: returns when the dialog is done.
+                    changeHotkey_(hotkeyRows_[hotkeyIndex].hotkey);
+                    Refresh();
                 }
             }
             return 0;
@@ -129,6 +147,42 @@ void SettingsWindow::CreateControls() {
     SelectObject(dc, previousFont);
     ReleaseDC(window_, dc);
 
+    // Shortcuts: name, current combination, Change... button.
+    if (headingFont_ != nullptr) {
+        DeleteObject(headingFont_);
+    }
+    headingFont_ = MakeUiFontWithWeight(dpi, FW_SEMIBOLD);
+    const int headingHeight = Scale(kCheckHeight, dpi);
+    HWND heading = CreateWindowExW(0, L"STATIC", L"Shortcuts", WS_CHILD | WS_VISIBLE | SS_NOPREFIX, margin, y,
+                                   clientWidth - 2 * margin, headingHeight, window_, nullptr, instance_, nullptr);
+    SendMessageW(heading, WM_SETFONT, reinterpret_cast<WPARAM>(headingFont_), TRUE);
+    y += headingHeight;
+
+    const int rowHeight = Scale(kHotkeyRowHeight, dpi);
+    const int nameWidth = Scale(kHotkeyNameWidth, dpi);
+    const int buttonWidth = Scale(kHotkeyButtonWidth, dpi);
+    const int combinationWidth = clientWidth - 2 * margin - nameWidth - buttonWidth - indent;
+    int buttonId = kFirstHotkeyButtonId;
+    for (const HotkeyInfo& info : AllHotkeys()) {
+        HotkeyRow row;
+        row.hotkey = info.id;
+        const int textTop = y + (rowHeight - checkHeight) / 2 + Scale(2, dpi);
+        HWND name = CreateWindowExW(0, L"STATIC", info.name, WS_CHILD | WS_VISIBLE | SS_NOPREFIX, margin + indent,
+                                    textTop, nameWidth - indent, checkHeight, window_, nullptr, instance_, nullptr);
+        row.combination = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_NOPREFIX, margin + nameWidth,
+                                          textTop, combinationWidth, checkHeight, window_, nullptr, instance_,
+                                          nullptr);
+        row.change = CreateWindowExW(0, L"BUTTON", L"Change...", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
+                                     clientWidth - margin - buttonWidth, y, buttonWidth, rowHeight, window_,
+                                     reinterpret_cast<HMENU>(static_cast<INT_PTR>(buttonId++)), instance_, nullptr);
+        for (HWND control : {name, row.combination, row.change}) {
+            SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(font_), TRUE);
+        }
+        hotkeyRows_.push_back(row);
+        y += rowHeight + Scale(4, dpi);
+    }
+    y += Scale(kRowGap, dpi) - Scale(4, dpi);
+
     // Size the window so the client area is exactly the content.
     RECT frame{0, 0, clientWidth, y - Scale(kRowGap, dpi) + margin};
     AdjustWindowRectExForDpi(&frame, WS_CAPTION | WS_SYSMENU, FALSE, 0, dpi);
@@ -139,6 +193,9 @@ void SettingsWindow::CreateControls() {
 void SettingsWindow::Refresh() {
     for (const Row& row : rows_) {
         SendMessageW(row.check, BM_SETCHECK, isEnabled_(row.feature) ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+    for (const HotkeyRow& row : hotkeyRows_) {
+        SetWindowTextW(row.combination, hotkeyText_(row.hotkey).c_str());
     }
 }
 

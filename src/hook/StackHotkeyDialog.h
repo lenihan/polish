@@ -39,7 +39,10 @@ public:
     // shows an inline error and keeps the dialog open rather than
     // closing. Returns the chosen modifiers/key on Save, or
     // std::nullopt on Cancel.
-    std::optional<HotkeyChoice> ShowModal(HWND owner, const HotkeyChoice& current);
+    //
+    // `title` defaults to the stack hotkey's; other hotkeys pass their own.
+    std::optional<HotkeyChoice> ShowModal(HWND owner, const HotkeyChoice& current,
+                                          const wchar_t* title = L"Change Stack Hotkey");
 
 private:
     static LRESULT CALLBACK WindowProcThunk(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam);

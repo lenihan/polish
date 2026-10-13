@@ -231,7 +231,8 @@ void StackHotkeyDialog::Commit() {
     done_ = true;
 }
 
-std::optional<HotkeyChoice> StackHotkeyDialog::ShowModal(HWND owner, const HotkeyChoice& current) {
+std::optional<HotkeyChoice> StackHotkeyDialog::ShowModal(HWND owner, const HotkeyChoice& current,
+                                                         const wchar_t* title) {
     initialChoice_ = current;
 
     const UINT dpi = GetDpiForSystem();
@@ -249,7 +250,7 @@ std::optional<HotkeyChoice> StackHotkeyDialog::ShowModal(HWND owner, const Hotke
     const int x = monitorRect.left + ((monitorRect.right - monitorRect.left) - width) / 2;
     const int y = monitorRect.top + ((monitorRect.bottom - monitorRect.top) - height) / 2;
 
-    window_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClassName, L"Change Stack Hotkey",
+    window_ = CreateWindowExW(WS_EX_DLGMODALFRAME, kWindowClassName, title,
                                WS_POPUP | WS_CAPTION | WS_SYSMENU, x, y, width, height, owner, nullptr, instance_,
                                this);
     if (window_ == nullptr) {

@@ -65,4 +65,43 @@ void SetFeatureEnabled(Settings& settings, Feature id, bool enabled) {
     settings.*(FeatureFor(id).member) = enabled;
 }
 
+const std::vector<HotkeyInfo>& AllHotkeys() {
+    static const std::vector<HotkeyInfo> kHotkeys = {
+        {Hotkey::NewStack, L"New stack", &Settings::stackHotkeyModifiers, &Settings::stackHotkeyVirtualKey},
+        {Hotkey::TileTwoWay, L"Tile 2 windows", &Settings::arrangeTwoWayHotkeyModifiers,
+         &Settings::arrangeTwoWayHotkeyVirtualKey},
+        {Hotkey::TileThreeWay, L"Tile 3 windows", &Settings::arrangeThreeWayHotkeyModifiers,
+         &Settings::arrangeThreeWayHotkeyVirtualKey},
+        {Hotkey::TileFourWay, L"Tile 4 windows", &Settings::arrangeFourWayHotkeyModifiers,
+         &Settings::arrangeFourWayHotkeyVirtualKey},
+        {Hotkey::LayoutMenu, L"Layout menu", &Settings::layoutHotkeyModifiers, &Settings::layoutHotkeyVirtualKey},
+        {Hotkey::ScaleDown, L"Scale window down", &Settings::scaleDownHotkeyModifiers,
+         &Settings::scaleDownHotkeyVirtualKey},
+        {Hotkey::ScaleUp, L"Scale window up", &Settings::scaleUpHotkeyModifiers, &Settings::scaleUpHotkeyVirtualKey},
+        {Hotkey::ScaleReset, L"Restore window to full size", &Settings::scaleResetHotkeyModifiers,
+         &Settings::scaleResetHotkeyVirtualKey},
+    };
+    return kHotkeys;
+}
+
+const HotkeyInfo& HotkeyFor(Hotkey id) {
+    for (const HotkeyInfo& info : AllHotkeys()) {
+        if (info.id == id) {
+            return info;
+        }
+    }
+    return AllHotkeys().front();  // see FeatureFor
+}
+
+HotkeyCombination GetHotkey(const Settings& settings, Hotkey id) {
+    const HotkeyInfo& info = HotkeyFor(id);
+    return {settings.*(info.modifiers), settings.*(info.virtualKey)};
+}
+
+void SetHotkey(Settings& settings, Hotkey id, HotkeyCombination combination) {
+    const HotkeyInfo& info = HotkeyFor(id);
+    settings.*(info.modifiers) = combination.modifiers;
+    settings.*(info.virtualKey) = combination.virtualKey;
+}
+
 }  // namespace polish

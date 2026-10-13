@@ -70,3 +70,47 @@ TEST_CASE("FeatureCatalog: lookups reach the members they name") {
     CHECK_FALSE(settings.polishButtonEnabled);
     CHECK(settings.altTabEnabled);  // untouched
 }
+
+TEST_CASE("HotkeyCatalog: every Hotkey enumerator has exactly one entry") {
+    constexpr int kHotkeyCount = static_cast<int>(Hotkey::ScaleReset) + 1;
+    CHECK(static_cast<int>(AllHotkeys().size()) == kHotkeyCount);
+    std::set<int> seen;
+    for (const HotkeyInfo& info : AllHotkeys()) {
+        CHECK(seen.insert(static_cast<int>(info.id)).second);
+        CHECK(std::wstring(info.name).size() > 3);
+    }
+    CHECK(static_cast<int>(seen.size()) == kHotkeyCount);
+}
+
+TEST_CASE("HotkeyCatalog: no two hotkeys share a member, and the defaults are distinct") {
+    const Settings defaults;
+    for (const HotkeyInfo& a : AllHotkeys()) {
+        for (const HotkeyInfo& b : AllHotkeys()) {
+            if (a.id == b.id) {
+                continue;
+            }
+            CHECK(a.modifiers != b.modifiers);
+            CHECK(a.virtualKey != b.virtualKey);
+            const HotkeyCombination ca = GetHotkey(defaults, a.id);
+            const HotkeyCombination cb = GetHotkey(defaults, b.id);
+            CHECK_FALSE((ca.modifiers == cb.modifiers && ca.virtualKey == cb.virtualKey));
+        }
+    }
+}
+
+TEST_CASE("HotkeyCatalog: set changes only the one hotkey") {
+    Settings settings;
+    const Settings before = settings;
+    SetHotkey(settings, Hotkey::TileThreeWay, {MOD_WIN | MOD_SHIFT, 'Q'});
+    const HotkeyCombination changed = GetHotkey(settings, Hotkey::TileThreeWay);
+    CHECK(changed.modifiers == (MOD_WIN | MOD_SHIFT));
+    CHECK(changed.virtualKey == 'Q');
+    for (const HotkeyInfo& info : AllHotkeys()) {
+        if (info.id != Hotkey::TileThreeWay) {
+            const HotkeyCombination now = GetHotkey(settings, info.id);
+            const HotkeyCombination was = GetHotkey(before, info.id);
+            CHECK(now.modifiers == was.modifiers);
+            CHECK(now.virtualKey == was.virtualKey);
+        }
+    }
+}

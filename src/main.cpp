@@ -6809,34 +6809,64 @@ void ClampScaledViewsToScreens() {
     }
 }
 
-void ChangeStackHotkey() {
-    polish::HotkeyChoice current{g_settings.stackHotkeyModifiers, g_settings.stackHotkeyVirtualKey};
+// Puts a hotkey's current combination into effect: the register function
+// of whichever group it belongs to.
+void ReregisterHotkey(polish::Hotkey hotkey) {
+    switch (hotkey) {
+        case polish::Hotkey::NewStack:
+            RegisterStackHotkeyFromSettings();
+            break;
+        case polish::Hotkey::TileTwoWay:
+        case polish::Hotkey::TileThreeWay:
+        case polish::Hotkey::TileFourWay:
+            RegisterArrangeHotkeysFromSettings();
+            break;
+        case polish::Hotkey::LayoutMenu:
+            ApplyPolishButtonSetting();
+            break;
+        case polish::Hotkey::ScaleDown:
+        case polish::Hotkey::ScaleUp:
+        case polish::Hotkey::ScaleReset:
+            RegisterScaleHotkeysFromSettings();
+            break;
+    }
+}
+
+// Asks the user for a new combination for `hotkey` and, if nothing else on
+// the machine has claimed it, makes it the one in use. A combination can be
+// well-formed (the dialog's job) and still taken (confirmed real, see
+// kNewStackHotkeyId's comment), so it is tried with a throwaway
+// registration first and the dialog comes back with an error if that
+// fails -- the working hotkey is never given up for one that does not work.
+void ChangeHotkey(polish::Hotkey hotkey) {
+    constexpr int kProbeHotkeyId = 99;
+    const polish::HotkeyInfo& info = polish::HotkeyFor(hotkey);
+    const polish::HotkeyCombination existing = polish::GetHotkey(g_settings, hotkey);
+    polish::HotkeyChoice current{existing.modifiers, existing.virtualKey};
+    const std::wstring title = std::format(L"Change Hotkey: {}", info.name);
     for (;;) {
         polish::StackHotkeyDialog dialog(GetModuleHandleW(nullptr));
-        const auto choice = dialog.ShowModal(nullptr, current);
+        const auto choice = dialog.ShowModal(nullptr, current, title.c_str());
         if (!choice.has_value()) {
-            polish::LogDebug(L"[Polish] ChangeStackHotkey: cancelled");
+            polish::LogDebug(std::format(L"[Polish] ChangeHotkey({}): cancelled", info.name));
             return;
         }
+        if (choice->modifiers == existing.modifiers && choice->virtualKey == existing.virtualKey) {
+            return;  // unchanged; and it is registered by us, so a probe would fail
+        }
 
-        const UINT previousModifiers = g_settings.stackHotkeyModifiers;
-        const UINT previousVirtualKey = g_settings.stackHotkeyVirtualKey;
-        g_settings.stackHotkeyModifiers = choice->modifiers;
-        g_settings.stackHotkeyVirtualKey = choice->virtualKey;
-        if (RegisterStackHotkeyFromSettings()) {
+        if (RegisterHotKey(g_messageWindow, kProbeHotkeyId, choice->modifiers | MOD_NOREPEAT, choice->virtualKey) !=
+            FALSE) {
+            UnregisterHotKey(g_messageWindow, kProbeHotkeyId);
+            polish::SetHotkey(g_settings, hotkey, {choice->modifiers, choice->virtualKey});
             polish::SaveSettings(g_settings);
-            polish::LogDebug(std::format(L"[Polish] ChangeStackHotkey: now {}",
+            ReregisterHotkey(hotkey);
+            polish::LogDebug(std::format(L"[Polish] ChangeHotkey({}): now {}", info.name,
                                           FormatHotkey(choice->modifiers, choice->virtualKey)));
             return;
         }
 
-        // Failed -- most likely already claimed by something else.
-        // Restore the previous combination (so the app isn't left with
-        // no working hotkey at all) and let the user try again.
-        g_settings.stackHotkeyModifiers = previousModifiers;
-        g_settings.stackHotkeyVirtualKey = previousVirtualKey;
-        RegisterStackHotkeyFromSettings();
-        polish::LogDebug(std::format(L"[Polish] ChangeStackHotkey: {} is already in use, GetLastError={}",
+        polish::LogDebug(std::format(L"[Polish] ChangeHotkey({}): {} is already in use, GetLastError={}", info.name,
                                       FormatHotkey(choice->modifiers, choice->virtualKey), GetLastError()));
         MessageBoxW(nullptr,
                     std::format(L"{} is already in use by another program on this PC. Pick a different combination.",
@@ -6846,6 +6876,8 @@ void ChangeStackHotkey() {
         current = *choice;  // keep what they typed, let them adjust it
     }
 }
+
+void ChangeStackHotkey() { ChangeHotkey(polish::Hotkey::NewStack); }
 
 // ---------------------------------------------------------------------------
 // Stacks.
@@ -7958,7 +7990,12 @@ void ShowSettingsWindow() {
         g_settingsWindow = std::make_unique<polish::SettingsWindow>(
             GetModuleHandleW(nullptr),
             [](polish::Feature feature) { return polish::IsFeatureEnabled(g_settings, feature); },
-            [](polish::Feature feature, bool enabled) { ApplyFeatureToggle(feature, enabled); });
+            [](polish::Feature feature, bool enabled) { ApplyFeatureToggle(feature, enabled); },
+            [](polish::Hotkey hotkey) {
+                const polish::HotkeyCombination combination = polish::GetHotkey(g_settings, hotkey);
+                return FormatHotkey(combination.modifiers, combination.virtualKey);
+            },
+            [](polish::Hotkey hotkey) { ChangeHotkey(hotkey); });
     }
     g_settingsWindow->Show();
 }

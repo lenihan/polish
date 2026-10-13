@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <functional>
+#include <string>
 #include <vector>
 
 #include "settings/FeatureCatalog.h"
@@ -23,8 +24,13 @@ class SettingsWindow {
 public:
     using IsEnabledFn = std::function<bool(Feature)>;
     using SetEnabledFn = std::function<void(Feature, bool)>;
+    // The hotkey's combination as shown ("Ctrl+Alt+1").
+    using HotkeyTextFn = std::function<std::wstring(Hotkey)>;
+    // Runs the app's change-hotkey flow (modal; returns when it is done).
+    using ChangeHotkeyFn = std::function<void(Hotkey)>;
 
-    SettingsWindow(HINSTANCE instance, IsEnabledFn isEnabled, SetEnabledFn setEnabled);
+    SettingsWindow(HINSTANCE instance, IsEnabledFn isEnabled, SetEnabledFn setEnabled, HotkeyTextFn hotkeyText,
+                   ChangeHotkeyFn changeHotkey);
     ~SettingsWindow();
 
     SettingsWindow(const SettingsWindow&) = delete;
@@ -51,12 +57,22 @@ private:
         HWND description = nullptr;
     };
 
+    struct HotkeyRow {
+        Hotkey hotkey;
+        HWND combination = nullptr;
+        HWND change = nullptr;
+    };
+
     HINSTANCE instance_;
     IsEnabledFn isEnabled_;
     SetEnabledFn setEnabled_;
+    HotkeyTextFn hotkeyText_;
+    ChangeHotkeyFn changeHotkey_;
     HWND window_ = nullptr;
     HFONT font_ = nullptr;
+    HFONT headingFont_ = nullptr;
     std::vector<Row> rows_;
+    std::vector<HotkeyRow> hotkeyRows_;
 };
 
 }  // namespace polish

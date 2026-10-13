@@ -48,4 +48,38 @@ const FeatureInfo& FeatureFor(Feature id);
 bool IsFeatureEnabled(const Settings& settings, Feature id);
 void SetFeatureEnabled(Settings& settings, Feature id, bool enabled);
 
+// The same idea for the global hotkeys: each one's name and the pair of
+// Settings members (RegisterHotKey modifiers and virtual key) that hold its
+// combination. What re-registering one *does* is main.cpp's, for the
+// reason ApplyFeatureToggle is.
+enum class Hotkey {
+    NewStack,
+    TileTwoWay,
+    TileThreeWay,
+    TileFourWay,
+    LayoutMenu,
+    ScaleDown,
+    ScaleUp,
+    ScaleReset,
+};
+
+struct HotkeyInfo {
+    Hotkey id;
+    const wchar_t* name;
+    UINT Settings::* modifiers;
+    UINT Settings::* virtualKey;
+};
+
+// All hotkeys, in the order the Settings window lists them.
+const std::vector<HotkeyInfo>& AllHotkeys();
+const HotkeyInfo& HotkeyFor(Hotkey id);
+
+struct HotkeyCombination {
+    UINT modifiers = 0;
+    UINT virtualKey = 0;
+};
+
+HotkeyCombination GetHotkey(const Settings& settings, Hotkey id);
+void SetHotkey(Settings& settings, Hotkey id, HotkeyCombination combination);
+
 }  // namespace polish
