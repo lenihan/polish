@@ -25,6 +25,7 @@
 #include "hook/AltTabHook.h"
 #include "hook/AltTabListWindow.h"
 #include "hook/BullseyeOverlay.h"
+#include "hook/LayoutTaskbarButton.h"
 #include "hook/ScaledViewWindow.h"
 #include "hook/WindowParking.h"
 #include "hook/StackHotkeyDialog.h"
@@ -495,6 +496,16 @@ std::map<HWND, std::unique_ptr<polish::ScaledViewWindow>> g_scaledViews;
 // Posted by a view that wants its window restored: restoring destroys the
 // view, which cannot happen from inside the view's own message handler.
 constexpr UINT kScaledRestoreMessage = WM_APP + 40;
+// The Layout taskbar button (hook/LayoutTaskbarButton.h) and the real
+// window the user was in when they clicked it -- the one its menu is about.
+// The click arrives as the stand-in being activated, so it is posted as a
+// message rather than handled inside that window's own activation.
+std::unique_ptr<polish::LayoutTaskbarButton> g_layoutButton;
+HWND g_layoutPrevious = nullptr;
+bool g_layoutMenuOpen = false;
+constexpr UINT kLayoutButtonMessage = WM_APP + 41;
+constexpr WPARAM kLayoutButtonClicked = 0;
+constexpr WPARAM kLayoutButtonCloseRequested = 1;
 // "  (33%)" for a scaled window, else nothing -- for the list panels' rows,
 // so a window you cannot see at its real size says what size it is.
 std::wstring ScaledTitleSuffix(HWND hwnd) {
@@ -1073,6 +1084,13 @@ void OnForegroundChanged(HWND newForeground) {
     const HWND previousForeground = g_lastForeground;
     if (!IsShellTaskbarWindow(newForeground)) {
         g_lastForeground = newForeground;
+    }
+    // What the Layout button's menu is about: the last real window in front,
+    // which is not the shell, not the button's own stand-in, and not any
+    // window of ours (a menu or panel taking focus is not the user moving
+    // on).
+    if (newForeground != nullptr && !IsShellTaskbarWindow(newForeground) && !IsOwnProcessWindow(newForeground)) {
+        g_layoutPrevious = newForeground;
     }
     OnStackTaskbarForeground(newForeground, previousForeground);
     // A scaled window is parked and must never hold focus: whatever just
@@ -6102,6 +6120,25 @@ constexpr polish::ParkStrategy kParkStrategy = polish::ParkStrategy::GhostTopmos
 constexpr UINT kMenuIdScaleEnabled = 16;
 constexpr UINT kMenuIdScaleDown = 17;
 constexpr UINT kMenuIdScaleRestoreAll = 18;
+constexpr UINT kMenuIdLayoutButton = 19;
+
+// Creates or removes the Layout taskbar button to match the setting.
+void ApplyLayoutButtonSetting() {
+    if (!g_settings.layoutButtonEnabled) {
+        g_layoutButton.reset();
+        return;
+    }
+    if (g_layoutButton != nullptr) {
+        return;
+    }
+    g_layoutButton = std::make_unique<polish::LayoutTaskbarButton>(
+        GetModuleHandleW(nullptr),
+        []() { PostMessageW(g_messageWindow, kLayoutButtonMessage, kLayoutButtonClicked, 0); },
+        []() { PostMessageW(g_messageWindow, kLayoutButtonMessage, kLayoutButtonCloseRequested, 0); });
+    if (!g_layoutButton->IsValid()) {
+        g_layoutButton.reset();
+    }
+}
 
 void RegisterScaleHotkeysFromSettings() {
     UnregisterHotKey(g_messageWindow, kScaleDownHotkeyId);
@@ -7509,36 +7546,26 @@ void AppendArrangeMenuItem(HMENU menu, UINT id, polish::ArrangeKind kind, const 
     AppendMenuW(menu, MF_STRING | (enabled ? MF_ENABLED : MF_GRAYED), id, text.c_str());
 }
 
-// Rebuilt fresh every time the tray icon's context menu is about to
-// open (see TrayIcon's populateMenu callback), so checkbox state is
-// always current -- in particular Start with Windows, whose real source
-// of truth is the Run key itself, not a cached value here.
-void PopulateTrayMenu(HMENU menu) {
-    AppendMenuW(menu, MF_STRING | (g_settings.restoreSyncEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdRestoreSync,
-                L"Restore remembers Snap position");
-    AppendMenuW(menu, MF_STRING | (g_settings.altTabEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdAltTab,
-                L"Alt+Tab and Alt+` switchers");
-    AppendMenuW(menu, MF_STRING | (g_settings.haloEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdHalo,
-                L"Halo around active window");
-    AppendMenuW(menu, MF_STRING | (g_settings.bullseyeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdBullseye,
-                L"Bullseye (copy/paste flash)");
-    AppendMenuW(menu, MF_STRING | (g_settings.taskbarEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdTaskbar,
-                L"Taskbar hover list and click-to-cycle");
-    AppendMenuW(menu, MF_STRING | (g_settings.moveModeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdMoveMode,
-                L"Hold Win to move/resize any window");
-    // Directly under the toggle it depends on, and the only way into
-    // move/resize mode that needs no keyboard: both gestures above are
-    // Win-key holds, which leaves a mouse-only user with nothing. Acts on
-    // the most recently used window -- see MoveModeMenuTarget on why not
-    // the foreground one.
+// The layout commands -- move/resize, tiling, scaling, stacks -- as menu
+// items. One list, used by the tray menu and by the Layout taskbar button's
+// menu, so the two can never disagree about what is enabled or why not.
+//
+// Every command acts on the most recently used real window (or, for
+// tiling, a monitor's worth of them), never the foreground one: opening
+// either menu takes the foreground for Polish's own message window, which
+// is why the MRU list is the reliable memory of what the user was using.
+void AppendLayoutCommands(HMENU menu) {
+    // The only way into move/resize mode that needs no keyboard: both
+    // gestures are Win-key holds, which leaves a mouse-only user with
+    // nothing.
     const bool canStartMoveMode = g_settings.moveModeEnabled && MoveModeMenuTarget() != nullptr;
     AppendMenuW(menu, MF_STRING | (canStartMoveMode ? MF_ENABLED : MF_GRAYED), kMenuIdMoveModeStart,
                 g_settings.moveModeEnabled ? L"Move or resize a window"
-                                           : L"Move or resize a window (switch it on above)");
+                                           : L"Move or resize a window (switch it on in the tray menu)");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    // The hotkey is shown beside each item on purpose: the tray menu is
-    // the mouse way in, and seeing the key there is how anyone ever
-    // learns the keyboard way in.
+    // The hotkey is shown beside each item on purpose: the menu is the
+    // mouse way in, and seeing the key there is how anyone ever learns the
+    // keyboard way in.
     // Counted and measured once for all three items, on the monitor they
     // would act on. The minimum sizes are asked for only for the (at most
     // four) most recent windows, since no command uses more.
@@ -7582,11 +7609,6 @@ void PopulateTrayMenu(HMENU menu) {
                           g_settings.arrangeFourWayHotkeyVirtualKey, arrangeCandidateCount,
                           misfitFor(polish::ArrangeKind::FourWay));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    // Scaled windows sit with the other layout commands. The two commands
-    // act on the most recently used window, for the same reason move/
-    // resize does: opening this menu has already taken the foreground.
-    AppendMenuW(menu, MF_STRING | (g_settings.scaleEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdScaleEnabled,
-                L"Scaled windows (live thumbnail)");
     {
         HWND scaleTarget = nullptr;
         for (HWND hwnd : g_activationHistory.OrderedWindows()) {
@@ -7609,6 +7631,31 @@ void PopulateTrayMenu(HMENU menu) {
     AppendMenuW(menu, MF_STRING, kMenuIdNewStack,
                 (L"New Stack...\t" + FormatHotkey(g_settings.stackHotkeyModifiers, g_settings.stackHotkeyVirtualKey))
                     .c_str());
+}
+
+// Rebuilt fresh every time the tray icon's context menu is about to
+// open (see TrayIcon's populateMenu callback), so checkbox state is
+// always current -- in particular Start with Windows, whose real source
+// of truth is the Run key itself, not a cached value here.
+void PopulateTrayMenu(HMENU menu) {
+    AppendMenuW(menu, MF_STRING | (g_settings.restoreSyncEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdRestoreSync,
+                L"Restore remembers Snap position");
+    AppendMenuW(menu, MF_STRING | (g_settings.altTabEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdAltTab,
+                L"Alt+Tab and Alt+` switchers");
+    AppendMenuW(menu, MF_STRING | (g_settings.haloEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdHalo,
+                L"Halo around active window");
+    AppendMenuW(menu, MF_STRING | (g_settings.bullseyeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdBullseye,
+                L"Bullseye (copy/paste flash)");
+    AppendMenuW(menu, MF_STRING | (g_settings.taskbarEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdTaskbar,
+                L"Taskbar hover list and click-to-cycle");
+    AppendMenuW(menu, MF_STRING | (g_settings.moveModeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdMoveMode,
+                L"Hold Win to move/resize any window");
+    AppendMenuW(menu, MF_STRING | (g_settings.scaleEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdScaleEnabled,
+                L"Scaled windows (live thumbnail)");
+    AppendMenuW(menu, MF_STRING | (g_settings.layoutButtonEnabled ? MF_CHECKED : MF_UNCHECKED),
+                kMenuIdLayoutButton, L"Layout button on taskbar");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendLayoutCommands(menu);
     AppendMenuW(menu, MF_STRING, kMenuIdChangeStackHotkey, L"Change Stack Hotkey...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (polish::IsStartAtLoginEnabled() ? MF_CHECKED : MF_UNCHECKED),
@@ -7731,6 +7778,13 @@ void HandleTrayCommand(UINT commandId) {
         case kMenuIdScaleRestoreAll:
             UnscaleAll();
             break;
+        case kMenuIdLayoutButton:
+            g_settings.layoutButtonEnabled = !g_settings.layoutButtonEnabled;
+            polish::SaveSettings(g_settings);
+            polish::LogDebug(std::format(L"[Polish] Layout button {}",
+                                          g_settings.layoutButtonEnabled ? L"enabled" : L"disabled"));
+            ApplyLayoutButtonSetting();
+            break;
         case kMenuIdNewStack:
             TriggerNewStack(nullptr);
             break;
@@ -7745,6 +7799,75 @@ void HandleTrayCommand(UINT commandId) {
             break;
         default:
             break;
+    }
+}
+
+// The Layout button was clicked: put the user's window back in front and
+// open the layout commands as a menu above the button.
+//
+// A native menu rather than a custom-drawn panel: it is keyboard-
+// navigable, follows the system theme like the tray menu, and shares its
+// items with it (AppendLayoutCommands), so the two cannot drift. What it
+// gives up is the free-form look of a Task-View-style flyout.
+void OpenLayoutMenu() {
+    if (g_layoutMenuOpen) {
+        return;  // a second click while open just dismissed it
+    }
+    // Give the user's window back first. The stand-in is activated by the
+    // click and is not meant to keep the foreground.
+    const HWND target = g_layoutPrevious;
+    const bool haveTarget = target != nullptr && IsWindow(target) && !IsIconic(target);
+    if (haveTarget) {
+        ActivateWindowFromTaskbar(target);
+    }
+
+    HMENU menu = CreatePopupMenu();
+    if (menu == nullptr) {
+        return;
+    }
+    const std::wstring header = haveTarget ? L"Layout: " + ShortWindowTitle(target, 40) : std::wstring(L"Layout");
+    AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, header.c_str());
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendLayoutCommands(menu);
+
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    // Keep the menu clear of the taskbar: whichever edge of the monitor
+    // the work area leaves out is the bar.
+    MONITORINFO monitor{};
+    monitor.cbSize = sizeof(monitor);
+    GetMonitorInfoW(MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST), &monitor);
+    TPMPARAMS exclude{};
+    exclude.cbSize = sizeof(exclude);
+    exclude.rcExclude = monitor.rcMonitor;
+    UINT align = TPM_BOTTOMALIGN | TPM_CENTERALIGN;
+    if (monitor.rcWork.bottom < monitor.rcMonitor.bottom) {
+        exclude.rcExclude.top = monitor.rcWork.bottom;
+    } else if (monitor.rcWork.top > monitor.rcMonitor.top) {
+        exclude.rcExclude.bottom = monitor.rcWork.top;
+        align = TPM_TOPALIGN | TPM_CENTERALIGN;
+    } else if (monitor.rcWork.left > monitor.rcMonitor.left) {
+        exclude.rcExclude.right = monitor.rcWork.left;
+        align = TPM_VCENTERALIGN | TPM_LEFTALIGN;
+    } else if (monitor.rcWork.right < monitor.rcMonitor.right) {
+        exclude.rcExclude.left = monitor.rcWork.right;
+        align = TPM_VCENTERALIGN | TPM_RIGHTALIGN;
+    }
+
+    g_layoutMenuOpen = true;
+    // Same dance as the tray menu: the menu needs a foreground owner of
+    // ours to dismiss on an outside click, which is also why every command
+    // acts on the MRU window and not on the foreground one.
+    SetForegroundWindow(g_messageWindow);
+    const UINT command = static_cast<UINT>(TrackPopupMenuEx(
+        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | align, cursor.x, cursor.y, g_messageWindow, &exclude));
+    g_layoutMenuOpen = false;
+    DestroyMenu(menu);
+    PostMessageW(g_messageWindow, WM_NULL, 0, 0);
+    polish::LogDebug(std::format(L"[Polish] Layout button: menu for {} -> command {}", reinterpret_cast<void*>(target),
+                                  command));
+    if (command != 0) {
+        HandleTrayCommand(command);
     }
 }
 
@@ -7969,6 +8092,19 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             UnscaleWindow(reinterpret_cast<HWND>(wParam), /*activate=*/true);
             return 0;
 
+        case kLayoutButtonMessage:
+            if (wParam == kLayoutButtonCloseRequested) {
+                // "Close window" on the button's jump list: take it as
+                // switching the button off, which is what closing a
+                // button-only window can sensibly mean.
+                g_settings.layoutButtonEnabled = false;
+                polish::SaveSettings(g_settings);
+                ApplyLayoutButtonSetting();
+            } else {
+                OpenLayoutMenu();
+            }
+            return 0;
+
         case WM_ENDSESSION:
             // Logging off or shutting down with windows parked: put them
             // back now, there may be no next start to replay the journal.
@@ -8053,6 +8189,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         case WM_DESTROY:
             // First: nothing may be left parked when the process goes.
             UnscaleAll();
+            g_layoutButton.reset();
             KillTimer(hwnd, kScaleWatchdogTimerId);
             KillTimer(hwnd, kScaleSettleTimerId);
             UnregisterHotKey(hwnd, kScaleDownHotkeyId);
@@ -8244,6 +8381,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     RegisterArrangeHotkeysFromSettings();
     RegisterScaleHotkeysFromSettings();
+    ApplyLayoutButtonSetting();
 
     if (!RegisterStackHotkeyFromSettings()) {
         polish::LogDebug(std::format(

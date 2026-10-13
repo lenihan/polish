@@ -54,6 +54,7 @@ Settings LoadSettings() {
             settings.scaleDefaultPercent = 50;
         }
         settings.scaledViewTopmost = ReadDword(key, L"ScaledViewTopmost", 1) != 0;
+        settings.layoutButtonEnabled = ReadDword(key, L"LayoutButtonEnabled", 1) != 0;
         settings.scaleDownHotkeyModifiers = ReadDword(key, L"ScaleDownHotkeyModifiers", MOD_CONTROL | MOD_ALT);
         settings.scaleDownHotkeyVirtualKey = ReadDword(key, L"ScaleDownHotkeyVirtualKey", 0xBD);
         settings.scaleUpHotkeyModifiers = ReadDword(key, L"ScaleUpHotkeyModifiers", MOD_CONTROL | MOD_ALT);
@@ -106,6 +107,7 @@ void SaveSettings(const Settings& settings) {
     WriteDword(key, L"ScaleEnabled", settings.scaleEnabled ? 1 : 0);
     WriteDword(key, L"ScaleDefaultPercent", settings.scaleDefaultPercent);
     WriteDword(key, L"ScaledViewTopmost", settings.scaledViewTopmost ? 1 : 0);
+    WriteDword(key, L"LayoutButtonEnabled", settings.layoutButtonEnabled ? 1 : 0);
     WriteDword(key, L"ScaleDownHotkeyModifiers", settings.scaleDownHotkeyModifiers);
     WriteDword(key, L"ScaleDownHotkeyVirtualKey", settings.scaleDownHotkeyVirtualKey);
     WriteDword(key, L"ScaleUpHotkeyModifiers", settings.scaleUpHotkeyModifiers);

@@ -76,6 +76,11 @@ struct Settings {
     // order to keep an eye on it is no use once something is on top of it.
     bool scaledViewTopmost = true;
 
+    // Polish's own taskbar button ("Layout"): click it for a menu of the
+    // layout commands, the discoverable way in to what is otherwise tray
+    // menu and hotkeys (see hook/LayoutTaskbarButton.h).
+    bool layoutButtonEnabled = true;
+
     // Scale down / scale up / restore to 1:1. Ctrl+Alt with the zoom keys,
     // beside the tiling and stack hotkeys; registry only, like those.
     // 0xBD and 0xBB are VK_OEM_MINUS and VK_OEM_PLUS.
