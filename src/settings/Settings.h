@@ -17,6 +17,11 @@ struct Settings {
     bool haloEnabled = true;
     // The copy/paste ring animation (see BullseyeOverlay).
     bool bullseyeEnabled = true;
+    // A copy that put nothing on the clipboard (an empty string, from an app
+    // copying with no selection) puts the previous content back and shows a
+    // red X. Registry only. Separate from the bullseye toggle: the animation
+    // can be off and the clipboard should still be protected.
+    bool keepClipboardOnEmptyCopy = true;
     // Polish's taskbar behavior: its own window list on hover instead of
     // the native thumbnail flyout, and click-to-cycle an app's windows in
     // MRU order (see TaskbarShield and TaskbarHook). The one toggle here

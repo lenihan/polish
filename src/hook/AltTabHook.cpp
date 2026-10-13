@@ -328,6 +328,14 @@ bool AltTabHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         return false;
     }
 
+    if ((data.vkCode == 'C' || data.vkCode == 'X' || data.vkCode == VK_INSERT) && IsDown(wParam) && ctrlHeld_ &&
+        !altHeld && onCopyChord_) {
+        // Ctrl+C / Ctrl+X / Ctrl+Insert. Called inline -- see
+        // SetOnCopyChord for why it cannot be posted. Key repeat calls it
+        // again, harmlessly: it only stamps the time. Falls through.
+        onCopyChord_();
+    }
+
     if (data.vkCode == 'V' || data.vkCode == VK_INSERT) {
         // Purely observational -- never returns true from here, so the
         // paste itself always reaches the target app untouched. Ctrl+V

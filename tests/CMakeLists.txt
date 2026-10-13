@@ -23,6 +23,7 @@ add_executable(polish_tests
     StackManagerTests.cpp
     HaloFalloffTests.cpp
     BullseyeMathTests.cpp
+    ClipboardContentTests.cpp
     TaskbarButtonsTests.cpp
     TaskbarReadPolicyTests.cpp
 )

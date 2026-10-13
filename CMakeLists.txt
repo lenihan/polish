@@ -74,6 +74,7 @@ add_library(polish_core STATIC
     src/util/AnchorPoint.cpp
     src/util/AppIdentity.cpp
     src/util/AppResolver.cpp
+    src/util/ClipboardSnapshot.cpp
     src/util/SwitcherCycle.cpp
     src/util/DarkMode.cpp
     src/util/DialogKeyboard.cpp

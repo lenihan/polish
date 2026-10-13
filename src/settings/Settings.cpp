@@ -36,6 +36,7 @@ Settings LoadSettings() {
         settings.altTabEnabled = ReadDword(key, L"AltTabEnabled", 1) != 0;
         settings.haloEnabled = ReadDword(key, L"HaloEnabled", 1) != 0;
         settings.bullseyeEnabled = ReadDword(key, L"BullseyeEnabled", 1) != 0;
+        settings.keepClipboardOnEmptyCopy = ReadDword(key, L"KeepClipboardOnEmptyCopy", 1) != 0;
         settings.taskbarEnabled = ReadDword(key, L"TaskbarEnabled", 1) != 0;
         settings.moveModeEnabled = ReadDword(key, L"MoveModeEnabled", 1) != 0;
         settings.moveModeSnapThresholdPx = ReadDword(key, L"MoveModeSnapThresholdPx", 12);
@@ -97,6 +98,7 @@ void SaveSettings(const Settings& settings) {
     WriteDword(key, L"AltTabEnabled", settings.altTabEnabled ? 1 : 0);
     WriteDword(key, L"HaloEnabled", settings.haloEnabled ? 1 : 0);
     WriteDword(key, L"BullseyeEnabled", settings.bullseyeEnabled ? 1 : 0);
+    WriteDword(key, L"KeepClipboardOnEmptyCopy", settings.keepClipboardOnEmptyCopy ? 1 : 0);
     WriteDword(key, L"TaskbarEnabled", settings.taskbarEnabled ? 1 : 0);
     WriteDword(key, L"MoveModeEnabled", settings.moveModeEnabled ? 1 : 0);
     WriteDword(key, L"MoveModeSnapThresholdPx", settings.moveModeSnapThresholdPx);

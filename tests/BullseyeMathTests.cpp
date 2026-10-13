@@ -86,3 +86,26 @@ TEST_CASE("DistanceToAlpha: monotonic decrease, degenerate stroke doesn't divide
     CHECK(DistanceToAlpha(0.0f, 0.0f, 200) == 200);
     CHECK(DistanceToAlpha(1.0f, 0.0f, 200) == 0);
 }
+
+TEST_CASE("DistanceToCross: zero on both strokes and at the centre") {
+    CHECK(DistanceToCross(0.0f, 0.0f, 20.0f) == doctest::Approx(0.0f));
+    CHECK(DistanceToCross(10.0f, 10.0f, 20.0f) == doctest::Approx(0.0f));
+    CHECK(DistanceToCross(-10.0f, 10.0f, 20.0f) == doctest::Approx(0.0f));
+    CHECK(DistanceToCross(20.0f, -20.0f, 20.0f) == doctest::Approx(0.0f));
+}
+
+TEST_CASE("DistanceToCross: off the strokes it is the distance to the nearer one") {
+    // On an axis, a quarter of the way out: 45 degrees off a stroke, so
+    // arm/sqrt(2) away from the nearest point on it.
+    CHECK(DistanceToCross(10.0f, 0.0f, 20.0f) == doctest::Approx(10.0f / 1.41421356f));
+    CHECK(DistanceToCross(0.0f, -10.0f, 20.0f) == doctest::Approx(10.0f / 1.41421356f));
+    // Symmetric under reflection.
+    CHECK(DistanceToCross(7.0f, 3.0f, 20.0f) == doctest::Approx(DistanceToCross(-7.0f, 3.0f, 20.0f)));
+    CHECK(DistanceToCross(7.0f, 3.0f, 20.0f) == doctest::Approx(DistanceToCross(3.0f, 7.0f, 20.0f)));
+}
+
+TEST_CASE("DistanceToCross: beyond an arm's end it is the distance to its tip") {
+    // Straight out past the end of the (arm, arm) tip.
+    CHECK(DistanceToCross(30.0f, 20.0f, 20.0f) == doctest::Approx(10.0f));
+    CHECK(DistanceToCross(0.0f, 0.0f, 0.0f) == doctest::Approx(0.0f));  // degenerate cross
+}

@@ -36,11 +36,18 @@ float RingDistance(float px, float py, float radius);
 // d >= halfStroke.
 int DistanceToAlpha(float d, float halfStroke, int peak);
 
+// Distance from a point (relative to the centre) to the nearest of the two
+// diagonal strokes of an X whose arms reach `arm` pixels out along each
+// axis -- the segments (-arm,-arm)..(arm,arm) and (-arm,arm)..(arm,-arm).
+// 0 on either stroke and at the centre.
+float DistanceToCross(float px, float py, float arm);
+
 }  // namespace bullseye_math
 
-// Which way the ring moves: a copy collapses onto the point, a paste
-// expands out of it.
-enum class BullseyePhase { Copy, Paste };
+// What the animation says. A copy collapses onto the point, a paste
+// expands out of it. Ignored is a red X with an expanding ring: a copy
+// that put nothing on the clipboard, so the previous content was kept.
+enum class BullseyePhase { Copy, Paste, Ignored };
 
 // A brief, large, soft ring that plays on top of every window at the spot
 // where the user just copied or pasted -- collapsing onto the point for a
@@ -116,8 +123,14 @@ private:
     void EnsureDibCapacity(int width, int height);
     void ClearRect(const RECT& rect);
     void RenderFrame(float progress);
+    // The X of an Ignored animation, composited over whatever the ring
+    // drew. Returns the square it touched, so the next frame can clear it.
+    RECT RenderCross(float progress, int peak, uint32_t coreColor, uint32_t outlineColor);
 
     HWND window_ = nullptr;
+    // Cross metrics for the current animation, resolved from DPI in Start().
+    float crossArm_ = 0.0f;
+    float crossHalfStroke_ = 0.0f;
 
     // Grow-only, same regime as ActiveWindowHalo's: `bits_` always points
     // at a `capWidth_ * capHeight_` top-down 32bpp BGRA buffer (row stride

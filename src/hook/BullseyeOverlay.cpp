@@ -51,6 +51,25 @@ int DistanceToAlpha(float d, float halfStroke, int peak) {
     return static_cast<int>(static_cast<float>(peak) * falloff + 0.5f);
 }
 
+namespace {
+// Distance from (px, py) to the segment a..b.
+float DistanceToSegment(float px, float py, float ax, float ay, float bx, float by) {
+    const float abx = bx - ax;
+    const float aby = by - ay;
+    const float lengthSquared = abx * abx + aby * aby;
+    float t = lengthSquared > 0.0f ? ((px - ax) * abx + (py - ay) * aby) / lengthSquared : 0.0f;
+    t = std::clamp(t, 0.0f, 1.0f);
+    const float cx = ax + t * abx - px;
+    const float cy = ay + t * aby - py;
+    return std::sqrt(cx * cx + cy * cy);
+}
+}  // namespace
+
+float DistanceToCross(float px, float py, float arm) {
+    return std::min(DistanceToSegment(px, py, -arm, -arm, arm, arm),
+                    DistanceToSegment(px, py, -arm, arm, arm, -arm));
+}
+
 }  // namespace bullseye_math
 
 namespace {
@@ -96,6 +115,17 @@ constexpr int kRingMaxLuminance = 185;
 // outline is an edge that makes the core readable, not a second ring.
 constexpr int kOutlineHalfStrokeDip = 4;
 constexpr float kOutlineAlphaScale = 0.62f;
+
+// The "copy ignored" X: a red cross at the copy point with the same two-tone
+// treatment as the ring. Red is fixed, not the accent -- it has to read as
+// "refused" whatever the accent is, and a ring in the accent would look
+// like a copy that worked.
+constexpr uint32_t kIgnoredColor = RGB(0xE0, 0x30, 0x30);
+constexpr int kCrossArmDip = 20;       // how far each stroke reaches along an axis
+constexpr int kCrossHalfStrokeDip = 4;  // half the stroke's thickness
+// The cross grows from this share of its full size, so it pops rather than
+// just fading in.
+constexpr float kCrossStartScale = 0.6f;
 
 void EnsureClassRegistered(HINSTANCE instance) {
     static bool registered = false;
@@ -183,6 +213,8 @@ void BullseyeOverlay::Start(BullseyePhase phase, POINT screenPoint) {
     maxRadius_ = static_cast<float>(MulDiv(kMaxRadiusDip, dpi, 96));
     halfStroke_ = static_cast<float>(MulDiv(kHalfStrokeDip, dpi, 96));
     outlineHalfStroke_ = static_cast<float>(MulDiv(kOutlineHalfStrokeDip, dpi, 96));
+    crossArm_ = static_cast<float>(MulDiv(kCrossArmDip, dpi, 96));
+    crossHalfStroke_ = static_cast<float>(MulDiv(kCrossHalfStrokeDip, dpi, 96));
     // Two pixels of slack so the outermost antialiased pixels are never
     // clipped by the window edge. Sized off the outline, which is the
     // outermost thing drawn -- sizing off the core alone would clip it.
@@ -291,16 +323,20 @@ void BullseyeOverlay::RenderFrame(float progress) {
         return;
     }
 
+    const bool ignored = phase_ == BullseyePhase::Ignored;
     // Read fresh every frame, never cached -- the codebase-wide convention
     // for theme state, so changing the accent in Settings shows up on the
-    // next copy without a restart.
+    // next copy without a restart. An ignored copy is red whatever the
+    // accent is.
     const uint32_t coreColor =
-        halo_math::ClampGlowLuminance(GetAccentColor(), kRingMinLuminance, kRingMaxLuminance);
-    // Black under a light accent, white under a dark one -- see the
+        ignored ? kIgnoredColor
+                : halo_math::ClampGlowLuminance(GetAccentColor(), kRingMinLuminance, kRingMaxLuminance);
+    // Black under a light colour, white under a dark one -- see the
     // comment on the outline constants, and the same rule in the halo.
     const uint32_t outlineColor = halo_math::Luminance(coreColor) >= 128 ? 0x00000000u : 0x00FFFFFFu;
 
-    const float radius = bullseye_math::RadiusAt(progress, maxRadius_, phase_ == BullseyePhase::Paste);
+    // Everything but a copy expands out of the point.
+    const float radius = bullseye_math::RadiusAt(progress, maxRadius_, phase_ != BullseyePhase::Copy);
     // The outline sits outside the core, so it -- not the core -- sets the
     // bounds everything below is clipped and span-skipped against.
     const float outlineHalfStroke = halfStroke_ + outlineHalfStroke_;
@@ -354,6 +390,53 @@ void BullseyeOverlay::RenderFrame(float progress) {
     }
 
     prevDirty_ = RECT{xMin, yMin, xMax, yMax};
+
+    if (ignored) {
+        // The X sits inside the ring's hole for most of the animation, so
+        // it is its own pass rather than part of the ring's row loop.
+        const RECT crossBounds = RenderCross(progress, peak, coreColor, outlineColor);
+        UnionRect(&prevDirty_, &prevDirty_, &crossBounds);
+    }
+}
+
+RECT BullseyeOverlay::RenderCross(float progress, int peak, uint32_t coreColor, uint32_t outlineColor) {
+    const float grow = kCrossStartScale + (1.0f - kCrossStartScale) * bullseye_math::EaseOutCubic(progress * 2.0f);
+    const float arm = crossArm_ * grow;
+    const float halfStroke = crossHalfStroke_;
+    const float outlineHalfStroke = halfStroke + outlineHalfStroke_ * 0.5f;
+    const int outlinePeak = static_cast<int>(static_cast<float>(peak) * kOutlineAlphaScale);
+    const float center = static_cast<float>(size_) / 2.0f;
+    // The box around the cross, with a pixel of slack for antialiasing.
+    const float reach = arm + outlineHalfStroke + 1.0f;
+    const int lo = std::max(0, static_cast<int>(std::floor(center - reach)));
+    const int hi = std::min(size_, static_cast<int>(std::ceil(center + reach)));
+
+    for (int y = lo; y < hi; ++y) {
+        uint32_t* row = bits_ + static_cast<size_t>(y) * capWidth_;
+        const float dy = static_cast<float>(y) + 0.5f - center;
+        for (int x = lo; x < hi; ++x) {
+            const float dx = static_cast<float>(x) + 0.5f - center;
+            const float d = bullseye_math::DistanceToCross(dx, dy, arm);
+            const int coreAlpha = bullseye_math::DistanceToAlpha(d, halfStroke, peak);
+            const int outlineAlpha = bullseye_math::DistanceToAlpha(d, outlineHalfStroke, outlinePeak);
+            if (coreAlpha <= 0 && outlineAlpha <= 0) {
+                continue;
+            }
+            // Source-over onto what the ring already put here: both are
+            // premultiplied, so each channel is src + dst * (1 - srcAlpha).
+            const uint32_t src = TwoTonePixel(coreAlpha, outlineAlpha, coreColor, outlineColor);
+            const uint32_t dst = row[x];
+            const uint32_t inverse = 255u - (src >> 24);
+            uint32_t out = 0;
+            for (int shift = 0; shift <= 24; shift += 8) {
+                const uint32_t s = (src >> shift) & 0xFFu;
+                const uint32_t t = (dst >> shift) & 0xFFu;
+                out |= std::min(255u, s + (t * inverse + 127u) / 255u) << shift;
+            }
+            row[x] = out;
+        }
+    }
+    return RECT{lo, lo, hi, hi};
 }
 
 }  // namespace polish

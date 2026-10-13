@@ -42,6 +42,7 @@
 #include "tray/TrayIcon.h"
 #include "util/AnchorPoint.h"
 #include "util/BuildInfo.h"
+#include "util/ClipboardSnapshot.h"
 #include "util/DarkMode.h"
 #include "util/AppIdentity.h"
 #include "util/AppResolver.h"
@@ -427,6 +428,15 @@ bool g_haloMinimizeSuppressed = false;
 // persistent, pre-created instance like the halo.
 std::unique_ptr<polish::BullseyeOverlay> g_bullseye;
 ULONGLONG g_lastBullseyeCopyTick = 0;
+// The empty-copy guard (see OnClipboardUpdated): the clipboard's previous
+// content, the sequence number of our own restore so its echo is ignored,
+// and when a copy chord (Ctrl+C/X/Insert) was last pressed.
+polish::ClipboardSnapshot g_clipboardSnapshot;
+DWORD g_clipboardOwnSequence = 0;
+ULONGLONG g_lastCopyChordTick = 0;
+// How soon after a copy key the clipboard has to change for it to be that
+// key's doing. Generous: an app may take a moment to answer.
+constexpr ULONGLONG kCopyGestureWindowMs = 600;
 
 // One always-shown active-window list panel *per connected monitor* (see
 // PLAN.md's Alt+Tab-improvements plan) -- each showing only its own
@@ -855,7 +865,10 @@ void StartBullseyeAt(polish::BullseyePhase phase, POINT point, const wchar_t* so
     // Re-arming an already-running timer id just restarts its interval.
     SetTimer(g_messageWindow, kBullseyeFrameTimerId, kBullseyeFrameIntervalMs, nullptr);
     polish::LogDebug(std::format(L"[Polish] Bullseye: {} anchor={} at=({},{})",
-                                  phase == polish::BullseyePhase::Copy ? L"copy" : L"paste", sourceName,
+                                  phase == polish::BullseyePhase::Copy    ? L"copy"
+                                  : phase == polish::BullseyePhase::Paste ? L"paste"
+                                                                          : L"ignored",
+                                  sourceName,
                                   point.x, point.y));
 }
 
@@ -898,7 +911,7 @@ void PlayBullseye(polish::BullseyePhase phase) {
         return;
     }
     g_pendingBullseyePhase = phase;
-    g_pendingBullseyeFromMouse = phase == polish::BullseyePhase::Copy &&
+    g_pendingBullseyeFromMouse = phase != polish::BullseyePhase::Paste &&
                                  GetTickCount64() - g_lastMouseButtonTick < kBullseyeMouseCopyWindowMs;
     g_pendingBullseyeGeneration = g_uiaWorker->RequestSelectionRect();
     SetTimer(g_messageWindow, kBullseyeAnchorTimerId, kBullseyeAnchorTimeoutMs, nullptr);
@@ -1016,8 +1029,40 @@ bool IsProcessDescendantOf(DWORD descendant, DWORD ancestor) {
 
 // WM_CLIPBOARDUPDATE -- the clipboard just changed. Only plays for a copy
 // the user actually made in the app they're looking at.
+//
+// Also the home of the empty-copy guard. Some apps write an empty string
+// when you copy with nothing selected (VS Code's source-control message box,
+// for one), which silently replaces whatever you had. Polish cannot stop the
+// write, so it keeps the previous content and puts it back, and plays the
+// red X so the copy visibly did nothing. It only acts when a copy gesture
+// just happened -- a Ctrl+C chord or a mouse click -- because an empty write
+// with no gesture is a password manager clearing the clipboard, and undoing
+// *that* would defeat it.
 void OnClipboardUpdated() {
+    // Our own restore coming back round: not a copy, and not worth reading.
+    if (g_clipboardOwnSequence != 0 && GetClipboardSequenceNumber() == g_clipboardOwnSequence) {
+        return;
+    }
     const ULONGLONG now = GetTickCount64();
+
+    // What is on it now. Tracked for every change, including ones from
+    // background apps, so the snapshot is always "what was there before
+    // the next write".
+    bool emptyCopy = false;
+    if (g_settings.keepClipboardOnEmptyCopy) {
+        if (const auto described = polish::DescribeClipboard(g_messageWindow)) {
+            emptyCopy = described->IsEmptyCopy();
+            polish::LogDebug(std::format(L"[Polish] Clipboard: formats=[{}] empty={}", described->formats,
+                                          emptyCopy));
+            if (!emptyCopy) {
+                g_clipboardSnapshot.Capture(g_messageWindow);
+            }
+        } else {
+            // Could not be read: a stale snapshot is worse than none.
+            g_clipboardSnapshot.Invalidate();
+        }
+    }
+
     if (now - g_lastBullseyeCopyTick < kBullseyeCopyDebounceMs) {
         return;
     }
@@ -1044,6 +1089,25 @@ void OnClipboardUpdated() {
         !IsProcessDescendantOf(ownerPid, foregroundPid) && !IsProcessDescendantOf(foregroundPid, ownerPid)) {
         return;
     }
+
+    if (emptyCopy) {
+        const bool gesture = now - g_lastCopyChordTick < kCopyGestureWindowMs ||
+                             now - g_lastMouseButtonTick < kBullseyeMouseCopyWindowMs;
+        if (gesture && g_clipboardSnapshot.Valid() && g_clipboardSnapshot.Restore(g_messageWindow)) {
+            // Taken after the write is closed, so it is the sequence number
+            // of the restored content and the echo can be recognised.
+            g_clipboardOwnSequence = GetClipboardSequenceNumber();
+            g_lastBullseyeCopyTick = now;
+            polish::LogDebug(L"[Polish] Clipboard: empty copy ignored, previous content restored");
+            PlayBullseye(polish::BullseyePhase::Ignored);
+            return;
+        }
+        polish::LogDebug(std::format(L"[Polish] Clipboard: empty write left alone (gesture={} snapshot={})", gesture,
+                                      g_clipboardSnapshot.Valid()));
+        // An empty copy is not a successful one: no ring either.
+        return;
+    }
+
     g_lastBullseyeCopyTick = now;
     PlayBullseye(polish::BullseyePhase::Copy);
 }
@@ -8386,6 +8450,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                                       GetLastError()));
     }
 
+    // What is on the clipboard at start, so the very first empty copy has
+    // something to put back.
+    if (g_settings.keepClipboardOnEmptyCopy) {
+        g_clipboardSnapshot.Capture(g_messageWindow);
+    }
+
     g_taskbarCreatedMessage = RegisterWindowMessageW(L"TaskbarCreated");
 
     g_foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr, OnWinEvent,
@@ -8497,6 +8567,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         }
     });
     g_altTabHook->SetOnPasteChord([] { PlayBullseye(polish::BullseyePhase::Paste); });
+    // Called inline from the hook, so nothing but a timestamp -- see
+    // AltTabHook::SetOnCopyChord.
+    g_altTabHook->SetOnCopyChord([] { g_lastCopyChordTick = GetTickCount64(); });
     // Del/-/+ act on whichever row Tab-cycling currently has highlighted
     // -- there's no keyboard equivalent of a mouse hover, so this is
     // always CurrentAltTabHighlightedWindow(), unlike the panel's own

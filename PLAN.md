@@ -327,6 +327,39 @@ current todo list.
   halo, which is why there is one peak alpha now and not one per theme.
   Tray toggle. Tuning constants
   (radius/stroke/duration/alpha/outline) are adjusted by eye live.
+- **Empty-copy guard**: some apps write an empty string when you copy with
+  nothing selected (VS Code's source-control message box), silently
+  replacing the clipboard. Polish cannot stop the write -- by the time it
+  hears of it the old content is gone -- so `ClipboardSnapshot` keeps the
+  previous content (captured on every non-empty change) and puts it back,
+  and the bullseye plays as `Ignored`: a red X with an expanding ring, red
+  whatever the accent. Rules that matter:
+  - It acts only when a copy *gesture* just happened (Ctrl+C/X/Insert seen
+    by the keyboard hook, or a mouse click within 400 ms). An empty write
+    with no gesture is a password manager clearing the clipboard, and
+    undoing that would defeat it.
+  - The chord callback is called synchronously from the hook, not posted:
+    the clipboard notification is *sent*, so it can overtake a posted
+    message, and the whole point is to know a copy key was just pressed.
+  - "Empty" is what VS Code really writes, found from the log and not
+    guessed: the text is **one bare line break** (`\r\n` -- "copy the
+    current line", on an empty line) and "HTML Format" is
+    `<div style=...><br></div>`. The first version assumed an empty string
+    and counted any HTML as content, so it never fired. Now: the text is
+    empty or a single line break, and any HTML in it has no text and no
+    media (`IsBlankHtml`). Indentation and other whitespace are *not*
+    empty -- copying `"    "` to paste an indent is plausible, copying one
+    bare line break essentially never is. Chromium's custom formats
+    (`Chromium Web Custom MIME Data Format` and friends) do not count as
+    content.
+  - Protection is deliberately limited to what is cheap to hold: a
+    clipboard with an image, metafile or spreadsheet/OLE format is not
+    snapshotted at all, because reading those makes a lazily-rendering app
+    produce them on every change. A big copy is left alone, not slowed.
+  - Restoring writes the clipboard again, so its own notification is
+    recognised by sequence number and ignored.
+  - Registry switch `KeepClipboardOnEmptyCopy`, separate from the bullseye
+    toggle: the animation can be off and the clipboard still protected.
 - Alt+`: the Alt+Tab switcher over the *tabs of the foreground window*
   (`SessionKind::Tabs`, no second hook -- `g_instance` is a single
   static). Tabs are read through UI Automation on a dedicated MTA worker
@@ -1327,7 +1360,6 @@ commands as a menu.
 
 ## Left to do
 
-- If copy  used, but nothing is selected....clipboard should keep its original content
 - Add support for "frozen windows"...they are still listed in taskbar (Under Frozen), but they take
   zero resources. If you click on a frozen window it gets loaded. This lets a user jump back and forth
   between various apps (like vs code) quickly without needing to figure out how to get app/document loaded.

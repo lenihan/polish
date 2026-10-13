@@ -240,6 +240,15 @@ public:
     // the key: the caret is still where the pasted text is about to land.
     void SetOnPasteChord(std::function<void()> onPasteChord) { onPasteChord_ = std::move(onPasteChord); }
 
+    // Ctrl+C, Ctrl+X or Ctrl+Insert (Alt not held) was pressed. Unlike the
+    // paste chord this is called *synchronously*, from inside the hook, and
+    // must therefore be trivial (record a timestamp, nothing more). It has
+    // to be: the clipboard-change notification this is paired with is sent
+    // rather than posted, so it can be delivered before any posted message
+    // -- and the whole point is to know, at that moment, that a copy key
+    // was just pressed. Never swallowed.
+    void SetOnCopyChord(std::function<void()> onCopyChord) { onCopyChord_ = std::move(onCopyChord); }
+
     // Routes the hook's private message. The hook callback runs on this
     // thread already (low-level hooks are called on the installing
     // thread), so this posts via PostMessage to messageWindow rather
@@ -291,6 +300,7 @@ private:
     std::function<void(NavigateStep step)> onNavigate_;
     std::function<void(RowAction action)> onRowAction_;
     std::function<void()> onPasteChord_;
+    std::function<void()> onCopyChord_;
     std::function<void()> onCommitKey_;
     std::function<void()> onNewKey_;
     HHOOK hook_ = nullptr;
