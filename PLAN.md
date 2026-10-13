@@ -1403,7 +1403,8 @@ dialog's key field takes letters, digits, Space, `-` and `=`.
 
 It follows the system's app theme, re-checked each time it is shown (dark
 title bar, `DarkMode_Explorer` on the controls, our own background and text
-colours). StackHotkeyDialog is still light.
+colours), as does StackHotkeyDialog; both use `util/WindowTheme`, which does
+nothing in light mode.
 
 ## Layout taskbar button: built (the stand-in window; superseded above)
 
