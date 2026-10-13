@@ -1380,9 +1380,20 @@ its switch. It exists because the same facts are wanted by the tray menu, by
 the toggle handling and by the Settings window, and a feature renamed in one
 and not the others is the drift it prevents. It is data only; what turning a
 feature on or off *does* is `ApplyFeatureToggle` in main.cpp, which the tray
-menu goes through and the Settings window will too. The log line for a toggle
+menu and the Settings window both go through. The log line for a toggle
 now carries the catalog's name (e.g. "Halo around active window enabled")
 rather than a hand-written one per feature.
+
+## Settings window
+
+`hook/SettingsWindow` is a modeless window with one checkbox per catalog entry
+and its description beneath. A click applies at once through `ApplyFeatureToggle`
+(no Save/Cancel); closing hides it and the next open re-reads the switches,
+since the tray menu may have flipped them. It opens from the tray menu and the
+Polish button's right-click menu, and gets Tab/Esc through `PreTranslate` in
+the main loop. Not yet: dark colours (it matches StackHotkeyDialog, which is
+light), hotkey editing, and the registry-only values (snap threshold, scale
+percent).
 
 ## Layout taskbar button: built (the stand-in window; superseded above)
 
