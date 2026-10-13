@@ -115,7 +115,7 @@ public:
 private:
     void EnsureDibCapacity(int width, int height);
     void ClearRect(const RECT& rect);
-    void RenderFrame(float progress, bool isDark);
+    void RenderFrame(float progress);
 
     HWND window_ = nullptr;
 

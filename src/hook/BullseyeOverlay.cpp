@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "hook/ActiveWindowHalo.h"
 #include "util/DarkMode.h"
 
 namespace polish {
@@ -63,26 +64,32 @@ constexpr int kMaxRadiusDip = 180;
 constexpr int kHalfStrokeDip = 12;
 constexpr double kDurationMs = 340.0;
 
-// Separate per theme for the same reason the halo's are: a black ring at
-// a white ring's alpha reads much heavier.
-constexpr int kPeakAlphaDark = 200;
-constexpr int kPeakAlphaLight = 130;
+// One value, like the halo's kPeakAlpha: the ring is no longer black in
+// one theme and white in the other, so there is no weight difference
+// between themes left to compensate for.
+constexpr int kPeakAlpha = 190;
 
-// The ring is drawn in two tones: a core in the theme's own colour, and a
-// contrasting outline just outside it.
+// The accent colour's luminance is pulled into this band before it is
+// used, exactly as the halo does (see kGlowMinLuminance there), so an
+// accent that is nearly white or nearly black cannot make the ring
+// invisible against one extreme.
+constexpr int kRingMinLuminance = 60;
+constexpr int kRingMaxLuminance = 185;
+
+// The ring is drawn in two tones: a core in the accent colour, and a
+// contrasting outline just outside it -- black under a light accent,
+// white under a dark one, derived from the colour actually drawn.
 //
-// One colour cannot work. The theme only says what Windows is set to, not
-// what is actually on screen underneath -- a white ring (dark mode) over a
-// white document is invisible, which is exactly the case this fixes, and
-// the reverse happens in light mode over dark content. Sampling the pixels
-// behind the ring would adapt, but it means capturing the screen on every
-// copy and still picks one colour for a ring that can span content of
-// several shades.
+// One colour cannot work. The accent only says what the user chose, not
+// what is actually on screen underneath -- an accent ring over a document
+// of the same hue is invisible. Sampling the pixels behind the ring would
+// adapt, but it means capturing the screen on every copy and still picks
+// one colour for a ring that can span content of several shades.
 //
-// A light/dark pair instead is always legible against anything, because
-// whatever the background is, one of the two contrasts with it. This is
-// how mouse cursors and focus rings stay visible everywhere, and it needs
-// no knowledge of the background at all.
+// A light/dark outline instead is always legible against anything,
+// because whatever the background is, one of the two contrasts with it.
+// This is how mouse cursors and focus rings stay visible everywhere, and
+// it needs no knowledge of the background at all.
 //
 // Extends the ring outward rather than thinning the core, so the shape
 // keeps the weight it was tuned to. Alpha is lower than the core's: the
@@ -106,31 +113,26 @@ void EnsureClassRegistered(HINSTANCE instance) {
     registered = true;
 }
 
-// Same single-store premultiply as ActiveWindowHalo.cpp's
-// PremultipliedPixel (duplicated rather than exported: it's three lines,
-// and the two classes are deliberately independent). Premultiplied white
-// is alpha broadcast into every byte; premultiplied black is alpha alone
-// in the high byte.
-uint32_t PremultipliedPixel(int alpha, bool white) {
-    const uint32_t a = static_cast<uint32_t>(std::clamp(alpha, 0, 255));
-    return white ? a * 0x01010101u : (a << 24);
-}
-
 // The core composited over its contrasting outline, as one premultiplied
-// pixel. Standard source-over: the core is opaque white or black, so the
-// colour channels collapse to whichever of the two is the light one.
-uint32_t TwoTonePixel(int coreAlpha, int outlineAlpha, bool coreIsWhite) {
+// top-down 32bpp BGRA pixel. Standard source-over of two flat colours, each
+// given in COLORREF's own 0x00BBGGRR layout.
+//
+// Each layer contributes its colour scaled by its own alpha, and the outline
+// only shows through where the core does not cover it. Every channel stays
+// <= the combined alpha, so the pixel remains valid premultiplied data.
+uint32_t TwoTonePixel(int coreAlpha, int outlineAlpha, uint32_t coreColor, uint32_t outlineColor) {
     const float core = static_cast<float>(std::clamp(coreAlpha, 0, 255)) / 255.0f;
     const float outline = static_cast<float>(std::clamp(outlineAlpha, 0, 255)) / 255.0f;
-    const float combined = core + outline * (1.0f - core);
-    // Only the white layer contributes colour; the black one contributes
-    // opacity alone. Either way the result stays <= combined, so the pixel
-    // remains valid premultiplied data.
-    const float light = coreIsWhite ? core : outline * (1.0f - core);
-    const auto toByte = [](float v) {
-        return static_cast<uint32_t>(std::clamp(static_cast<int>(v * 255.0f + 0.5f), 0, 255));
+    const float outlineWeight = outline * (1.0f - core);
+    const float combined = core + outlineWeight;
+    const auto channel = [&](int shift) {
+        const float c = static_cast<float>((coreColor >> shift) & 0xFFu) * core +
+                        static_cast<float>((outlineColor >> shift) & 0xFFu) * outlineWeight;
+        return static_cast<uint32_t>(std::clamp(static_cast<int>(c + 0.5f), 0, 255));
     };
-    return (toByte(combined) << 24) | (toByte(light) << 16) | (toByte(light) << 8) | toByte(light);
+    const uint32_t a = static_cast<uint32_t>(std::clamp(static_cast<int>(combined * 255.0f + 0.5f), 0, 255));
+    // COLORREF is 0xBBGGRR, the DIB wants 0xAARRGGBB.
+    return (a << 24) | (channel(0) << 16) | (channel(8) << 8) | channel(16);
 }
 
 }  // namespace
@@ -214,7 +216,7 @@ bool BullseyeOverlay::AdvanceFrame() {
         return false;
     }
 
-    RenderFrame(progress, IsDarkModeEnabled());
+    RenderFrame(progress);
 
     HDC screenDC = GetDC(nullptr);
     HDC memDC = CreateCompatibleDC(screenDC);
@@ -280,14 +282,23 @@ void BullseyeOverlay::ClearRect(const RECT& rect) {
     }
 }
 
-void BullseyeOverlay::RenderFrame(float progress, bool isDark) {
+void BullseyeOverlay::RenderFrame(float progress) {
     ClearRect(prevDirty_);
     prevDirty_ = RECT{};
 
-    const int peak = bullseye_math::AlphaEnvelope(progress, isDark ? kPeakAlphaDark : kPeakAlphaLight);
+    const int peak = bullseye_math::AlphaEnvelope(progress, kPeakAlpha);
     if (peak <= 0) {
         return;
     }
+
+    // Read fresh every frame, never cached -- the codebase-wide convention
+    // for theme state, so changing the accent in Settings shows up on the
+    // next copy without a restart.
+    const uint32_t coreColor =
+        halo_math::ClampGlowLuminance(GetAccentColor(), kRingMinLuminance, kRingMaxLuminance);
+    // Black under a light accent, white under a dark one -- see the
+    // comment on the outline constants, and the same rule in the halo.
+    const uint32_t outlineColor = halo_math::Luminance(coreColor) >= 128 ? 0x00000000u : 0x00FFFFFFu;
 
     const float radius = bullseye_math::RadiusAt(progress, maxRadius_, phase_ == BullseyePhase::Paste);
     // The outline sits outside the core, so it -- not the core -- sets the
@@ -334,7 +345,7 @@ void BullseyeOverlay::RenderFrame(float progress, bool isDark) {
                 const int coreAlpha = bullseye_math::DistanceToAlpha(d, halfStroke_, peak);
                 const int outlineAlpha = bullseye_math::DistanceToAlpha(d, outlineHalfStroke, outlinePeak);
                 if (coreAlpha > 0 || outlineAlpha > 0) {
-                    row[x] = TwoTonePixel(coreAlpha, outlineAlpha, /*coreIsWhite=*/isDark);
+                    row[x] = TwoTonePixel(coreAlpha, outlineAlpha, coreColor, outlineColor);
                 }
             }
         };

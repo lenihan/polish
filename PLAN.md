@@ -320,9 +320,12 @@ current todo list.
   on `UiaWorker`'s thread at 4-12 ms with a 90 ms timeout. The three-API
   ladder is not over-engineering: no single one of them works everywhere,
   and the order matters because the last lies in Chromium
-  (docs/LIMITATIONS.md #21). Ring is two-tone -- a
-  theme-coloured core plus a contrasting edge -- so it reads against any
-  background, which one colour could not. Tray toggle. Tuning constants
+  (docs/LIMITATIONS.md #21). Ring is two-tone -- an accent-coloured core
+  (luminance clamped, as the halo's glow is) plus a black-or-white edge
+  opposing it -- so it reads against any background, which one colour
+  could not. It was white/black by theme until it was changed to match the
+  halo, which is why there is one peak alpha now and not one per theme.
+  Tray toggle. Tuning constants
   (radius/stroke/duration/alpha/outline) are adjusted by eye live.
 - Alt+`: the Alt+Tab switcher over the *tabs of the foreground window*
   (`SessionKind::Tabs`, no second hook -- `g_instance` is a single
@@ -1324,7 +1327,7 @@ commands as a menu.
 
 ## Left to do
 
-- Bullseye should use accent color
+- If copy  used, but nothing is selected....clipboard should keep its original content
 - Add support for "frozen windows"...they are still listed in taskbar (Under Frozen), but they take
   zero resources. If you click on a frozen window it gets loaded. This lets a user jump back and forth
   between various apps (like vs code) quickly without needing to figure out how to get app/document loaded.
