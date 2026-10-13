@@ -1215,6 +1215,10 @@ release has to exist before the signing application can even go in.
 
 ## Left to do
 
+- Virtual desktop gets a taskbar button. Can we do something similar to handle
+  moving, resizing, scaling, layout of windows?
+- Support individual scaling so you can resize a window and it looks like a thumbnail
+- Bugfix: I selected new window from taskbar an nothing happened for vs code
 - User click/drag taskbar button should allow reorder...currently is noop
 - Right click start should provide normal utility menu....currently is noop
 - A scrollable way to see all notifications (like snipping tool) once they are gone
