@@ -36,8 +36,8 @@ public:
     TrayIcon(const TrayIcon&) = delete;
     TrayIcon& operator=(const TrayIcon&) = delete;
 
-    // Routes the tray callback message (right-click, etc.).
-    void HandleCallbackMessage(LPARAM lParam);
+    // Routes the tray callback message (right-click, keyboard activation, etc.).
+    void HandleCallbackMessage(WPARAM wParam, LPARAM lParam);
 
     // Routes WM_COMMAND from the context menu to onCommand.
     void HandleCommand(WPARAM wParam);
@@ -58,7 +58,7 @@ public:
 
 private:
     void AddIcon();
-    void ShowContextMenu();
+    void ShowContextMenu(POINT anchor);
 
     HWND messageWindow_;
     std::function<void(HMENU)> populateMenu_;

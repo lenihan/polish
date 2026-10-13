@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include <windowsx.h>
+
 #include <shellapi.h>
 
 #include "resource.h"
@@ -49,6 +51,15 @@ void TrayIcon::AddIcon() {
     data.szTip[length] = 0;
 
     iconAdded_ = Shell_NotifyIconW(NIM_ADD, &data) != FALSE;
+    if (iconAdded_) {
+        // Version 4 is what makes the icon work from the keyboard: Win+B,
+        // then Enter or Space, arrives as NIN_KEYSELECT (and the context
+        // menu key as WM_CONTEXTMENU) with the icon's position, so the
+        // menu can open at the icon. Under the old protocol those were
+        // silently nothing.
+        data.uVersion = NOTIFYICON_VERSION_4;
+        Shell_NotifyIconW(NIM_SETVERSION, &data);
+    }
 }
 
 void TrayIcon::ShowNotification(const std::wstring& title, const std::wstring& text) {
@@ -76,10 +87,15 @@ void TrayIcon::HandleTaskbarRecreated() {
     AddIcon();
 }
 
-void TrayIcon::HandleCallbackMessage(LPARAM lParam) {
-    const UINT mouseMessage = static_cast<UINT>(lParam);
-    if (mouseMessage == WM_RBUTTONUP || mouseMessage == WM_LBUTTONUP || mouseMessage == WM_CONTEXTMENU) {
-        ShowContextMenu();
+void TrayIcon::HandleCallbackMessage(WPARAM wParam, LPARAM lParam) {
+    // Version 4: the event is the low word of lParam, and wParam is the
+    // icon's anchor point in screen coordinates. A click is NIN_SELECT
+    // (the mouse-up messages arrive too, which is why they are not also
+    // handled here -- that would open the menu twice).
+    const UINT event = LOWORD(lParam);
+    if (event == WM_CONTEXTMENU || event == NIN_SELECT || event == NIN_KEYSELECT) {
+        const POINT anchor{GET_X_LPARAM(wParam), GET_Y_LPARAM(wParam)};
+        ShowContextMenu(anchor);
     }
 }
 
@@ -89,9 +105,13 @@ void TrayIcon::HandleCommand(WPARAM wParam) {
     }
 }
 
-void TrayIcon::ShowContextMenu() {
-    POINT cursorPos;
-    GetCursorPos(&cursorPos);
+void TrayIcon::ShowContextMenu(POINT anchor) {
+    // The anchor is where the shell says the icon is (or the click was); a
+    // keyboard activation has no cursor near it. (0,0) means it did not say.
+    POINT cursorPos = anchor;
+    if (anchor.x == 0 && anchor.y == 0) {
+        GetCursorPos(&cursorPos);
+    }
 
     HMENU menu = CreatePopupMenu();
     if (populateMenu_) {

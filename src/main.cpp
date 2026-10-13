@@ -7801,7 +7801,12 @@ void AppendArrangeMenuItem(HMENU menu, UINT id, polish::ArrangeKind kind, const 
         text += L")";
     } else if (!misfitReason.empty()) {
         text += L" (";
-        text += misfitReason;
+        for (const wchar_t c : misfitReason) {
+            text += c;
+            if (c == L'&') {
+                text += c;  // a window title; not a mnemonic
+            }
+        }
         text += L")";
     }
     text += L"	";
@@ -7824,8 +7829,8 @@ void AppendLayoutCommands(HMENU menu) {
     // nothing.
     const bool canStartMoveMode = g_settings.moveModeEnabled && MoveModeMenuTarget() != nullptr;
     AppendMenuW(menu, MF_STRING | (canStartMoveMode ? MF_ENABLED : MF_GRAYED), kMenuIdMoveModeStart,
-                g_settings.moveModeEnabled ? L"Move or resize a window"
-                                           : L"Move or resize a window (switch it on in the tray menu)");
+                g_settings.moveModeEnabled ? L"&Move or resize a window"
+                                           : L"&Move or resize a window (switch it on in the tray menu)");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     // The hotkey is shown beside each item on purpose: the menu is the
     // mouse way in, and seeing the key there is how anyone ever learns the
@@ -7861,14 +7866,14 @@ void AppendLayoutCommands(HMENU menu) {
         // hotkey's notification carries.
         return ShortWindowTitle(arrangeCandidates[static_cast<size_t>(fit.blocker)], 24) + L" won't fit";
     };
-    AppendArrangeMenuItem(menu, kMenuIdArrangeTwoWay, polish::ArrangeKind::TwoWay, L"Tile 2-way",
+    AppendArrangeMenuItem(menu, kMenuIdArrangeTwoWay, polish::ArrangeKind::TwoWay, L"Tile &2-way",
                           g_settings.arrangeTwoWayHotkeyModifiers, g_settings.arrangeTwoWayHotkeyVirtualKey,
                           arrangeCandidateCount, misfitFor(polish::ArrangeKind::TwoWay));
-    AppendArrangeMenuItem(menu, kMenuIdArrangeThreeWay, polish::ArrangeKind::ThreeWay, L"Tile 3-way",
+    AppendArrangeMenuItem(menu, kMenuIdArrangeThreeWay, polish::ArrangeKind::ThreeWay, L"Tile &3-way",
                           g_settings.arrangeThreeWayHotkeyModifiers,
                           g_settings.arrangeThreeWayHotkeyVirtualKey, arrangeCandidateCount,
                           misfitFor(polish::ArrangeKind::ThreeWay));
-    AppendArrangeMenuItem(menu, kMenuIdArrangeFourWay, polish::ArrangeKind::FourWay, L"Tile 4-way",
+    AppendArrangeMenuItem(menu, kMenuIdArrangeFourWay, polish::ArrangeKind::FourWay, L"Tile &4-way",
                           g_settings.arrangeFourWayHotkeyModifiers,
                           g_settings.arrangeFourWayHotkeyVirtualKey, arrangeCandidateCount,
                           misfitFor(polish::ArrangeKind::FourWay));
@@ -7882,18 +7887,18 @@ void AppendLayoutCommands(HMENU menu) {
             }
         }
         const std::wstring downLabel =
-            L"Scale down\t" + FormatHotkey(g_settings.scaleDownHotkeyModifiers, g_settings.scaleDownHotkeyVirtualKey);
+            L"Sca&le down\t" + FormatHotkey(g_settings.scaleDownHotkeyModifiers, g_settings.scaleDownHotkeyVirtualKey);
         AppendMenuW(menu, MF_STRING | (g_settings.scaleEnabled && scaleTarget != nullptr ? MF_ENABLED : MF_GRAYED),
                     kMenuIdScaleDown, downLabel.c_str());
         const std::wstring resetLabel =
-            L"Restore scaled windows\t" +
+            L"Restore s&caled windows\t" +
             FormatHotkey(g_settings.scaleResetHotkeyModifiers, g_settings.scaleResetHotkeyVirtualKey);
         AppendMenuW(menu, MF_STRING | (g_scaledSet.Empty() ? MF_GRAYED : MF_ENABLED), kMenuIdScaleRestoreAll,
                     resetLabel.c_str());
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuIdNewStack,
-                (L"New Stack...\t" + FormatHotkey(g_settings.stackHotkeyModifiers, g_settings.stackHotkeyVirtualKey))
+                (L"&New Stack...\t" + FormatHotkey(g_settings.stackHotkeyModifiers, g_settings.stackHotkeyVirtualKey))
                     .c_str());
 }
 
@@ -7903,37 +7908,37 @@ void AppendLayoutCommands(HMENU menu) {
 // of truth is the Run key itself, not a cached value here.
 void PopulateTrayMenu(HMENU menu) {
     AppendMenuW(menu, MF_STRING | (g_settings.restoreSyncEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdRestoreSync,
-                L"Restore remembers Snap position");
+                L"&Restore remembers Snap position");
     AppendMenuW(menu, MF_STRING | (g_settings.altTabEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdAltTab,
-                L"Alt+Tab and Alt+` switchers");
+                L"&Alt+Tab and Alt+` switchers");
     AppendMenuW(menu, MF_STRING | (g_settings.haloEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdHalo,
-                L"Halo around active window");
+                L"&Halo around active window");
     AppendMenuW(menu, MF_STRING | (g_settings.bullseyeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdBullseye,
-                L"Bullseye (copy/paste flash)");
+                L"&Bullseye (copy/paste flash)");
     AppendMenuW(menu, MF_STRING | (g_settings.taskbarEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdTaskbar,
-                L"Taskbar hover list and click-to-cycle");
+                L"&Taskbar hover list and click-to-cycle");
     AppendMenuW(menu, MF_STRING | (g_settings.moveModeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdMoveMode,
-                L"Hold Win to move/resize any window");
+                L"Hold &Win to move/resize any window");
     AppendMenuW(menu, MF_STRING | (g_settings.scaleEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdScaleEnabled,
-                L"Scaled windows (live thumbnail)");
+                L"&Scaled windows (live thumbnail)");
     AppendMenuW(menu, MF_STRING | (g_settings.polishButtonEnabled ? MF_CHECKED : MF_UNCHECKED),
                 kMenuIdLayoutButton,
-                (L"Polish button on taskbar\t" +
+                (L"&Polish button on taskbar\t" +
                  FormatHotkey(g_settings.layoutHotkeyModifiers, g_settings.layoutHotkeyVirtualKey))
                     .c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendLayoutCommands(menu);
-    AppendMenuW(menu, MF_STRING, kMenuIdChangeStackHotkey, L"Change Stack Hotkey...");
-    AppendMenuW(menu, MF_STRING, kMenuIdSettings, L"Settings...");
+    AppendMenuW(menu, MF_STRING, kMenuIdChangeStackHotkey, L"Change Stack Hot&key...");
+    AppendMenuW(menu, MF_STRING, kMenuIdSettings, L"S&ettings...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (polish::IsStartAtLoginEnabled() ? MF_CHECKED : MF_UNCHECKED),
-                kMenuIdStartAtLogin, L"Start with Windows");
+                kMenuIdStartAtLogin, L"Start w&ith Windows");
     if (!IsProcessElevated()) {
-        AppendMenuW(menu, MF_STRING, kMenuIdRestartAdmin, L"Restart as Administrator");
+        AppendMenuW(menu, MF_STRING, kMenuIdRestartAdmin, L"Restart as A&dministrator");
     }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuIdAbout, L"By David Lenihan. Hire me!");
-    AppendMenuW(menu, MF_STRING, kMenuIdExit, L"Exit");
+    AppendMenuW(menu, MF_STRING, kMenuIdExit, L"E&xit");
 }
 
 // Turns a feature on or off: sets and saves the switch, then does whatever
@@ -8458,7 +8463,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 
         case polish::TrayIcon::kCallbackMessage:
             if (g_trayIcon) {
-                g_trayIcon->HandleCallbackMessage(lParam);
+                g_trayIcon->HandleCallbackMessage(wParam, lParam);
             }
             return 0;
 
