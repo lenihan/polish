@@ -80,6 +80,10 @@ struct Settings {
     // layout commands, the discoverable way in to what is otherwise tray
     // menu and hotkeys (see hook/LayoutTaskbarButton.h).
     bool layoutButtonEnabled = true;
+    // Opens that same menu from the keyboard, over the window in front.
+    // Ctrl+Alt+Space (0x20 is VK_SPACE), beside the other layout hotkeys.
+    UINT layoutHotkeyModifiers = MOD_CONTROL | MOD_ALT;
+    UINT layoutHotkeyVirtualKey = 0x20;
 
     // Scale down / scale up / restore to 1:1. Ctrl+Alt with the zoom keys,
     // beside the tiling and stack hotkeys; registry only, like those.

@@ -6044,6 +6044,8 @@ std::wstring FormatHotkey(UINT modifiers, UINT virtualKey) {
         text += L"-";
     } else if (virtualKey == VK_OEM_PLUS) {
         text += L"=";
+    } else if (virtualKey == VK_SPACE) {
+        text += L"Space";
     } else {
         text += static_cast<wchar_t>(virtualKey);
     }
@@ -6122,11 +6124,22 @@ constexpr UINT kMenuIdScaleDown = 17;
 constexpr UINT kMenuIdScaleRestoreAll = 18;
 constexpr UINT kMenuIdLayoutButton = 19;
 
-// Creates or removes the Layout taskbar button to match the setting.
+constexpr int kLayoutHotkeyId = 8;
+
+// Creates or removes the Layout taskbar button to match the setting, and
+// the hotkey that opens the same menu with it: no button, no hotkey.
 void ApplyLayoutButtonSetting() {
+    UnregisterHotKey(g_messageWindow, kLayoutHotkeyId);
     if (!g_settings.layoutButtonEnabled) {
         g_layoutButton.reset();
         return;
+    }
+    if (RegisterHotKey(g_messageWindow, kLayoutHotkeyId, g_settings.layoutHotkeyModifiers | MOD_NOREPEAT,
+                       g_settings.layoutHotkeyVirtualKey) == FALSE) {
+        polish::LogDebug(std::format(
+            L"[Polish] WARNING: failed to register the {} hotkey for the layout menu (already claimed on this "
+            L"PC?). GetLastError={}. Change it under HKCU\\Software\\Polish.",
+            FormatHotkey(g_settings.layoutHotkeyModifiers, g_settings.layoutHotkeyVirtualKey), GetLastError()));
     }
     if (g_layoutButton != nullptr) {
         return;
@@ -7653,7 +7666,10 @@ void PopulateTrayMenu(HMENU menu) {
     AppendMenuW(menu, MF_STRING | (g_settings.scaleEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdScaleEnabled,
                 L"Scaled windows (live thumbnail)");
     AppendMenuW(menu, MF_STRING | (g_settings.layoutButtonEnabled ? MF_CHECKED : MF_UNCHECKED),
-                kMenuIdLayoutButton, L"Layout button on taskbar");
+                kMenuIdLayoutButton,
+                (L"Layout button on taskbar\t" +
+                 FormatHotkey(g_settings.layoutHotkeyModifiers, g_settings.layoutHotkeyVirtualKey))
+                    .c_str());
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendLayoutCommands(menu);
     AppendMenuW(menu, MF_STRING, kMenuIdChangeStackHotkey, L"Change Stack Hotkey...");
@@ -7809,9 +7825,19 @@ void HandleTrayCommand(UINT commandId) {
 // navigable, follows the system theme like the tray menu, and shares its
 // items with it (AppendLayoutCommands), so the two cannot drift. What it
 // gives up is the free-form look of a Task-View-style flyout.
-void OpenLayoutMenu() {
+void OpenLayoutMenu(bool fromHotkey = false) {
     if (g_layoutMenuOpen) {
         return;  // a second click while open just dismissed it
+    }
+    if (fromHotkey) {
+        // The hotkey does not move the foreground, so what is in front now
+        // is what the menu is about -- unlike a button click, where the
+        // stand-in is in front and the memory of the last real window is
+        // the answer.
+        const HWND foreground = GetForegroundWindow();
+        if (foreground != nullptr && !IsShellTaskbarWindow(foreground) && !IsOwnProcessWindow(foreground)) {
+            g_layoutPrevious = foreground;
+        }
     }
     // Give the user's window back first. The stand-in is activated by the
     // click and is not meant to keep the foreground.
@@ -7832,6 +7858,14 @@ void OpenLayoutMenu() {
 
     POINT cursor{};
     GetCursorPos(&cursor);
+    if (fromHotkey && haveTarget) {
+        // No button was clicked, so the cursor can be anywhere: open the
+        // menu over the middle of the window it is about.
+        RECT visible{};
+        if (polish::GetVisibleWindowRect(target, visible)) {
+            cursor = {(visible.left + visible.right) / 2, (visible.top + visible.bottom) / 2};
+        }
+    }
     // Keep the menu clear of the taskbar: whichever edge of the monitor
     // the work area leaves out is the bar.
     MONITORINFO monitor{};
@@ -8085,6 +8119,8 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             } else if (wParam == kScaleResetHotkeyId) {
                 polish::LogDebug(L"[Polish] Scale: hotkey reset");
                 ScaleResetCommand();
+            } else if (wParam == kLayoutHotkeyId) {
+                OpenLayoutMenu(/*fromHotkey=*/true);
             }
             return 0;
 
@@ -8195,6 +8231,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             UnregisterHotKey(hwnd, kScaleDownHotkeyId);
             UnregisterHotKey(hwnd, kScaleUpHotkeyId);
             UnregisterHotKey(hwnd, kScaleResetHotkeyId);
+            UnregisterHotKey(hwnd, kLayoutHotkeyId);
             RemoveClipboardFormatListener(hwnd);
             KillTimer(hwnd, kBullseyeFrameTimerId);
             KillTimer(hwnd, kMoveModeDimTimerId);

@@ -1294,6 +1294,34 @@ Shrink a window to a live thumbnail; click it to get it back at 1:1.
 - **Stacks**: adding a scaled window to a stack (picker or join) restores it
   first, so the stack lays it out at real size.
 
+## Layout taskbar button: built
+
+A Polish-owned taskbar button, "Layout", whose click opens the layout
+commands as a menu.
+
+- **The button** (`hook/LayoutTaskbarButton`) is the stack stand-in pattern:
+  a 1 px, off-screen `WS_EX_APPWINDOW` popup with its own AppUserModelID
+  (`Polish.Layout`). Not `WS_EX_NOACTIVATE` -- the shell activating it *is*
+  the click, seen as `WM_ACTIVATE`. The click is posted as a message rather
+  than handled inside that activation: re-activating another window from
+  inside the stand-in's own `WM_ACTIVATE` is a nested activation.
+- **The menu** acts on the last real window in front (`g_layoutPrevious`,
+  kept by `OnForegroundChanged`, which skips the shell and Polish's own
+  windows). The window is re-activated before the menu opens, and every
+  command then acts on the MRU window -- the same reason the tray menu does:
+  opening a menu takes the foreground for Polish's message window.
+- **One command list**: `AppendLayoutCommands` is shared by the tray menu
+  and this one, so they cannot disagree about what is enabled or why not.
+- **A native menu, not a custom panel.** Keyboard-navigable, follows the
+  system theme like the tray menu, and shares its items. It gives up the
+  free-form look of a Task-View-style flyout; a custom-drawn panel would be
+  a separate piece of work if that look is wanted.
+- **Keyboard**: Ctrl+Alt+Space opens the same menu over the window in
+  front. The hotkey exists only while the button is enabled.
+- Reuses the tray icon; no dedicated layout icon yet. Same limits as a stack
+  (LIMITATIONS #7): blank hover thumbnail, title-derived label.
+- The button's jump-list "Close window" switches it off.
+
 ## Left to do
 
 - Bullseye should use accent color
@@ -1305,15 +1333,12 @@ Shrink a window to a live thumbnail; click it to get it back at 1:1.
   - Not yet checked on real VS Code, Windows Terminal and Explorer windows
     (only a WinForms window, Edge and Notepad so far).
   - Move mode (Hold Win) ignores views; dragging the view itself moves it.
-- Layout taskbar button + panel, like Windows' virtual-desktops button: a
-  Polish-owned taskbar button whose click opens a panel anchored to it,
-  acting on the window that was in front -- Move/resize, Tile 2/3/4-way,
-  Stack, Scale (50/33/25%, 1:1), each row showing its shortcut. Copy the
-  stack stand-in pattern (`StackStripWindow`: 1 px `WS_EX_APPWINDOW` popup
-  with its own AUMID, click seen as it becoming foreground). New panel
-  class rather than `AltTabListWindow` (that one assumes an HWND per row);
-  pull the anchor placement into a pure, tested helper. Extract the tray
-  menu's enabled/"won't fit" logic into one command model both use.
+- Layout button, remaining (see "Layout taskbar button: built"): a
+  custom-drawn panel in place of the native menu, if the Task-View look is
+  wanted (new class rather than `AltTabListWindow`, which assumes an HWND
+  per row; pull the anchor placement into a pure, tested helper); a
+  dedicated icon; check it with the taskbar feature off and the taskbar on
+  each screen edge.
 - User click/drag taskbar button should allow reorder...currently is noop
 - Right click start should provide normal utility menu....currently is noop
 - A scrollable way to see all notifications (like snipping tool) once they are gone
