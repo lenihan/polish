@@ -28,6 +28,7 @@
 #include "hook/PolishTaskbarButton.h"
 #include "hook/ScaledViewWindow.h"
 #include "hook/WindowParking.h"
+#include "hook/SettingsWindow.h"
 #include "hook/StackHotkeyDialog.h"
 #include "hook/StackPickerWindow.h"
 #include "hook/StackStripWindow.h"
@@ -514,6 +515,8 @@ constexpr UINT kScaledRestoreMessage = WM_APP + 40;
 // A click arrives inside the button's own window procedure, so it is posted
 // as a message rather than acted on there.
 std::unique_ptr<polish::PolishTaskbarButton> g_polishButton;
+// Created on first use; see ShowSettingsWindow.
+std::unique_ptr<polish::SettingsWindow> g_settingsWindow;
 HWND g_layoutPrevious = nullptr;
 bool g_layoutMenuOpen = false;
 constexpr UINT kPolishButtonMessage = WM_APP + 41;
@@ -6254,6 +6257,7 @@ constexpr UINT kMenuIdScaleEnabled = 16;
 constexpr UINT kMenuIdScaleDown = 17;
 constexpr UINT kMenuIdScaleRestoreAll = 18;
 constexpr UINT kMenuIdLayoutButton = 19;
+constexpr UINT kMenuIdSettings = 20;
 
 constexpr int kLayoutHotkeyId = 8;
 
@@ -7882,6 +7886,7 @@ void PopulateTrayMenu(HMENU menu) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendLayoutCommands(menu);
     AppendMenuW(menu, MF_STRING, kMenuIdChangeStackHotkey, L"Change Stack Hotkey...");
+    AppendMenuW(menu, MF_STRING, kMenuIdSettings, L"Settings...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (polish::IsStartAtLoginEnabled() ? MF_CHECKED : MF_UNCHECKED),
                 kMenuIdStartAtLogin, L"Start with Windows");
@@ -7944,6 +7949,18 @@ void ApplyFeatureToggle(polish::Feature feature, bool enabled) {
 
 void ToggleFeature(polish::Feature feature) {
     ApplyFeatureToggle(feature, !polish::IsFeatureEnabled(g_settings, feature));
+}
+
+// The Settings window's toggles go through ApplyFeatureToggle, the same
+// path as the tray menu's.
+void ShowSettingsWindow() {
+    if (!g_settingsWindow) {
+        g_settingsWindow = std::make_unique<polish::SettingsWindow>(
+            GetModuleHandleW(nullptr),
+            [](polish::Feature feature) { return polish::IsFeatureEnabled(g_settings, feature); },
+            [](polish::Feature feature, bool enabled) { ApplyFeatureToggle(feature, enabled); });
+    }
+    g_settingsWindow->Show();
 }
 
 void HandleTrayCommand(UINT commandId) {
@@ -8023,6 +8040,9 @@ void HandleTrayCommand(UINT commandId) {
             break;
         case kMenuIdLayoutButton:
             ToggleFeature(polish::Feature::PolishButton);
+            break;
+        case kMenuIdSettings:
+            ShowSettingsWindow();
             break;
         case kMenuIdNewStack:
             TriggerNewStack(nullptr);
@@ -8145,7 +8165,7 @@ void ShowPolishButtonMenu() {
     if (menu == nullptr) {
         return;
     }
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, kSettings, L"Settings... (coming soon)");
+    AppendMenuW(menu, MF_STRING, kSettings, L"Settings...");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kExit, L"Exit Polish");
     polish::ApplyDarkModeToMenu(g_messageWindow);
@@ -8168,7 +8188,9 @@ void ShowPolishButtonMenu() {
     }
     DestroyMenu(menu);
     PostMessageW(g_messageWindow, WM_NULL, 0, 0);
-    if (command == kExit) {
+    if (command == kSettings) {
+        ShowSettingsWindow();
+    } else if (command == kExit) {
         DestroyWindow(g_messageWindow);
     }
 }
@@ -8954,6 +8976,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     while ((getMessageResult = GetMessageW(&msg, nullptr, 0, 0)) != 0) {
         if (getMessageResult == -1) {
             break;
+        }
+        if (g_settingsWindow && g_settingsWindow->PreTranslate(msg)) {
+            continue;
         }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);

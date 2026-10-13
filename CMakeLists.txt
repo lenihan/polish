@@ -62,6 +62,7 @@ add_library(polish_core STATIC
     src/hook/StackPickerWindow.cpp
     src/hook/StackPickerListWindow.cpp
     src/hook/StackPickerSelectedListWindow.cpp
+    src/hook/SettingsWindow.cpp
     src/hook/StackHotkeyDialog.cpp
     src/hook/StackStripWindow.cpp
     src/hook/PolishTaskbarButton.cpp
