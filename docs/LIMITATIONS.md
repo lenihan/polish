@@ -10,8 +10,11 @@ gets a full pass in Phase 3; today it records what's already known.
    in Alt+Tab an elevated window can be dimmed/undimmed correctly but its
    turn at being visually promoted to the front can silently fail (logged
    as a warning) if something else happens to be covering it. This is the
-   one case with no unelevated workaround. (A tray "Restart as
-   Administrator" option is planned for Phase 3 but not yet built.)
+   one case with no unelevated workaround short of the tray's "Restart as
+   Administrator" item, which relaunches Polish elevated for that session.
+   It does not stick: Start with Windows still starts Polish normally, and
+   an elevated Polish is itself a larger target, so it is an opt-in per
+   session rather than a setting.
 
 2. **Multi-monitor / mixed-DPI setups** are supported via Per-Monitor-V2
    DPI awareness, which depends on `app.manifest` being embedded correctly
@@ -42,7 +45,7 @@ gets a full pass in Phase 3; today it records what's already known.
    gets minimized mid-session isn't removed from the list until the
    session ends.
 
-6. **The "Start with Windows" checkbox only checks whether the Run
+6. **The "Start with Windows" checkbox (tray menu and Settings window) only checks whether the Run
    registry key's value exists, not Windows' separate `StartupApproved`
    state.** Task Manager's own Startup Apps tab can disable an entry
    without removing it from the Run key — if that happens, the checkbox
@@ -493,8 +496,8 @@ gets a full pass in Phase 3; today it records what's already known.
     exactly as if the feature were switched off. That is deliberate: a
     swallowed click that then did nothing would read as the mode being
     broken. The cost is that the one set of windows hardest to reach is
-    the one this feature cannot help with, until the planned "Restart as
-    Administrator" tray item exists.
+    the one this feature cannot help with, unless Polish has been
+    restarted as Administrator from the tray menu (#1).
 
 26. **A resize leaves the two anchored edges alone even when they are off
     the monitor.** The clamp only applies to the edges the gesture is
@@ -511,7 +514,25 @@ gets a full pass in Phase 3; today it records what's already known.
     bug (a hard shove pushed a window off the side of the desktop), and
     the multi-monitor paths have had no equivalent scrutiny.
 
-28. **The snap threshold is registry-only.** `MoveModeSnapThresholdPx`
-    under `HKCU\Software\Polish` (default 12) has no UI, because the
-    right value depends on pointer speed and monitor DPI and the default
-    is a guess tuned on one machine.
+28. **The snap threshold's default is a guess.** `MoveModeSnapThresholdPx`
+    (default 12 pixels, adjustable in the Settings window, 0-60) depends
+    on pointer speed and monitor DPI, and the default was tuned on one
+    machine.
+
+29. **Hotkeys can only be set to letters, digits, Space, `-` and `=`,
+    with at least one modifier.** The change-hotkey dialog is a one
+    character box plus Ctrl/Alt/Shift/Win checkboxes, not a live "press
+    your shortcut" capture (the shell often intercepts the Win key before
+    a capture could see it). Function keys, arrows and punctuation keys
+    other than `-` and `=` cannot be chosen, and a combination another
+    program already owns is refused. The Settings window and the tray
+    both edit the same stored values; a hotkey set to a combination that
+    was free at the time can still be claimed by another program that
+    starts later, and then fails to register, which is logged.
+
+30. **The Settings window and the hotkey dialog follow the system theme
+    only when shown.** The theme is read each time either opens, so a
+    change made while one is open is picked up the next time it is
+    opened. Both are plain Win32 controls themed with the undocumented
+    `DarkMode_Explorer` pseudo-theme (as the tray menu already is), which
+    Windows can change under us.

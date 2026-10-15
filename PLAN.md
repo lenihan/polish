@@ -1406,6 +1406,21 @@ title bar, `DarkMode_Explorer` on the controls, our own background and text
 colours), as does StackHotkeyDialog; both use `util/WindowTheme`, which does
 nothing in light mode.
 
+## Tray: keyboard and elevation
+
+The tray icon uses `NOTIFYICON_VERSION_4`: Win+B then Enter/Space arrives as
+`NIN_KEYSELECT` (and the menu key as `WM_CONTEXTMENU`) with the icon's
+position in wParam, and the menu opens there. Under version 4 a left click is
+`NIN_SELECT`, so the mouse-up messages are deliberately not also handled.
+Menu items carry `&` mnemonics; `&` in a window title shown in a label is
+doubled.
+
+"Restart as Administrator" (hidden when already elevated) relaunches the exe
+with the `runas` verb and quits on accept. The new copy is given `--restarted`
+and waits up to five seconds for the old copy's single-instance mutex, so the
+hand-over is not mistaken for a second instance. Elevation is for that session
+only: Start with Windows still starts Polish normally.
+
 ## Layout taskbar button: built (the stand-in window; superseded above)
 
 A Polish-owned taskbar button, "Layout", whose click opens the layout
@@ -1528,11 +1543,6 @@ commands as a menu.
   hook the way Alt+Tab does, not a plain WM_KEYDOWN handler: with a
   group open, focus belongs to the *member app* (a foreign process), so
   the chrome window never receives keystrokes at all.
-- Tray menu: reachable by keyboard (NIM_SETVERSION + NIN_KEYSELECT so
-  Win+B finds it, menu positioned at the icon rather than the cursor,
-  and `&` mnemonics on the items).
-- Add a "Restart as Administrator" tray item so elevated windows become
-  manageable.
 - Move/resize mode: the "slick UI that flips windows around with
   move/resize controls" half of the original idea is not built -- today
   the affordance is the dim plus an outline on the window under the
