@@ -258,6 +258,22 @@ private:
     bool swallowedLeftDown_ = false;
     bool swallowedRightDown_ = false;
 
+    // A claimed left press that has not yet become either a click or a
+    // drag. The cycle is posted on the release; if the pointer instead
+    // travels past the system drag threshold first, the press is handed to
+    // the taskbar (so dragging a button to reorder it works), replayed at
+    // the point it originally happened -- see ReplayButtonDown.
+    bool claimPending_ = false;
+    UINT claimMessage_ = 0;
+    int claimIndex_ = -1;
+    POINT claimOrigin_{};
+
+    // Set when the pending replay is a drag handoff: the press goes in at
+    // replayOrigin_ and the cursor is then put back at replayReturn_.
+    bool replayAtOrigin_ = false;
+    POINT replayOrigin_{};
+    POINT replayReturn_{};
+
     // GetTickCount64() at the last event this hook saw, for
     // EnsureInstalled's liveness inference.
     ULONGLONG lastEventTick_ = 0;

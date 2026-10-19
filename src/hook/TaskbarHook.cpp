@@ -1,5 +1,7 @@
 #include "hook/TaskbarHook.h"
 
+#include <algorithm>
+
 namespace polish {
 
 namespace {
@@ -81,6 +83,21 @@ constexpr ULONG_PTR kReplaySignature = 0x504F4C53;  // "POLS"
 // gesture rather than a synthetic click followed by a stray release. It
 // is true only when the user out-ran the message loop -- see
 // pendingReplayNeedsRelease_.
+INPUT AbsoluteMove(POINT pt) {
+    INPUT input{};
+    input.type = INPUT_MOUSE;
+    input.mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+    input.mi.dwExtraInfo = kReplaySignature;
+    const int left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    const int top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    const int width = std::max(1, GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1);
+    const int height = std::max(1, GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1);
+    // Rounded up so the point maps back to the same pixel, not the one before.
+    input.mi.dx = static_cast<LONG>(((pt.x - left) * 65535LL + width - 1) / width);
+    input.mi.dy = static_cast<LONG>(((pt.y - top) * 65535LL + height - 1) / height);
+    return input;
+}
+
 void ReplayButtonDown(WPARAM message, DWORD mouseData, bool release) {
     INPUT inputs[2]{};
     DWORD downFlag = 0;
@@ -121,6 +138,29 @@ void ReplayButtonDown(WPARAM message, DWORD mouseData, bool release) {
     // No movement alongside: the cursor is already exactly where the user
     // put it, and a synthetic move to the same point risks being coalesced
     // away or landing a pixel off on a scaled display.
+    SendInput(count, inputs, sizeof(INPUT));
+}
+
+// A left press that turned into a drag before it could be a click: put the
+// pointer back where the press happened, press there so the taskbar sees
+// the button grabbed, then carry on to where the pointer now is. The
+// taskbar then sees an ordinary press-and-drag, which is what reordering a
+// button needs. The user's own release (still to come) completes it.
+void ReplayDragHandoff(POINT origin, POINT current, bool release) {
+    INPUT inputs[4]{};
+    UINT count = 0;
+    inputs[count++] = AbsoluteMove(origin);
+    inputs[count].type = INPUT_MOUSE;
+    inputs[count].mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+    inputs[count].mi.dwExtraInfo = kReplaySignature;
+    ++count;
+    inputs[count++] = AbsoluteMove(current);
+    if (release) {
+        inputs[count].type = INPUT_MOUSE;
+        inputs[count].mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        inputs[count].mi.dwExtraInfo = kReplaySignature;
+        ++count;
+    }
     SendInput(count, inputs, sizeof(INPUT));
 }
 
@@ -253,7 +293,31 @@ bool TaskbarHook::HandleMouseEvent(WPARAM message, POINT screenPt, DWORD mouseDa
     // app itself, which is exactly what eating the press was for.
     if (message == WM_LBUTTONUP && swallowedLeftDown_) {
         swallowedLeftDown_ = false;
+        if (claimPending_) {
+            // Released without having travelled: a click, so cycle now.
+            claimPending_ = false;
+            PostMessageW(messageWindow_, claimMessage_, static_cast<WPARAM>(generation_),
+                         static_cast<LPARAM>(claimIndex_));
+        }
         return true;
+    }
+    if (message == WM_MOUSEMOVE && claimPending_) {
+        const int dragX = GetSystemMetrics(SM_CXDRAG);
+        const int dragY = GetSystemMetrics(SM_CYDRAG);
+        if (std::abs(screenPt.x - claimOrigin_.x) > dragX || std::abs(screenPt.y - claimOrigin_.y) > dragY) {
+            // A drag, not a click: give the taskbar its press back (reordering
+            // a button is the taskbar's own gesture) and cycle nothing.
+            claimPending_ = false;
+            swallowedLeftDown_ = false;
+            ApplyPassThrough(true);
+            pendingReplayMessage_ = WM_LBUTTONDOWN;
+            pendingReplayNeedsRelease_ = false;
+            replayAtOrigin_ = true;
+            replayOrigin_ = claimOrigin_;
+            replayReturn_ = screenPt;
+            PostMessageW(messageWindow_, kReplayPressMessage, WM_LBUTTONDOWN, 0);
+        }
+        return false;
     }
     // Same pairing rule for the swallowed empty-space right-press: an
     // unpaired button-up would open the context menu the press avoided.
@@ -280,10 +344,14 @@ bool TaskbarHook::HandleMouseEvent(WPARAM message, POINT screenPt, DWORD mouseDa
         // Ctrl wins when both are down. It is the coarser gesture -- "the
         // other one" rather than "one step back" -- so it is the one a
         // hand fumbling both modifiers more likely meant.
-        const UINT claimed = ctrlHeld          ? kToggleClickMessage
-                             : IsShiftHeld()   ? kCycleBackClickMessage
-                                               : kCycleClickMessage;
-        PostMessageW(messageWindow_, claimed, static_cast<WPARAM>(generation_), static_cast<LPARAM>(index));
+        claimMessage_ = ctrlHeld          ? kToggleClickMessage
+                        : IsShiftHeld()   ? kCycleBackClickMessage
+                                          : kCycleClickMessage;
+        // Held until the release: only then is it known to be a click and
+        // not the start of a drag to reorder the button.
+        claimPending_ = true;
+        claimIndex_ = index;
+        claimOrigin_ = screenPt;
         return true;
     }
 
@@ -364,6 +432,16 @@ void TaskbarHook::HandleHookMessage(UINT message, WPARAM wParam, LPARAM lParam) 
         const bool release = pendingReplayNeedsRelease_;
         pendingReplayMessage_ = WM_NULL;
         pendingReplayNeedsRelease_ = false;
+        if (replayAtOrigin_) {
+            replayAtOrigin_ = false;
+            // The pointer may have moved on since; hand over from where it is now.
+            POINT current{};
+            if (!GetCursorPos(&current)) {
+                current = replayReturn_;
+            }
+            ReplayDragHandoff(replayOrigin_, current, release);
+            return;
+        }
         ReplayButtonDown(wParam, static_cast<DWORD>(lParam), release);
         return;
     }

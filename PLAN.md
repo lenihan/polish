@@ -1451,6 +1451,7 @@ commands as a menu.
 
 ## Left to do
 
+- Bugfix: Dragging a taskbar button should move it on the taskbar
 - Bugfix: I'm in a state where i can switch between vs code and task manager and neither window gets a halo....that shouldn't happen
 - Bugfix: i see small halo artifacts on the active window
 - Bugfix: when an app is full screen and covering taskbar....the overlay should not respond to clicks
