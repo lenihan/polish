@@ -83,6 +83,66 @@ constexpr ULONG_PTR kReplaySignature = 0x504F4C53;  // "POLS"
 // gesture rather than a synthetic click followed by a stray release. It
 // is true only when the user out-ran the message loop -- see
 // pendingReplayNeedsRelease_.
+// The integrity RID of a token (SECURITY_MANDATORY_*_RID), or -1.
+long IntegrityRid(HANDLE token) {
+    DWORD size = 0;
+    GetTokenInformation(token, TokenIntegrityLevel, nullptr, 0, &size);
+    if (size == 0) {
+        return -1;
+    }
+    std::vector<BYTE> buffer(size);
+    if (!GetTokenInformation(token, TokenIntegrityLevel, buffer.data(), size, &size)) {
+        return -1;
+    }
+    const auto* label = reinterpret_cast<const TOKEN_MANDATORY_LABEL*>(buffer.data());
+    const UCHAR count = *GetSidSubAuthorityCount(label->Label.Sid);
+    return count == 0 ? -1 : static_cast<long>(*GetSidSubAuthority(label->Label.Sid, count - 1));
+}
+
+long OwnIntegrityRid() {
+    static const long rid = [] {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+            return -1L;
+        }
+        const long value = IntegrityRid(token);
+        CloseHandle(token);
+        return value;
+    }();
+    return rid;
+}
+
+// Whether the foreground window belongs to a process that outranks this one,
+// which is the case in which Windows discards what SendInput injects.
+bool ForegroundOutranksUs() {
+    const HWND foreground = GetForegroundWindow();
+    if (foreground == nullptr) {
+        return false;
+    }
+    DWORD pid = 0;
+    GetWindowThreadProcessId(foreground, &pid);
+    if (pid == 0 || pid == GetCurrentProcessId()) {
+        return false;
+    }
+    const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (process == nullptr) {
+        // Cannot even be queried: a protected or higher-integrity process.
+        return GetLastError() == ERROR_ACCESS_DENIED;
+    }
+    HANDLE token = nullptr;
+    bool outranks = false;
+    if (OpenProcessToken(process, TOKEN_QUERY, &token)) {
+        const long theirs = IntegrityRid(token);
+        const long ours = OwnIntegrityRid();
+        outranks = theirs >= 0 && ours >= 0 && theirs > ours;
+        CloseHandle(token);
+    } else {
+        outranks = GetLastError() == ERROR_ACCESS_DENIED;
+    }
+    CloseHandle(process);
+    return outranks;
+}
+
 INPUT AbsoluteMove(POINT pt) {
     INPUT input{};
     input.type = INPUT_MOUSE;
@@ -278,6 +338,9 @@ bool TaskbarHook::PassThroughWanted() const {
         // flyout. See the same check in HandleMouseEvent.
         return false;
     }
+    if (injectionBlocked_) {
+        return true;  // see InjectionBlocked
+    }
     // Ctrl first, and on its own: the escape hatch has to restore the
     // native flyout too, not merely stop Polish acting, so it hands the
     // strip back even with no button down.
@@ -328,6 +391,27 @@ bool TaskbarHook::HandleMouseEvent(WPARAM message, POINT screenPt, DWORD mouseDa
 
     const bool ctrlHeld = IsCtrlHeld();
     const int index = HitTest(screenPt);
+
+    // An elevated app in front: injected input is dropped, so none of what
+    // follows can work. Leave the strip open to the taskbar and let every
+    // event through untouched. Re-checked on entering a button and on each
+    // press, not on every move -- this runs inside a low-level hook.
+    if (index >= 0) {
+        if (message == WM_MOUSEMOVE ? index != hoveredIndex_ : IsButtonDownMessage(message)) {
+            injectionBlocked_ = ForegroundOutranksUs();
+        }
+    } else if (message == WM_MOUSEMOVE) {
+        injectionBlocked_ = false;
+    }
+    if (injectionBlocked_ && index >= 0) {
+        ApplyPassThrough(true);
+        if (message == WM_MOUSEMOVE && index != hoveredIndex_) {
+            hoveredIndex_ = index;
+            PostMessageW(messageWindow_, kHoverMessage, static_cast<WPARAM>(generation_),
+                         static_cast<LPARAM>(index));
+        }
+        return false;
+    }
 
     // The press Polish claims: a left-click on an app with somewhere to
     // go, with or without a modifier. Both modifiers mean something here

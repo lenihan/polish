@@ -4641,6 +4641,12 @@ void OnTaskbarHover(uint64_t generation, int index) {
         UpdateTaskbarHoverHighlight();
         return;
     }
+    if (g_taskbarHook && g_taskbarHook->InjectionBlocked()) {
+        // An elevated app is in front, so the taskbar has the strip (see
+        // TaskbarHook::InjectionBlocked) and its own flyout will show.
+        CloseTaskbarPanel();
+        return;
+    }
     SetTimer(g_messageWindow, kTaskbarHoverTimerId, kTaskbarHoverPollMs, nullptr);
     // On the hover edge as well as in the poll: waiting up to 100ms to
     // light a button the pointer is already on would read as lag.

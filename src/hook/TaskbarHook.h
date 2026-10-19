@@ -146,6 +146,16 @@ public:
     // shield back after a click the taskbar was given.
     bool PassThroughWanted() const;
 
+    // True while the foreground window runs at a higher integrity level than
+    // Polish (an app started "as administrator"). Windows drops input a
+    // lower-integrity process injects while such a window is in front, so the
+    // replayed press this hook relies on never arrives and the click does
+    // nothing. In that state the hook claims and replays nothing: the strip
+    // is left open to the taskbar, which gets the real click, and Polish's
+    // own list stands down. Costs the native flyout; the alternative is a
+    // taskbar button that cannot be clicked.
+    bool InjectionBlocked() const { return injectionBlocked_; }
+
     // Whether SetWindowsHookExW succeeded. Callers should log a warning
     // if not, the same as AltTabHook::IsInstalled.
     bool IsInstalled() const { return hook_ != nullptr; }
@@ -263,6 +273,8 @@ private:
     // travels past the system drag threshold first, the press is handed to
     // the taskbar (so dragging a button to reorder it works), replayed at
     // the point it originally happened -- see ReplayButtonDown.
+    bool injectionBlocked_ = false;
+
     bool claimPending_ = false;
     UINT claimMessage_ = 0;
     int claimIndex_ = -1;
