@@ -102,12 +102,40 @@ bool ReadAccentValue(const wchar_t* subKey, const wchar_t* name, COLORREF* out) 
 
 }  // namespace
 
+// Entry 3 of Explorer\Accent\AccentPalette: the "Accent" shade, which is what
+// UISettings reports as UIColorType::Accent. The palette is eight RGBA
+// entries (light3..light1, accent, dark1..dark3), 4 bytes each.
+static bool ReadAccentPalette(COLORREF* out) {
+    HKEY key = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent", 0,
+                      KEY_READ, &key) != ERROR_SUCCESS) {
+        return false;
+    }
+    BYTE palette[32]{};
+    DWORD size = sizeof(palette);
+    DWORD type = 0;
+    const bool ok = RegQueryValueExW(key, L"AccentPalette", nullptr, &type, palette, &size) == ERROR_SUCCESS &&
+                    type == REG_BINARY && size >= 16;
+    RegCloseKey(key);
+    if (ok) {
+        *out = RGB(palette[12], palette[13], palette[14]);
+    }
+    return ok;
+}
+
 COLORREF GetAccentColor() {
-    // The accent the user picked in Settings is Explorer\Accent\AccentColorMenu,
-    // which is always set. DWM\AccentColor is only the *title bar* accent: with
-    // "Show accent color on title bars" off it sits at a neutral grey (seen
-    // live: 0x727272) whatever the user picked, so it is only a fallback.
+    // The palette first. The values below can sit at a neutral grey while the
+    // palette -- and the accent the user actually sees -- is their real colour
+    // (seen live: AccentColorMenu and DWM\AccentColor both 0x727272 beside a
+    // 0078D4 blue palette).
+    //
+    // After it, Explorer\Accent\AccentColorMenu, then DWM\AccentColor, which
+    // is only the *title bar* accent and goes grey when "Show accent color on
+    // title bars" is off.
     COLORREF color = 0;
+    if (ReadAccentPalette(&color)) {
+        return color;
+    }
     if (ReadAccentValue(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent", L"AccentColorMenu",
                         &color) ||
         ReadAccentValue(L"Software\\Microsoft\\Windows\\DWM", L"AccentColor", &color)) {
