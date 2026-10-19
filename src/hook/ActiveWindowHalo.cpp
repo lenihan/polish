@@ -517,10 +517,12 @@ void ActiveWindowHalo::Render(int targetWidth, int targetHeight, RECT inflate, U
     }
 
     if (hasPreviousBands_) {
-        ClearRect(prevTopBand_);
-        ClearRect(prevBottomBand_);
-        ClearRect(prevLeftBand_);
-        ClearRect(prevRightBand_);
+        // The whole previous glow, not just its four band rects: the corner
+        // boxes reach past the bands (they extend rInt, the bands only
+        // underlap) and paint the corner arc's inner fringe there. Clearing
+        // only the bands left those pixels behind as stray specks once the
+        // target resized or moved to a different edge combination.
+        ClearRect(RECT{0, 0, std::min(width_, capWidth_), std::min(height_, capHeight_)});
     }
 
     // Local coordinates: (0,0) is the glow window's own top-left, which is

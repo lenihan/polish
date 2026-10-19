@@ -1451,6 +1451,9 @@ commands as a menu.
 
 ## Left to do
 
+- Bugfix: I'm in a state where i can switch between vs code and task manager and neither window gets a halo....that shouldn't happen
+- Bugfix: i see small halo artifacts on the active window
+- Bugfix: when an app is full screen and covering taskbar....the overlay should not respond to clicks
 - When you paste/copy via a menu (like a right click), i'd expect bullseye to function. It doesn't in vs code
   source control > changes > right click message > Paste
 - Add support for "frozen windows"...they are still listed in taskbar (Under Frozen), but they take

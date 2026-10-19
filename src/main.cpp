@@ -128,6 +128,7 @@ constexpr UINT kBullseyeAnchorTimeoutMs = 90;
 // rects to follow and no event when the animation finishes. Tuned by eye.
 constexpr UINT_PTR kHaloRestoreTimerId = 6;
 constexpr UINT kHaloRestoreDelayMs = 300;
+constexpr UINT kHaloMinimizeSafetyMs = 3000;
 
 // The taskbar's safety-net re-read, and the mouse hook's watchdog, on one
 // repeating timer.
@@ -533,6 +534,7 @@ polish::TaskbarGeometry g_polishGeometry;
 bool g_polishGeometryValid = false;
 RECT g_polishButtonRect{};
 void UpdatePolishButtonPlacement();
+void UpdateTaskbarFullScreenGate();
 void ApplyPolishButtonSetting();
 bool IsProcessElevated();
 // "  (33%)" for a scaled window, else nothing -- for the list panels' rows,
@@ -857,6 +859,20 @@ void UpdateActiveWindowHalo(HWND hwnd) {
     // so the location handler needs to still know which window to
     // re-evaluate after it stops covering the monitor.
     g_haloWatched = hwnd;
+    {
+        // [HaloGate] diagnostic: which gate decides show/hide, logged on change only.
+        const bool candidate = polish::IsCandidateWindow(hwnd);
+        const bool normal = IsWindowInNormalState(hwnd);
+        const bool fullScreenSignal = IsPresentationOrFullScreenGame();
+        const bool covers = CoversWholeMonitor(hwnd);
+        static std::wstring lastGate;
+        std::wstring gate = std::format(L"candidate={} normal={} fullScreenSignal={} covers={}", candidate, normal,
+                                        fullScreenSignal, covers);
+        if (gate != lastGate) {
+            lastGate = gate;
+            polish::LogDebug(std::format(L"[Polish] [HaloGate] hwnd={} {}", reinterpret_cast<void*>(hwnd), gate));
+        }
+    }
     if (polish::IsCandidateWindow(hwnd) && IsWindowInNormalState(hwnd) && !CoversWholeMonitor(hwnd)) {
         RECT stripRect{};
         const bool withStrip = StackStripRectFor(hwnd, &stripRect);
@@ -1134,10 +1150,11 @@ void OnClipboardUpdated() {
 void BeginHaloRestoreWait(HWND restored) {
     g_minimizedWindows.erase(restored);
     if (!MinimizeAnimationEnabled()) {
-        return;  // nothing to wait for on a machine with animation off
-    }
-    if (g_haloMinimizeSuppressed) {
-        return;  // the other of the two racing events already started it
+        // Nothing to wait for on a machine with animation off -- but the flag
+        // was set at MINIMIZESTART regardless, so it must be lifted here.
+        g_haloMinimizeSuppressed = false;
+        KillTimer(g_messageWindow, kHaloRestoreTimerId);
+        return;
     }
     // Hiding, not just flagging: the racing foreground change may already
     // have put the halo on screen, and a flag alone leaves it there --
@@ -1189,6 +1206,7 @@ void OnForegroundChanged(HWND newForeground) {
         }
         UpdatePolishButtonPlacement();
     }
+    UpdateTaskbarFullScreenGate();
     // A window coming to the front that went into the taskbar earlier is a
     // restore, and is usually how this app hears about one first -- before
     // EVENT_SYSTEM_MINIMIZEEND. Start the hold-off here so the halo is
@@ -1475,9 +1493,11 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 g_activeWindowHalo->Hide();
                 g_haloMinimizeSuppressed = true;
                 KillTimer(g_messageWindow, kHaloRenderTimerId);
-                // Minimized again before a previous restore finished
-                // animating -- drop the pending reveal with it.
-                KillTimer(g_messageWindow, kHaloRestoreTimerId);
+                // Safety net: MINIMIZEEND never arrives if the window is closed
+                // while minimized, and the flag would then suppress the halo on
+                // every window until restart. A real restore replaces this timer
+                // with the short wait in BeginHaloRestoreWait.
+                SetTimer(g_messageWindow, kHaloRestoreTimerId, kHaloMinimizeSafetyMs, nullptr);
             }
             break;
 
@@ -3207,6 +3227,10 @@ std::unique_ptr<polish::TaskbarHook> g_taskbarHook;
 // it. Folding a window list into it would make "the taskbar changed"
 // also mean "some window was activated".
 std::vector<polish::TaskbarButton> g_taskbarButtons;
+// A full-screen game, presentation or monitor-covering window is on top of the
+// taskbar. The shield and hook would otherwise keep owning the (invisible)
+// button strip and eat clicks meant for the full-screen window.
+bool g_taskbarCoveredByFullScreen = false;
 std::vector<std::vector<HWND>> g_taskbarButtonWindows;
 
 // Polish's own window list, shown in place of the native thumbnail
@@ -3457,6 +3481,9 @@ void RebuildTaskbarTargets() {
     if (!g_settings.taskbarEnabled || g_taskbarShield == nullptr || g_taskbarHook == nullptr ||
         g_appResolver == nullptr || !g_appResolver->IsAvailable()) {
         return;
+    }
+    if (g_taskbarCoveredByFullScreen) {
+        return;  // see UpdateTaskbarFullScreenGate; it rebuilds when the cover lifts
     }
     const ULONGLONG startTick = GetTickCount64();
     const std::vector<HWND> ordered = TaskbarWindowsInMruOrder();
@@ -4503,6 +4530,45 @@ void OnTaskbarRowNormal(HWND hwnd) {
         g_taskbarPanel->RepaintRow(hwnd);
     }
     FinishTaskbarRowResize(hwnd);
+}
+
+// Stands the taskbar feature down while a full-screen window covers the
+// taskbar: the shield is topmost, so left in place it would keep absorbing
+// clicks over the strip -- on top of the full-screen app -- and the hook
+// would keep claiming them. Same test as Polish's button uses.
+void UpdateTaskbarFullScreenGate() {
+    if (!g_settings.taskbarEnabled || g_taskbarShield == nullptr || g_taskbarHook == nullptr) {
+        return;
+    }
+    bool covered = false;
+    if (IsPresentationOrFullScreenGame()) {
+        covered = true;
+    } else {
+        const HWND foreground = GetForegroundWindow();
+        if (foreground != nullptr && !IsShellTaskbarWindow(foreground) && !IsOwnProcessWindow(foreground) &&
+            CoversWholeMonitor(foreground)) {
+            const HMONITOR monitor = MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST);
+            for (const polish::TaskbarButton& button : g_taskbarButtons) {
+                if (MonitorFromRect(&button.rect, MONITOR_DEFAULTTONEAREST) == monitor) {
+                    covered = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (covered == g_taskbarCoveredByFullScreen) {
+        return;
+    }
+    g_taskbarCoveredByFullScreen = covered;
+    polish::LogDebug(std::format(L"[Polish] Taskbar: full-screen cover {}", covered ? L"on -- shield and hook stand down" : L"off"));
+    if (covered) {
+        EndTaskbarCycleSession();
+        CloseTaskbarPanel();
+        g_taskbarShield->Hide();
+        g_taskbarHook->SetTargets(g_taskbarGeneration, {});
+    } else {
+        RequestTaskbarRefresh();
+    }
 }
 
 // Notices the shield being bypassed -- the taskbar raised above it, so
@@ -8418,6 +8484,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                     UpdatePolishButtonPlacement();
                     return 0;
                 }
+                UpdateTaskbarFullScreenGate();
                 UpdateTaskbarShieldBypassed();
                 // The shield should never be open at an idle sample: it
                 // opens only for a gesture the taskbar is being handed,
