@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2 — Accent colour on PCs where the registry accent is grey
+
+**Download:** `Polish-0.4.2-x64.msi`
+
+- **The halo and other accent-coloured overlays now follow the accent
+  palette.** On some PCs the registry values Polish read for the accent
+  stay a neutral grey while the accent Windows actually shows is blue, so
+  the halo came out grey. The palette Windows itself uses is read first.
+
 ## 0.4.1 — Accent colour fix, and drag to reorder taskbar buttons
 
 **Download:** `Polish-0.4.1-x64.msi`
