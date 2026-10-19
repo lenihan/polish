@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.0 — Settings, scaled windows, stacks and a Polish taskbar button
+
+**Download:** `Polish-0.4.0-x64.msi`
+
+- **Settings window** with a checkbox and description for every feature, a
+  Shortcuts section for the global hotkeys, Start with Windows, and
+  scaled-window options. Follows the system dark/light theme.
+- **Scaled windows:** shrink a window to a live thumbnail and click to
+  restore it. Works with Alt+Tab, the taskbar panel and stacks.
+- **Frozen apps** support.
+- **Stacks** replace Groups, with a title bar and tab strip, n-way tiling,
+  and tile/cascade for every window on a monitor.
+- **Easy move/resize:** hold Win to drag any window from anywhere, with snap
+  to halves and a layout menu (Ctrl+Alt+Space).
+- **Polish taskbar button** beside Start, and a Layout button.
+- **Halo and bullseye** are drawn in your accent colour; the bullseye ignores
+  empty copies. New app icon.
+- **Tray:** keyboard-reachable menu, Restart as Administrator, and the build
+  stamp in the tooltip.
+- **Fixes:** the halo could disappear on every window until restart after a
+  minimized window was closed; stray specks at the halo's corners; the taskbar
+  overlay swallowed clicks while a full-screen app covered the taskbar.
+
 ## 0.3.0 — Alt+Tab follows the monitor you are on
 
 **Download:** `Polish-0.3.0-x64.msi`
