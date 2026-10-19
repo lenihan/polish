@@ -80,20 +80,38 @@ void ApplyDarkModeToTooltip(HWND tooltipWindow) {
     SetWindowTheme(tooltipWindow, IsDarkModeEnabled() ? L"DarkMode_Explorer" : nullptr, nullptr);
 }
 
-COLORREF GetAccentColor() {
+namespace {
+
+bool ReadAccentValue(const wchar_t* subKey, const wchar_t* name, COLORREF* out) {
     HKEY key = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", 0, KEY_READ, &key) ==
-        ERROR_SUCCESS) {
-        DWORD value = 0;
-        DWORD size = sizeof(value);
-        DWORD type = 0;
-        const bool ok = RegQueryValueExW(key, L"AccentColor", nullptr, &type, reinterpret_cast<BYTE*>(&value),
-                                          &size) == ERROR_SUCCESS &&
-                         type == REG_DWORD;
-        RegCloseKey(key);
-        if (ok) {
-            return static_cast<COLORREF>(value & 0x00FFFFFF);
-        }
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, subKey, 0, KEY_READ, &key) != ERROR_SUCCESS) {
+        return false;
+    }
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    DWORD type = 0;
+    const bool ok = RegQueryValueExW(key, name, nullptr, &type, reinterpret_cast<BYTE*>(&value), &size) ==
+                        ERROR_SUCCESS &&
+                    type == REG_DWORD;
+    RegCloseKey(key);
+    if (ok) {
+        *out = static_cast<COLORREF>(value & 0x00FFFFFF);  // 0xAABBGGRR, COLORREF's own order
+    }
+    return ok;
+}
+
+}  // namespace
+
+COLORREF GetAccentColor() {
+    // The accent the user picked in Settings is Explorer\Accent\AccentColorMenu,
+    // which is always set. DWM\AccentColor is only the *title bar* accent: with
+    // "Show accent color on title bars" off it sits at a neutral grey (seen
+    // live: 0x727272) whatever the user picked, so it is only a fallback.
+    COLORREF color = 0;
+    if (ReadAccentValue(L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent", L"AccentColorMenu",
+                        &color) ||
+        ReadAccentValue(L"Software\\Microsoft\\Windows\\DWM", L"AccentColor", &color)) {
+        return color;
     }
     return GetSysColor(COLOR_HIGHLIGHT);
 }
