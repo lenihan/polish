@@ -39,7 +39,10 @@ void TrayIcon::AddIcon() {
     data.cbSize = sizeof(data);
     data.hWnd = messageWindow_;
     data.uID = kIconId;
-    data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    // NIF_SHOWTIP: under NOTIFYICON_VERSION_4 (set below) the shell no longer
+    // shows the standard tooltip on its own, so without it the build stamp in
+    // the tooltip silently disappears.
+    data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
     data.uCallbackMessage = kCallbackMessage;
     data.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_POLISH_TRAY));
     // szTip holds 128 wchar_t including the terminator, and the shell
