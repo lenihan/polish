@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1 — Accent colour fix, and drag to reorder taskbar buttons
+
+**Download:** `Polish-0.4.1-x64.msi`
+
+- **The halo and other accent-coloured overlays now use the accent you picked
+  in Settings.** They read the title-bar accent, which stays a neutral grey
+  when "Show accent color on title bars" is off, so the halo came out grey
+  on those PCs.
+- **Taskbar buttons can be dragged to reorder again.** Polish was claiming
+  the press on any app with two or more windows, so the taskbar never saw
+  the start of a drag. A click still cycles the app's windows, now on
+  release; a drag goes to the taskbar.
+
 ## 0.4.0 — Settings, scaled windows, stacks and a Polish taskbar button
 
 **Download:** `Polish-0.4.0-x64.msi`

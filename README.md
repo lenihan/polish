@@ -290,7 +290,7 @@ Exit.
 
 ## Install and run
 
-Download **`Polish-0.4.0-x64.msi`** from the
+Download **`Polish-0.4.1-x64.msi`** from the
 [Releases page](https://github.com/lenihan/polish/releases) and run it.
 
 1. Your browser may warn that the file isn't commonly downloaded, and
