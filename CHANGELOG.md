@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.3 — Taskbar buttons work while an administrator app is in front
+
+**Download:** `Polish-0.4.3-x64.msi`
+
+- **Clicking a taskbar button no longer does nothing while an app running as
+  administrator has focus.** Windows discards input that a normal process
+  injects while an elevated window is in front, which is how Polish hands a
+  click back to the taskbar. In that state Polish now steps aside: the
+  taskbar gets the real click. The cost is that Windows' own hover preview
+  shows, and click-to-cycle is off, until a normal window is in front again.
+  "Restart as Administrator" in the tray menu avoids the tradeoff.
+
 ## 0.4.2 — Accent colour on PCs where the registry accent is grey
 
 **Download:** `Polish-0.4.2-x64.msi`
