@@ -3480,6 +3480,34 @@ bool SameWindowSet(std::vector<HWND> a, std::vector<HWND> b) {
     return a == b;
 }
 
+// The windows a button's hover list should show. For an ordinary app that is
+// the windows the button stands for. A stack's button stands for the stack's
+// stand-in window, which is nothing the user wants listed: what belongs under
+// the pointer is the stack itself -- its windows, and its name (`stackName`,
+// set only in this case).
+std::vector<HWND> TaskbarListedWindows(const std::vector<HWND>& windows, std::wstring* stackName) {
+    for (const auto& [id, strip] : g_stackStrips) {
+        if (std::find(windows.begin(), windows.end(), strip->TaskbarHandle()) == windows.end()) {
+            continue;
+        }
+        const polish::StackState* stack = g_stackManager.FindStack(id);
+        if (stack == nullptr) {
+            break;
+        }
+        std::vector<HWND> members;
+        for (const polish::StackMember& member : stack->Members()) {
+            if (IsWindow(member.window)) {
+                members.push_back(member.window);
+            }
+        }
+        if (stackName != nullptr) {
+            *stackName = stack->Name();
+        }
+        return members;
+    }
+    return windows;
+}
+
 // Re-resolves which windows each button stands for and hands the result
 // to the shield and the hook. Called whenever a taskbar read completes.
 void RebuildTaskbarTargets() {
@@ -3532,7 +3560,8 @@ void RebuildTaskbarTargets() {
     // out and rows must not reshuffle under the pointer for nothing.
     if (g_taskbarPanelButton >= 0 && static_cast<size_t>(g_taskbarPanelButton) < g_taskbarButtonWindows.size()) {
         const bool membershipChanged =
-            !SameWindowSet(g_taskbarButtonWindows[static_cast<size_t>(g_taskbarPanelButton)], g_taskbarPanelWindows);
+            !SameWindowSet(TaskbarListedWindows(g_taskbarButtonWindows[static_cast<size_t>(g_taskbarPanelButton)], nullptr),
+                           g_taskbarPanelWindows);
         // A window minimized or restored behind the panel's back changes
         // which section its row belongs to, and the buttons that row
         // offers, without changing membership at all.
@@ -3992,7 +4021,9 @@ void OpenTaskbarPanel(int index) {
         // shown here -- see g_taskbarShieldBypassed.
         return;
     }
-    const std::vector<HWND>& windows = g_taskbarButtonWindows[static_cast<size_t>(index)];
+    std::wstring stackName;
+    const std::vector<HWND> windows =
+        TaskbarListedWindows(g_taskbarButtonWindows[static_cast<size_t>(index)], &stackName);
     if (windows.empty()) {
         // A pinned app with nothing running has nothing to list, and an
         // empty panel would be worse than none at all.
@@ -4053,11 +4084,18 @@ void OpenTaskbarPanel(int index) {
     // calls it, already localized; the AppUserModelID is the fallback
     // only because it is guaranteed non-empty, never because it reads
     // well.
-    g_taskbarPanel->SetActiveSectionHeader(button.name.empty() ? button.appId : button.name);
+    g_taskbarPanel->SetActiveSectionHeader(!stackName.empty()      ? stackName
+                                           : button.name.empty() ? button.appId
+                                                                 : button.name);
     g_taskbarPanel->SetRowActionsEnabled(true);
     // Above the list, because it is not one of the windows the list is
-    // about -- it is how you get another one.
-    g_taskbarPanel->SetCommandRow(L"New window", L'N');
+    // about -- it is how you get another one. A stack has no "new window":
+    // its stand-in is not an app that can open one.
+    if (stackName.empty()) {
+        g_taskbarPanel->SetCommandRow(L"New window", L'N');
+    } else {
+        g_taskbarPanel->SetCommandRow(L"", 0);
+    }
     g_taskbarPanel->SetAnchorRect(button.rect);
     // The app's own window that is currently in front, if any, shows as
     // selected -- so the list says where you already are before it says
@@ -4104,6 +4142,11 @@ void OpenTaskbarPanel(int index) {
 bool LaunchNewWindowForButton(size_t buttonIndex) {
     if (buttonIndex >= g_taskbarButtonWindows.size() || g_taskbarButtonWindows[buttonIndex].empty()) {
         return false;
+    }
+    std::wstring stackName;
+    TaskbarListedWindows(g_taskbarButtonWindows[buttonIndex], &stackName);
+    if (!stackName.empty()) {
+        return false;  // a stack's button is not an app that can open a window
     }
     const HWND sample = g_taskbarButtonWindows[buttonIndex].front();
 
