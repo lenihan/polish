@@ -44,7 +44,13 @@ void TrayIcon::AddIcon() {
     // the tooltip silently disappears.
     data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
     data.uCallbackMessage = kCallbackMessage;
-    data.hIcon = LoadIconW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_POLISH_TRAY));
+    // The exact small-icon size for this DPI, not LoadIconW's default: that is
+    // the *large* size, which the shell then shrinks to fit the tray, throwing
+    // away the 16 px image the icon file carries for exactly this.
+    const UINT dpi = GetDpiForSystem();
+    data.hIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_POLISH_TRAY), IMAGE_ICON,
+                                               GetSystemMetricsForDpi(SM_CXSMICON, dpi),
+                                               GetSystemMetricsForDpi(SM_CYSMICON, dpi), LR_DEFAULTCOLOR));
     // szTip holds 128 wchar_t including the terminator, and the shell
     // simply drops a tip that does not fit rather than truncating it for
     // you -- so truncate here, where it is obvious why.

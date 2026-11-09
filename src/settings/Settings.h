@@ -86,7 +86,9 @@ struct Settings {
     // menu and hotkeys (see hook/PolishTaskbarButton.h). Registry value
     // "PolishButton"; it was "LayoutButtonEnabled" when it was a stand-in
     // app window, and that older value is still honoured as the default.
-    bool polishButtonEnabled = true;
+    // Off by default: the tray icon is the way in, and a second mark beside
+    // Start is clutter for anyone who did not ask for it.
+    bool polishButtonEnabled = false;
     // Opens that same menu from the keyboard, over the window in front.
     // Ctrl+Alt+Space (0x20 is VK_SPACE), beside the other layout hotkeys.
     UINT layoutHotkeyModifiers = MOD_CONTROL | MOD_ALT;

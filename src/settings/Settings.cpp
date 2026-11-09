@@ -56,7 +56,7 @@ Settings LoadSettings() {
         }
         settings.scaledViewTopmost = ReadDword(key, L"ScaledViewTopmost", 1) != 0;
         settings.polishButtonEnabled =
-            ReadDword(key, L"PolishButton", ReadDword(key, L"LayoutButtonEnabled", 1)) != 0;
+            ReadDword(key, L"PolishButton", ReadDword(key, L"LayoutButtonEnabled", 0)) != 0;
         settings.layoutHotkeyModifiers = ReadDword(key, L"LayoutHotkeyModifiers", MOD_CONTROL | MOD_ALT);
         settings.layoutHotkeyVirtualKey = ReadDword(key, L"LayoutHotkeyVirtualKey", 0x20);
         settings.scaleDownHotkeyModifiers = ReadDword(key, L"ScaleDownHotkeyModifiers", MOD_CONTROL | MOD_ALT);
