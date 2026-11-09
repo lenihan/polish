@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1 — Win+Shift+S works again
+
+**Download:** `Polish-0.5.1-x64.msi`
+
+- **Fixed: Win+Shift+S (screenshot) showed Polish's move mode** on PCs where
+  the keyboard reports real keystrokes as injected, such as remote desktop or
+  key-remapping setups. Pressing Shift or any other key during a Win hold now
+  hands the hold back to Windows, and a click no longer grabs a window once it
+  has.
+
 ## 0.5.0 — Stack snapping and previews, a new icon
 
 **Download:** `Polish-0.5.0-x64.msi`

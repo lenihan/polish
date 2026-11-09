@@ -215,6 +215,13 @@ bool MoveModeHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
     // low-level hook callback. Never swallowed either way.
     if (IsShiftKey(vk)) {
         shiftHeld_ = down;
+        // Shift during a bare Win hold is Windows' (Win+Shift+S, Win+Shift+
+        // Arrow); nothing in the hold uses it. Hand off at once, so that even
+        // if the S that follows never reaches us the hold is already native.
+        if (down && armed_ && !keyboardSession_ && !dragging_ && !nativeHandoffActive_) {
+            nativeHandoffActive_ = true;
+            EndSession(static_cast<WPARAM>(HookAction::End));
+        }
         return false;
     }
     if (IsCtrlKey(vk)) {
@@ -385,13 +392,15 @@ bool MoveModeHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         return true;
     }
 
-    if (down && (data.flags & LLKHF_INJECTED) == 0) {
-        // Any other real key during a hold means the user is reaching for
+    if (down) {
+        // Any other key during a hold means the user is reaching for
         // something of Windows' own -- Win+L, Win+D, Win+Arrow,
-        // Win+<digit>. Hand the whole rest of the hold back untouched and
-        // get off the screen. The injected-event check matters: our own
-        // Ctrl tap (see InjectHarmlessKeystroke) comes back through here
-        // and would otherwise trip this on ourselves.
+        // Win+<digit>, Win+Shift+S. Hand the whole rest of the hold back
+        // untouched and get off the screen. Injected keys count too: remote
+        // desktop and remapping tools flag the user's real keystrokes as
+        // injected, and ignoring those left Win+Shift+S armed, so the drag
+        // that selects the screenshot region moved a window instead. Our own
+        // Ctrl tap never reaches here -- Ctrl returns early above.
         nativeHandoffActive_ = true;
         EndSession(static_cast<WPARAM>(HookAction::End));
     }
@@ -467,7 +476,7 @@ bool MoveModeHook::HandleMouseEvent(WPARAM wParam, POINT screenPt) {
     }
 
     if (wParam == WM_LBUTTONDOWN) {
-        if (!canGrab_ || !canGrab_(screenPt)) {
+        if (nativeHandoffActive_ || !canGrab_ || !canGrab_(screenPt)) {
             // Nothing here Polish may move -- the desktop, the taskbar, an
             // elevated window. Leave the click completely alone so
             // Win+click behaves as it always did rather than disappearing
