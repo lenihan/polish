@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.5.2 — Stacks and apps come back after a restart
+
+**Download:** `Polish-0.5.2-x64.msi`
+
+- **Stacks survive a restart.** Polish remembers each stack's windows, tab
+  order, name, tab-strip side, size and position, and rebuilds it when it
+  starts. If the apps are still launching it keeps trying for two minutes.
+- **Reopen your apps at start-up.** A few seconds after Polish starts, a
+  dialog lists the windows that were open last time and are not open now, each
+  with a checkbox, all ticked. OK opens the ticked ones, Cancel opens none.
+  Apps reopen with the command line they were started with, so documents
+  usually come back; Store apps open by app ID. File Explorer windows and apps
+  running as administrator are not included, and window positions are not
+  restored (stacks excepted). Turn it off in Settings.
+
 ## 0.5.1 — Win+Shift+S works again
 
 **Download:** `Polish-0.5.1-x64.msi`
