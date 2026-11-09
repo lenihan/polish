@@ -25,7 +25,7 @@ const std::vector<FeatureInfo>& AllFeatures() {
          L"Some editors copy an empty line when you press Ctrl+C with nothing selected, which quietly replaces "
          L"whatever you had copied. Polish puts your clipboard back and shows the red X.",
          &Settings::keepClipboardOnEmptyCopy},
-        {Feature::MoveMode, L"Hold Win to move/resize any window",
+        {Feature::MoveMode, L"Hold Win and left-drag to move/resize any window",
          L"Hold the Windows key and drag anywhere on a window to move it, or near an edge or corner to resize "
          L"it. Drop at the edge of the screen to snap it to a half, a quarter or full screen.",
          &Settings::moveModeEnabled},

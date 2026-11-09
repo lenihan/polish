@@ -7997,7 +7997,7 @@ void AppendLayoutCommands(HMENU menu) {
     // nothing.
     const bool canStartMoveMode = g_settings.moveModeEnabled && MoveModeMenuTarget() != nullptr;
     AppendMenuW(menu, MF_STRING | (canStartMoveMode ? MF_ENABLED : MF_GRAYED), kMenuIdMoveModeStart,
-                g_settings.moveModeEnabled ? L"&Move or resize a window"
+                g_settings.moveModeEnabled ? L"&Move or resize a window\tWin+Space"
                                            : L"&Move or resize a window (switch it on in the tray menu)");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     // The hotkey is shown beside each item on purpose: the menu is the
@@ -8086,7 +8086,7 @@ void PopulateTrayMenu(HMENU menu) {
     AppendMenuW(menu, MF_STRING | (g_settings.taskbarEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdTaskbar,
                 L"&Taskbar hover list and click-to-cycle");
     AppendMenuW(menu, MF_STRING | (g_settings.moveModeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdMoveMode,
-                L"Hold &Win to move/resize any window");
+                L"Hold &Win and left-drag to move/resize any window");
     AppendMenuW(menu, MF_STRING | (g_settings.scaleEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdScaleEnabled,
                 L"&Scaled windows (live thumbnail)");
     AppendMenuW(menu, MF_STRING | (g_settings.polishButtonEnabled ? MF_CHECKED : MF_UNCHECKED),
