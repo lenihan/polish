@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <vector>
 
 struct IVirtualDesktopManager;
 
@@ -148,7 +149,13 @@ public:
     // `unionWith`, when given, is a screen rect the halo should also enclose:
     // a stack's title bar and tab strip are separate windows above the member,
     // and the glow belongs around the whole stack, not just the window under it.
-    void ShowAroundTarget(HWND target, const RECT* unionWith = nullptr);
+    // `avoid`, when given, lists the screen rects of other windows the glow
+    // must not paint over. One that sits beside the target (not overlapping
+    // it) holds the glow on that side to the gap between them: tiled windows,
+    // or two stacks split across a screen, otherwise get a smear of the
+    // neighbour's glow across their edge. Rects that overlap the target are
+    // ignored, since the glow is meant to go behind those.
+    void ShowAroundTarget(HWND target, const RECT* unionWith = nullptr, const std::vector<RECT>* avoid = nullptr);
 
     // Hides the glow. Safe to call when already hidden.
     void Hide();

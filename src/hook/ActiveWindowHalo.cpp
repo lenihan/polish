@@ -320,7 +320,7 @@ void ActiveWindowHalo::FollowTargetVirtualDesktop(HWND target) {
     // call if the live walkthrough confirms it's a real problem.
 }
 
-void ActiveWindowHalo::ShowAroundTarget(HWND target, const RECT* unionWith) {
+void ActiveWindowHalo::ShowAroundTarget(HWND target, const RECT* unionWith, const std::vector<RECT>* avoid) {
     if (window_ == nullptr) {
         return;
     }
@@ -390,6 +390,31 @@ void ActiveWindowHalo::ShowAroundTarget(HWND target, const RECT* unionWith) {
         }
         if (std::abs(targetRect.bottom - screen.bottom) <= kEdgeTolerance) {
             inflate.bottom = 0;
+        }
+    }
+
+    // A neighbouring window holds the glow on that side to the gap. Same idea
+    // as the monitor edge above, for the edge of whatever is tiled beside the
+    // target: without it the glow lands on the neighbour's own edge.
+    if (avoid != nullptr) {
+        for (const RECT& other : *avoid) {
+            const bool overlapsVertically = other.top < targetRect.bottom && other.bottom > targetRect.top;
+            const bool overlapsHorizontally = other.left < targetRect.right && other.right > targetRect.left;
+            if (overlapsVertically && overlapsHorizontally) {
+                continue;  // beneath or over the target, not beside it
+            }
+            if (overlapsVertically && other.right <= targetRect.left + kEdgeTolerance) {
+                inflate.left = std::min<LONG>(inflate.left, std::max<LONG>(0, targetRect.left - other.right));
+            }
+            if (overlapsVertically && other.left >= targetRect.right - kEdgeTolerance) {
+                inflate.right = std::min<LONG>(inflate.right, std::max<LONG>(0, other.left - targetRect.right));
+            }
+            if (overlapsHorizontally && other.bottom <= targetRect.top + kEdgeTolerance) {
+                inflate.top = std::min<LONG>(inflate.top, std::max<LONG>(0, targetRect.top - other.bottom));
+            }
+            if (overlapsHorizontally && other.top >= targetRect.bottom - kEdgeTolerance) {
+                inflate.bottom = std::min<LONG>(inflate.bottom, std::max<LONG>(0, other.top - targetRect.bottom));
+            }
         }
     }
 

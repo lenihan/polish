@@ -804,15 +804,56 @@ bool CoversWholeMonitor(HWND hwnd) {
 // Returns false when there is none to include.
 bool StackStripRectFor(HWND hwnd, RECT* out) {
     const polish::StackState* stack = g_stackManager.FindStackContaining(hwnd);
-    if (stack == nullptr) {
+    if (stack == nullptr || !stack->HasRect()) {
         return false;
     }
-    const auto it = g_stackStrips.find(stack->Id());
-    if (it == g_stackStrips.end() || !it->second->IsShown()) {
-        return false;
-    }
-    *out = it->second->ScreenRect();
+    // The stack's own rect, which always includes the strip's band, rather
+    // than the strip window's: that one is only visible once the stack has
+    // been brought forward, which happens just *after* the focus change that
+    // runs this. Going by it left the halo around the member alone, with the
+    // glow starting below the title bar -- most visible between two stacks
+    // side by side.
+    *out = stack->Rect();
     return true;
+}
+
+// The screen rects of the other windows the halo should stop at: every other
+// visible window, and every shown stack strip, except those of the target's
+// own stack. Only the ones beside the target matter to the halo (it ignores
+// any that overlap it), so no attempt is made to pick them out here.
+struct HaloNeighbourContext {
+    HWND target;
+    const polish::StackState* ownStack;
+    std::vector<RECT>* rects;
+};
+
+BOOL CALLBACK HaloNeighbourProc(HWND window, LPARAM lParam) {
+    auto* context = reinterpret_cast<HaloNeighbourContext*>(lParam);
+    if (window == context->target || !IsWindowVisible(window) || IsIconic(window) || IsOwnProcessWindow(window) ||
+        !polish::IsCandidateWindow(window)) {
+        return TRUE;
+    }
+    if (context->ownStack != nullptr && context->ownStack->Contains(window)) {
+        return TRUE;
+    }
+    RECT inset{};
+    context->rects->push_back(polish::VisibleRectAndInset(window, inset));
+    return TRUE;
+}
+
+std::vector<RECT> HaloNeighbourRects(HWND target) {
+    std::vector<RECT> rects;
+    const polish::StackState* ownStack = g_stackManager.FindStackContaining(target);
+    HaloNeighbourContext context{target, ownStack, &rects};
+    EnumWindows(HaloNeighbourProc, reinterpret_cast<LPARAM>(&context));
+    // A stack is its whole rect, strip included. Its members are covered by
+    // the loop above, but the strip is a window of ours and is skipped there.
+    for (const polish::StackState& stack : g_stackManager.Stacks()) {
+        if (&stack != ownStack && stack.HasRect()) {
+            rects.push_back(stack.Rect());
+        }
+    }
+    return rects;
 }
 
 void UpdateActiveWindowHalo(HWND hwnd) {
@@ -882,7 +923,8 @@ void UpdateActiveWindowHalo(HWND hwnd) {
     if (polish::IsCandidateWindow(hwnd) && IsWindowInNormalState(hwnd) && !CoversWholeMonitor(hwnd)) {
         RECT stripRect{};
         const bool withStrip = StackStripRectFor(hwnd, &stripRect);
-        g_activeWindowHalo->ShowAroundTarget(hwnd, withStrip ? &stripRect : nullptr);
+        const std::vector<RECT> neighbours = HaloNeighbourRects(hwnd);
+        g_activeWindowHalo->ShowAroundTarget(hwnd, withStrip ? &stripRect : nullptr, &neighbours);
         g_haloTarget = hwnd;
     } else {
         g_activeWindowHalo->Hide();
