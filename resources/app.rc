@@ -10,3 +10,6 @@ CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "../app.manifest"
 
 // The tray icon (TrayIcon::AddIcon loads this by ID via LoadIconW).
 IDI_POLISH_TRAY ICON "polish.ico"
+
+// A stack's taskbar button; drawn by tools/make-stack-icon.ps1.
+IDI_POLISH_STACK ICON "stack.ico"

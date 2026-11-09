@@ -9,3 +9,5 @@
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "../app_uiaccess.manifest"
 
 IDI_POLISH_TRAY ICON "polish.ico"
+
+IDI_POLISH_STACK ICON "stack.ico"

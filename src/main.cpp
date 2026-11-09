@@ -7443,6 +7443,42 @@ void AdoptMemberRect(HWND hwnd) {
     ReflowStackTo(stack->Id());
 }
 
+// Which snap layout the pointer is asking for while a stack is dragged by its
+// strip -- the same edge/corner zones move mode and Windows' own snap use. The
+// strip is a separate window, so Windows never sees this as a title-bar drag
+// and offers nothing; the stack has to do it itself.
+polish::SnapLayout g_stackDragLayout = polish::SnapLayout::None;
+RECT g_stackDragWork{};
+UINT g_stackDragDpi = 96;
+
+void UpdateStackDragLayout() {
+    POINT cursor{};
+    polish::SnapLayout layout = polish::SnapLayout::None;
+    if (GetCursorPos(&cursor)) {
+        const HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (monitor != nullptr && GetMonitorInfoW(monitor, &info)) {
+            g_stackDragDpi = MoveModeDpiForMonitor(monitor);
+            g_stackDragWork = info.rcWork;
+            layout = polish::LayoutWithHysteresis(
+                g_stackDragLayout, polish::ClampPointToRect(cursor, info.rcMonitor), info.rcMonitor,
+                MulDiv(polish::kLayoutEdgeDip, static_cast<int>(g_stackDragDpi), 96),
+                MulDiv(polish::kLayoutCornerDip, static_cast<int>(g_stackDragDpi), 96),
+                MulDiv(polish::kLayoutReleaseDip, static_cast<int>(g_stackDragDpi), 96));
+        }
+    }
+    g_stackDragLayout = layout;
+    if (g_moveModeLayoutPreview) {
+        if (layout == polish::SnapLayout::None) {
+            g_moveModeLayoutPreview->Hide();
+        } else {
+            g_moveModeLayoutPreview->Show(polish::RectForLayout(layout, g_stackDragWork), MoveModeAccent(),
+                                           g_stackDragDpi);
+        }
+    }
+}
+
 // The user dragged the strip's empty area: the whole stack moves with it.
 void OnStripDragged(polish::StackId id, int dx, int dy) {
     polish::StackState* stack = g_stackManager.FindStack(id);
@@ -7451,6 +7487,26 @@ void OnStripDragged(polish::StackId id, int dx, int dy) {
     }
     stack->Offset(dx, dy);
     ReflowStackTo(id);
+    UpdateStackDragLayout();
+}
+
+// The strip drag ended: if the pointer was in a snap zone, the stack takes
+// that layout's rect.
+void OnStripDropped(polish::StackId id) {
+    UpdateStackDragLayout();
+    const polish::SnapLayout layout = g_stackDragLayout;
+    g_stackDragLayout = polish::SnapLayout::None;
+    if (g_moveModeLayoutPreview) {
+        g_moveModeLayoutPreview->Hide();
+    }
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr || layout == polish::SnapLayout::None) {
+        return;
+    }
+    // The whole stack, strip included, fills the layout's rect.
+    stack->SetRect(polish::RectForLayout(layout, g_stackDragWork));
+    ReflowStackTo(id);
+    polish::LogDebug(std::format(L"[Polish] Stack: dropped id={} into layout {}", id, static_cast<int>(layout)));
 }
 
 // A tab was dragged clear of the strip: the window leaves the stack and is
@@ -7728,6 +7784,7 @@ polish::StackId CreateStackFromWindows(const std::vector<HWND>& windows, const s
     strip->SetOnTabReordered([id](size_t from, size_t to) { ReorderStackTab(id, from, to); });
     strip->SetOnTabTornOut([id](size_t index, POINT pt) { TearOutStackMember(id, index, pt); });
     strip->SetOnStripDragged([id](int dx, int dy) { OnStripDragged(id, dx, dy); });
+    strip->SetOnStripDropped([id]() { OnStripDropped(id); });
     strip->SetOnContextMenu([id](POINT pt, std::optional<size_t> tab) { ShowStackStripMenu(id, pt, tab); });
     strip->SetOnMinimizeAll([id]() { MinimizeStackMembers(id); });
     strip->SetOnToggleMaximize([id]() { ToggleStackMaximize(id); });

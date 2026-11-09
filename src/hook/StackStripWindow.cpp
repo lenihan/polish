@@ -96,10 +96,19 @@ StackStripWindow::StackStripWindow(HINSTANCE instance) : instance_(instance) {
     taskbarWindow_ = CreateWindowExW(WS_EX_APPWINDOW, kTaskbarClassName, L"Stack", WS_POPUP, -32000, -32000, 1, 1,
                                       nullptr, nullptr, instance, this);
     if (taskbarWindow_ != nullptr) {
-        HICON icon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_POLISH_TRAY));
-        if (icon != nullptr) {
-            SendMessageW(taskbarWindow_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(icon));
-            SendMessageW(taskbarWindow_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(icon));
+        // The stack's own icon, not Polish's: it is what stands for the stack
+        // in the taskbar. Each size loaded at its own metric, so neither is a
+        // rescale of the other.
+        const auto loadStackIcon = [&](int metricX, int metricY) {
+            return static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_POLISH_STACK), IMAGE_ICON,
+                                                 GetSystemMetrics(metricX), GetSystemMetrics(metricY),
+                                                 LR_DEFAULTCOLOR | LR_SHARED));
+        };
+        if (HICON bigIcon = loadStackIcon(SM_CXICON, SM_CYICON)) {
+            SendMessageW(taskbarWindow_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(bigIcon));
+        }
+        if (HICON smallIcon = loadStackIcon(SM_CXSMICON, SM_CYSMICON)) {
+            SendMessageW(taskbarWindow_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon));
         }
         // An AppUserModelID of its own, so the shell gives this stack its own
         // button rather than grouping every stack (and Polish) under one.
@@ -744,6 +753,7 @@ LRESULT StackStripWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             const bool wasMaximizePress = maximizePressed_;
             const bool wasDragging = tabDragging_;
             const bool wasTearing = tearing_;
+            const bool wasStripDragging = stripDragging_;
             POINT screen{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             ClientToScreen(hwnd, &screen);
             if (GetCapture() == hwnd) {
@@ -759,7 +769,11 @@ LRESULT StackStripWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             // The callbacks may tear this stack down. The owner defers any
             // destruction of this window (to a posted message) for exactly
             // that reason, so nothing here touches `this` afterwards.
-            if (wasMinimizePress && releasedOnMinimize) {
+            if (wasStripDragging) {
+                if (onStripDropped_) {
+                    onStripDropped_();
+                }
+            } else if (wasMinimizePress && releasedOnMinimize) {
                 if (onMinimizeAll_) {
                     onMinimizeAll_();
                 }
