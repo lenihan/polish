@@ -112,6 +112,11 @@ public:
     // The strip's own empty area was dragged: move the whole stack by this
     // much since the last call.
     void SetOnStripDragged(std::function<void(int, int)> callback) { onStripDragged_ = std::move(callback); }
+    // The pointer rests on tab `index` (screen rect given), or has left every
+    // tab / pressed one (nullopt). Drives the tab preview thumbnail.
+    void SetOnTabHovered(std::function<void(std::optional<size_t>, const RECT&)> callback) {
+        onTabHovered_ = std::move(callback);
+    }
     // A strip drag ended (the button came up): the owner settles any snap.
     void SetOnStripDropped(std::function<void()> callback) { onStripDropped_ = std::move(callback); }
     // The title bar's minimize button: minimize every member.
@@ -199,6 +204,7 @@ private:
     std::function<void(size_t, POINT)> onTabTornOut_;
     std::function<void(int, int)> onStripDragged_;
     std::function<void()> onStripDropped_;
+    std::function<void(std::optional<size_t>, const RECT&)> onTabHovered_;
     std::function<void(POINT, std::optional<size_t>)> onContextMenu_;
     std::function<void()> onMinimizeAll_;
     std::function<void()> onToggleMaximize_;

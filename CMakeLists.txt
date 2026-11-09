@@ -69,6 +69,7 @@ add_library(polish_core STATIC
     src/hook/TaskbarVisuals.cpp
     src/hook/WindowParking.cpp
     src/hook/ScaledViewWindow.cpp
+    src/hook/StackTabPreview.cpp
     src/hook/TaskbarShield.cpp
     src/hook/TaskbarHook.cpp
     src/settings/Settings.cpp

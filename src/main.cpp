@@ -32,6 +32,7 @@
 #include "hook/StackHotkeyDialog.h"
 #include "hook/StackPickerWindow.h"
 #include "hook/StackStripWindow.h"
+#include "hook/StackTabPreview.h"
 #include "hook/MoveModeHook.h"
 #include "hook/MoveModeLayoutPreview.h"
 #include "hook/MoveModeZoneOverlay.h"
@@ -7479,6 +7480,28 @@ void UpdateStackDragLayout() {
     }
 }
 
+// The thumbnail shown when the pointer rests on a stack tab whose window is
+// behind the active one.
+std::unique_ptr<polish::StackTabPreview> g_stackTabPreview;
+
+void OnStackTabHovered(polish::StackId id, std::optional<size_t> tab, const RECT& tabRect) {
+    if (!g_stackTabPreview) {
+        return;
+    }
+    const polish::StackState* stack = g_stackManager.FindStack(id);
+    if (!tab.has_value() || stack == nullptr || *tab >= stack->MemberCount() || stack->ActiveIndex() == tab) {
+        g_stackTabPreview->Cancel();  // off the tabs, or on the one already in front
+        return;
+    }
+    const HWND window = stack->Members()[*tab].window;
+    if (window == nullptr || !IsWindow(window)) {
+        g_stackTabPreview->Cancel();
+        return;
+    }
+    g_stackTabPreview->Request(window, tabRect, stack->Alignment() == polish::StackAlignment::Vertical,
+                               StackDpiForRect(stack->Rect()));
+}
+
 // The user dragged the strip's empty area: the whole stack moves with it.
 void OnStripDragged(polish::StackId id, int dx, int dy) {
     polish::StackState* stack = g_stackManager.FindStack(id);
@@ -7785,6 +7808,7 @@ polish::StackId CreateStackFromWindows(const std::vector<HWND>& windows, const s
     strip->SetOnTabTornOut([id](size_t index, POINT pt) { TearOutStackMember(id, index, pt); });
     strip->SetOnStripDragged([id](int dx, int dy) { OnStripDragged(id, dx, dy); });
     strip->SetOnStripDropped([id]() { OnStripDropped(id); });
+    strip->SetOnTabHovered([id](std::optional<size_t> tab, const RECT& rect) { OnStackTabHovered(id, tab, rect); });
     strip->SetOnContextMenu([id](POINT pt, std::optional<size_t> tab) { ShowStackStripMenu(id, pt, tab); });
     strip->SetOnMinimizeAll([id]() { MinimizeStackMembers(id); });
     strip->SetOnToggleMaximize([id]() { ToggleStackMaximize(id); });
@@ -9217,6 +9241,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     g_moveModeBorder = std::make_unique<polish::AltTabHighlightBorder>(GetModuleHandleW(nullptr));
     g_moveModeZones = std::make_unique<polish::MoveModeZoneOverlay>(GetModuleHandleW(nullptr));
     g_moveModeLayoutPreview = std::make_unique<polish::MoveModeLayoutPreview>(GetModuleHandleW(nullptr));
+    g_stackTabPreview = std::make_unique<polish::StackTabPreview>(GetModuleHandleW(nullptr));
     g_moveModeHook = std::make_unique<polish::MoveModeHook>(
         g_messageWindow, []() { return g_settings.moveModeEnabled; },
         [](POINT screenPt) {

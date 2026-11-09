@@ -649,6 +649,9 @@ LRESULT StackStripWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             ClientToScreen(hwnd, &screen);
             pressScreenPt_ = screen;
             lastScreenPt_ = screen;
+            if (onTabHovered_) {
+                onTabHovered_(std::nullopt, RECT{});  // a press is not a hover: no preview over a drag
+            }
             RECT clientNow{};
             GetClientRect(hwnd, &clientNow);
             const UINT dpiNow = GetDpiForWindow(hwnd);
@@ -737,10 +740,25 @@ LRESULT StackStripWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
             const bool overMinimize = PtInRect(&minimizeRect, pt) != FALSE;
             const bool overMaximize = PtInRect(&maximizeRect, pt) != FALSE;
             if (hover != hoveredTab_ || overMinimize != minimizeHovered_ || overMaximize != maximizeHovered_) {
+                const bool tabChanged = hover != hoveredTab_;
                 hoveredTab_ = hover;
                 minimizeHovered_ = overMinimize;
                 maximizeHovered_ = overMaximize;
                 InvalidateRect(hwnd, nullptr, FALSE);
+                if (tabChanged && onTabHovered_) {
+                    RECT tabScreen{};
+                    if (hover.has_value()) {
+                        const std::vector<RECT> rects = CurrentTabRects();
+                        if (*hover < rects.size()) {
+                            POINT topLeft{rects[*hover].left, rects[*hover].top};
+                            POINT bottomRight{rects[*hover].right, rects[*hover].bottom};
+                            ClientToScreen(hwnd, &topLeft);
+                            ClientToScreen(hwnd, &bottomRight);
+                            tabScreen = RECT{topLeft.x, topLeft.y, bottomRight.x, bottomRight.y};
+                        }
+                    }
+                    onTabHovered_(hover, tabScreen);
+                }
             }
             return 0;
         }
@@ -813,6 +831,9 @@ LRESULT StackStripWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
 
         case WM_MOUSELEAVE:
             trackingMouseLeave_ = false;
+            if (hoveredTab_.has_value() && onTabHovered_) {
+                onTabHovered_(std::nullopt, RECT{});
+            }
             if (hoveredTab_.has_value() || minimizeHovered_ || maximizeHovered_) {
                 hoveredTab_.reset();
                 minimizeHovered_ = false;
