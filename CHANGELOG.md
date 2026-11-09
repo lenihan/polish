@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.0 — Stack snapping and previews, a new icon
+
+**Download:** `Polish-0.5.0-x64.msi`
+
+- **Stacks snap to the screen edges.** Drag a stack by its title bar to the
+  left or right edge for half the screen, a corner for a quarter, or the top
+  for the whole work area. A preview shows where it will land.
+- **Hover a stack tab for a thumbnail.** Rest the pointer on a tab whose
+  window is behind the active one and a live thumbnail appears.
+- **Stacks have their own taskbar icon**, three cascaded window cards, instead
+  of the Polish icon.
+- **A new Polish icon**: a single window card. At tray size it is a white
+  frame and title bar around a blue app area, so it reads as a window on a
+  dark taskbar.
+- **Win+Space accepts the mouse.** After latching a window with Win+Space you
+  can drag it with the left button as well as use the arrow keys.
+- **The tray menu says how to move windows**: "Hold Win and left-drag to
+  move/resize any window", and Win+Space beside "Move or resize a window".
+- **Fixed: right-clicking Start or a tray icon** opened nothing. Polish was
+  swallowing the click.
+- **The Polish button beside Start is off by default.** Turn it on from the
+  tray menu if you want it.
+
 ## 0.4.3 — Taskbar buttons work while an administrator app is in front
 
 **Download:** `Polish-0.4.3-x64.msi`
