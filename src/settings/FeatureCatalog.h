@@ -27,6 +27,7 @@ enum class Feature {
     Scale,
     PolishButton,
     ScaledTopmost,
+    RestoreApps,
 };
 
 struct FeatureInfo {

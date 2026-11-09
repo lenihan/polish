@@ -89,6 +89,9 @@ struct Settings {
     // Off by default: the tray icon is the way in, and a second mark beside
     // Start is clutter for anyone who did not ask for it.
     bool polishButtonEnabled = false;
+    // At start-up, offer to reopen the apps that were open last time (see
+    // hook/RestoreAppsDialog.h). Registry value "RestoreApps".
+    bool restoreAppsEnabled = true;
     // Opens that same menu from the keyboard, over the window in front.
     // Ctrl+Alt+Space (0x20 is VK_SPACE), beside the other layout hotkeys.
     UINT layoutHotkeyModifiers = MOD_CONTROL | MOD_ALT;

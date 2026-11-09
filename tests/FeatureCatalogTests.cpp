@@ -10,7 +10,7 @@ using namespace polish;
 TEST_CASE("FeatureCatalog: every Feature enumerator has exactly one entry") {
     // The last enumerator; adding one to the enum without a table row makes
     // the count below disagree.
-    constexpr int kFeatureCount = static_cast<int>(Feature::ScaledTopmost) + 1;
+    constexpr int kFeatureCount = static_cast<int>(Feature::RestoreApps) + 1;
     CHECK(static_cast<int>(AllFeatures().size()) == kFeatureCount);
 
     std::set<int> seen;

@@ -45,6 +45,10 @@ const std::vector<FeatureInfo>& AllFeatures() {
          L"A button beside Start that opens Polish's window list and layout actions, so everything is one "
          L"click away without remembering a shortcut.",
          &Settings::polishButtonEnabled},
+        {Feature::RestoreApps, L"Offer to reopen my apps at start-up",
+         L"When Polish starts, lists the windows that were open last time and are not open now, each with a "
+         L"checkbox. OK opens the ticked ones, Cancel opens none.",
+         &Settings::restoreAppsEnabled},
     };
     return kFeatures;
 }

@@ -29,6 +29,7 @@
 #include "hook/ScaledViewWindow.h"
 #include "hook/WindowParking.h"
 #include "hook/SettingsWindow.h"
+#include "hook/RestoreAppsDialog.h"
 #include "hook/StackHotkeyDialog.h"
 #include "hook/StackPickerWindow.h"
 #include "hook/StackStripWindow.h"
@@ -40,6 +41,7 @@
 #include "hook/TaskbarShield.h"
 #include "settings/FeatureCatalog.h"
 #include "settings/Settings.h"
+#include "settings/SessionStore.h"
 #include "settings/StackStore.h"
 #include "tabs/TabSwitching.h"
 #include "tabs/UiaWorker.h"
@@ -7946,6 +7948,95 @@ void RestoreSavedStacks() {
     MarkStacksDirty();
 }
 
+// ---------------------------------------------------------------------------
+// Reopening apps after a restart or sign-in.
+//
+// While Polish runs it keeps a list of the windows that are open (every few
+// seconds, and once more when Windows starts closing everything). At start-up
+// the ones from that list that are not open now are offered in a dialog, each
+// with a checkbox: OK opens the ticked ones, Cancel opens none.
+// ---------------------------------------------------------------------------
+
+constexpr UINT_PTR kSessionSaveTimerId = 20;
+constexpr UINT kSessionSaveMs = 15000;
+constexpr UINT_PTR kSessionOfferTimerId = 21;
+// Long enough that the apps Windows itself starts at sign-in are already up,
+// so they are not offered (and then opened twice).
+constexpr UINT kSessionOfferDelayMs = 8000;
+// After the user's choice, the opened apps need time to show their windows
+// before the list is recorded again, or the ones still starting would be lost.
+constexpr ULONGLONG kSessionSettleMs = 30000;
+
+// True from start-up until the offer has been answered (or there was nothing
+// to offer): nothing is recorded meanwhile, or the saved list would be
+// overwritten by the handful of windows open this early.
+bool g_sessionOfferPending = false;
+ULONGLONG g_sessionSaveNotBeforeTick = 0;
+std::vector<polish::SavedApp> g_lastSavedSession;
+
+struct SessionEnumContext {
+    std::vector<polish::SavedApp>* apps;
+};
+
+BOOL CALLBACK SessionEnumProc(HWND hwnd, LPARAM lParam) {
+    if (!IsWindowVisible(hwnd) || !polish::IsCandidateWindow(hwnd) || IsOwnProcessWindow(hwnd) ||
+        polish::IsElevatedWindow(hwnd)) {
+        return TRUE;
+    }
+    if (auto app = polish::DescribeApp(hwnd); app.has_value()) {
+        reinterpret_cast<SessionEnumContext*>(lParam)->apps->push_back(std::move(*app));
+    }
+    return TRUE;
+}
+
+std::vector<polish::SavedApp> CaptureOpenApps() {
+    std::vector<polish::SavedApp> apps;
+    SessionEnumContext context{&apps};
+    EnumWindows(SessionEnumProc, reinterpret_cast<LPARAM>(&context));
+    return apps;
+}
+
+void SaveSessionNow() {
+    if (!g_settings.restoreAppsEnabled || g_sessionOfferPending || g_sessionEnding ||
+        GetTickCount64() < g_sessionSaveNotBeforeTick) {
+        return;
+    }
+    std::vector<polish::SavedApp> apps = CaptureOpenApps();
+    if (apps != g_lastSavedSession) {
+        polish::SaveSession(apps);
+        g_lastSavedSession = std::move(apps);
+    }
+}
+
+void OfferSessionRestore() {
+    KillTimer(g_messageWindow, kSessionOfferTimerId);
+    const std::vector<polish::SavedApp> saved = polish::LoadSession();
+    std::vector<polish::SavedApp> open = CaptureOpenApps();
+    std::vector<polish::SavedApp> missing;
+    for (const polish::SavedApp& app : saved) {
+        const auto match = std::find_if(open.begin(), open.end(),
+                                        [&](const polish::SavedApp& live) { return polish::SameApp(live, app); });
+        if (match != open.end()) {
+            open.erase(match);  // one live window answers for one saved one
+        } else {
+            missing.push_back(app);
+        }
+    }
+    polish::LogDebug(std::format(L"[Polish] Session: {} saved window(s), {} not open", saved.size(), missing.size()));
+    if (!missing.empty()) {
+        polish::RestoreAppsDialog dialog(GetModuleHandleW(nullptr));
+        if (const auto chosen = dialog.ShowModal(missing); chosen.has_value()) {
+            for (const polish::SavedApp& app : *chosen) {
+                if (!polish::LaunchApp(app)) {
+                    polish::LogDebug(std::format(L"[Polish] Session: could not start \"{}\"", app.exe));
+                }
+            }
+        }
+    }
+    g_sessionOfferPending = false;
+    g_sessionSaveNotBeforeTick = GetTickCount64() + kSessionSettleMs;
+}
+
 void OnStackRestoreTimer() {
     ++g_stackRestoreAttempts;
     const bool last = g_stackRestoreAttempts >= kStackRestoreMaxAttempts;
@@ -8295,6 +8386,7 @@ void ApplyFeatureToggle(polish::Feature feature, bool enabled) {
         case polish::Feature::RestoreSync:
         case polish::Feature::AltTab:
         case polish::Feature::KeepClipboard:
+        case polish::Feature::RestoreApps:
             break;  // read live where used
     }
 }
@@ -8654,6 +8746,10 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 }
             } else if (wParam == kStackRestoreTimerId) {
                 OnStackRestoreTimer();
+            } else if (wParam == kSessionSaveTimerId) {
+                SaveSessionNow();
+            } else if (wParam == kSessionOfferTimerId) {
+                OfferSessionRestore();
             } else if (wParam == kArrangeSyncTimerId) {
                 KillTimer(hwnd, kArrangeSyncTimerId);
                 for (HWND arranged : g_arrangeSyncPending) {
@@ -8864,6 +8960,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             if (!g_sessionEnding) {
                 KillTimer(hwnd, kStackSaveTimerId);
                 SaveStacksNow();
+                SaveSessionNow();
                 g_sessionEnding = true;
             }
             return TRUE;
@@ -9424,6 +9521,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
 
     OnForegroundChanged(GetForegroundWindow());
     RestoreSavedStacks();
+    // The offer to reopen last time's apps comes a few seconds in; recording
+    // starts after it. Switched off, recording never starts and the saved
+    // list is left as it was.
+    g_sessionOfferPending = g_settings.restoreAppsEnabled;
+    if (g_settings.restoreAppsEnabled) {
+        SetTimer(g_messageWindow, kSessionOfferTimerId, kSessionOfferDelayMs, nullptr);
+    }
+    SetTimer(g_messageWindow, kSessionSaveTimerId, kSessionSaveMs, nullptr);
 
     MSG msg;
     BOOL getMessageResult;
