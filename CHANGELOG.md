@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.5.3 — Stacks in the taskbar and Alt+Tab, and a halo fix
+
+**Download:** `Polish-0.5.3-x64.msi`
+
+- **A stack's taskbar button lists its windows.** Hover it for the stack's
+  name and its windows, each with its close and minimize buttons.
+- **Alt+Tab lists every window in a stack**, grouped under the stack's name
+  with the windows indented beneath it. Click the stack to go to its active
+  window, or a window to go to that one. Tab still steps through windows in
+  most-recently-used order, so a quick Alt+Tab toggles between your last two
+  windows whether or not they are in stacks.
+- **Fixed: clicking a stack's title bar maximized it** when the stack sat at
+  the top of the screen. A click now only brings the stack forward.
+- **Fixed: the halo around a stack** went around the active window alone and
+  spilled over a stack or window tiled beside it. It now wraps the whole stack
+  and stops at its neighbour.
+
 ## 0.5.2 — Stacks and apps come back after a restart
 
 **Download:** `Polish-0.5.2-x64.msi`
