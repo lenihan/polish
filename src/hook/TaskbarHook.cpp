@@ -224,7 +224,20 @@ void ReplayDragHandoff(POINT origin, POINT current, bool release) {
     SendInput(count, inputs, sizeof(INPUT));
 }
 
+void ReplayRightClickAt(POINT pt) {
+    INPUT inputs[3]{};
+    inputs[0] = AbsoluteMove(pt);
+    inputs[1].type = INPUT_MOUSE;
+    inputs[1].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN;
+    inputs[1].mi.dwExtraInfo = kReplaySignature;
+    inputs[2] = inputs[1];
+    inputs[2].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+    SendInput(3, inputs, sizeof(INPUT));
+}
+
 }  // namespace
+
+void TaskbarHook::ReplayRightClick(POINT pt) { ReplayRightClickAt(pt); }
 
 TaskbarHook::TaskbarHook(HWND messageWindow, std::function<void(uint64_t, int)> onHoverChanged,
                           std::function<void(uint64_t, int, ClickAction)> onCycleClick,

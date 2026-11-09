@@ -303,6 +303,7 @@ ULONGLONG g_stickyOutsideSince = 0;
 uint64_t g_pendingEmptyCheck = 0;
 bool g_pendingEmptyShift = false;
 bool g_pendingEmptyRight = false;
+POINT g_pendingEmptyPoint{};
 // As g_altTabSticky, for the Alt+` tab switcher opened by right-clicking
 // empty taskbar.
 bool g_tabSticky = false;
@@ -3856,18 +3857,31 @@ void StartStickyTabs(bool backward) {
 }
 
 // The hook saw a press on the taskbar outside every app button.
+// The hook swallows a right-press here before anyone knows whether it is
+// Polish's to use, so every path that does not use it has to give it back --
+// otherwise right-clicking Start (or a tray icon) opens nothing.
+void GiveBackRightClick(POINT pt, bool right) {
+    if (right && g_taskbarHook != nullptr) {
+        g_taskbarHook->ReplayRightClick(pt);
+    }
+}
+
 void OnTaskbarEmptyClick(POINT pt, bool shift, bool right) {
     if (!g_settings.altTabEnabled || !g_settings.taskbarEnabled || g_uiaWorker == nullptr) {
+        GiveBackRightClick(pt, right);
         return;
     }
     if ((g_altTabSessionOpen && !g_altTabSticky) || (g_tabSessionOpen && !g_tabSticky)) {
+        GiveBackRightClick(pt, right);
         return;  // a held-Alt session owns the list
     }
     if (!g_altTabSticky && !g_tabSticky && GetTickCount64() - g_altTabStickyEndedTick < 400) {
+        GiveBackRightClick(pt, right);
         return;
     }
     g_pendingEmptyShift = shift;
     g_pendingEmptyRight = right;
+    g_pendingEmptyPoint = pt;
     g_pendingEmptyCheck = g_uiaWorker->RequestTaskbarEmptyCheck(pt);
 }
 
@@ -3881,6 +3895,7 @@ void OnTaskbarEmptyCheckReady(uint64_t generation) {
     }
     if (!result.empty) {
         // Start or a tray icon: not ours. It does dismiss the switcher.
+        GiveBackRightClick(g_pendingEmptyPoint, g_pendingEmptyRight);
         if (g_altTabSticky) {
             EndAltTabSession();
         } else if (g_tabSticky) {

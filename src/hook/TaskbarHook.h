@@ -173,6 +173,12 @@ public:
     // nothing that is working.
     bool EnsureInstalled();
 
+    // Sends a whole right-click at `pt`, for a right-press this hook swallowed
+    // on an empty part of the taskbar and the receiver then decided was not
+    // its to use (Start, a tray icon, a feature that is off). Without it that
+    // click is simply lost, and the native context menu never opens.
+    void ReplayRightClick(POINT pt);
+
     // onEmptyClick(point, shift, right): a left- or right-press on the
     // taskbar that is over none of the app buttons -- which may still be a
     // tray icon or the Start button, so the receiver has to check what is
