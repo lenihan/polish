@@ -40,6 +40,7 @@
 #include "hook/TaskbarShield.h"
 #include "settings/FeatureCatalog.h"
 #include "settings/Settings.h"
+#include "settings/StackStore.h"
 #include "tabs/TabSwitching.h"
 #include "tabs/UiaWorker.h"
 #include "tray/TrayIcon.h"
@@ -7009,6 +7010,30 @@ HWND g_pendingAdoptMember = nullptr;
 constexpr UINT_PTR kStackAdoptTimerId = 2;
 constexpr UINT kStackAdoptDelayMs = 300;
 
+// Stacks are remembered across restarts (settings/StackStore.h). Saving is
+// debounced: every layout change marks the list dirty and one write follows
+// once things go quiet.
+constexpr UINT_PTR kStackSaveTimerId = 18;
+constexpr UINT kStackSaveDelayMs = 1000;
+// Stacks that were saved but could not be rebuilt yet, because their apps are
+// not running (yet). Kept, and written back with the live ones, so a Polish
+// that starts before the apps does not forget them.
+constexpr UINT_PTR kStackRestoreTimerId = 19;
+constexpr UINT kStackRestoreRetryMs = 5000;
+constexpr int kStackRestoreMaxAttempts = 24;
+std::vector<polish::SavedStack> g_pendingSavedStacks;
+int g_stackRestoreAttempts = 0;
+// Set from the moment Windows starts closing everything: apps going away then
+// must not be recorded as the user dissolving their stacks.
+bool g_sessionEnding = false;
+
+void MarkStacksDirty() {
+    if (g_sessionEnding || g_messageWindow == nullptr) {
+        return;
+    }
+    SetTimer(g_messageWindow, kStackSaveTimerId, kStackSaveDelayMs, nullptr);
+}
+
 // How far a dragged tab goes beyond the strip before it counts as leaving
 // the stack is the strip's own business (StackStripWindow); this is the
 // size a window gets when it is torn out and put down, as a fraction of the
@@ -7040,6 +7065,7 @@ void SyncStrip(polish::StackId id) {
     if (stack == nullptr || stripIt == g_stackStrips.end()) {
         return;
     }
+    MarkStacksDirty();
     stripIt->second->SetTitle(stack->Name());
     stripIt->second->SetAlignment(stack->Alignment());
     stripIt->second->SetTabs(CollectStripTabs(*stack), stack->ActiveIndex().value_or(0));
@@ -7758,7 +7784,13 @@ void OnMemberLocationChanged(HWND hwnd) {
 // a default centred rect resizes and moves the very window the user was
 // looking at. With the first window's rect, nothing about it changes except
 // that the strip takes its band of the rect.
-polish::StackId CreateStackFromWindows(const std::vector<HWND>& windows, const std::wstring& name) {
+//
+// When restoring a saved stack, `savedRect` (if still on a monitor), the tab
+// strip's alignment and the active member are applied, and nothing is
+// activated: a restart must not steal focus.
+polish::StackId CreateStackFromWindows(const std::vector<HWND>& windows, const std::wstring& name,
+                                       const RECT* savedRect = nullptr, int alignment = 0,
+                                       HWND active = nullptr) {
     // An elevated window cannot be moved by an unelevated process (UIPI makes
     // SetWindowPos a silent no-op), so it would sit stubbornly outside its
     // stack forever. Refused up front rather than joined and left behind.
@@ -7798,7 +7830,17 @@ polish::StackId CreateStackFromWindows(const std::vector<HWND>& windows, const s
     constexpr LONG kMinStackHeight = 320;
     rect.right = std::max(rect.right, rect.left + kMinStackWidth);
     rect.bottom = std::max(rect.bottom, rect.top + kMinStackHeight);
+    if (savedRect != nullptr && savedRect->right > savedRect->left && savedRect->bottom > savedRect->top &&
+        MonitorFromRect(savedRect, MONITOR_DEFAULTTONULL) != nullptr) {
+        rect = *savedRect;
+    }
     stack->SetRect(rect);
+    if (savedRect != nullptr) {
+        stack->SetAlignment(alignment == 1 ? polish::StackAlignment::Vertical : polish::StackAlignment::Horizontal);
+        if (active != nullptr && stack->Contains(active)) {
+            stack->SetActiveWindow(active);
+        }
+    }
     polish::LogDebug(std::format(L"[Polish] New Stack: created stack id={} with {} window(s), name=\"{}\"", id,
                                   usable.size(), name));
 
@@ -7818,11 +7860,101 @@ polish::StackId CreateStackFromWindows(const std::vector<HWND>& windows, const s
     g_stackStrips[id] = std::move(strip);
 
     ReflowStackTo(id);
-    // The first window becomes the foreground one, which is what makes the
-    // strip visible (see UpdateStripVisibility).
-    ActivateMemberWindow(usable.front());
+    if (savedRect == nullptr) {
+        // The first window becomes the foreground one, which is what makes
+        // the strip visible (see UpdateStripVisibility).
+        ActivateMemberWindow(usable.front());
+    }
     UpdateStripVisibility();
+    MarkStacksDirty();
     return id;
+}
+
+// Writes every live stack, plus the ones still waiting for their apps.
+void SaveStacksNow() {
+    std::vector<polish::SavedStack> saved;
+    for (const polish::StackState& stack : g_stackManager.Stacks()) {
+        polish::SavedStack entry;
+        entry.name = stack.Name();
+        entry.alignment = stack.Alignment() == polish::StackAlignment::Vertical ? 1 : 0;
+        entry.rect = stack.Rect();
+        if (const auto active = stack.ActiveWindow(); active.has_value()) {
+            entry.activeHwnd = static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(*active));
+        }
+        for (const polish::StackMember& member : stack.Members()) {
+            if (IsWindow(member.window)) {
+                entry.members.push_back(polish::DescribeWindow(member.window));
+            }
+        }
+        if (entry.members.size() >= 2) {
+            saved.push_back(std::move(entry));
+        }
+    }
+    for (const polish::SavedStack& pending : g_pendingSavedStacks) {
+        saved.push_back(pending);
+    }
+    polish::SaveStacks(saved);
+}
+
+// Rebuilds saved stacks whose windows can be found. A stack comes back only
+// when all its windows are there, so one that is waiting on a slow-starting
+// app is not rebuilt without it; the final attempt takes what it can get.
+void TryRestoreStacks(bool finalAttempt) {
+    for (auto it = g_pendingSavedStacks.begin(); it != g_pendingSavedStacks.end();) {
+        std::vector<HWND> claimed;
+        for (const polish::StackState& stack : g_stackManager.Stacks()) {
+            for (const polish::StackMember& member : stack.Members()) {
+                claimed.push_back(member.window);
+            }
+        }
+        std::vector<HWND> found;
+        HWND active = nullptr;
+        for (const polish::SavedMember& member : it->members) {
+            claimed.insert(claimed.end(), found.begin(), found.end());
+            const HWND window = polish::ResolveSavedMember(member, claimed);
+            claimed.resize(claimed.size() - found.size());
+            if (window == nullptr) {
+                continue;
+            }
+            found.push_back(window);
+            if (member.hwnd == it->activeHwnd) {
+                active = window;
+            }
+        }
+        const bool complete = found.size() == it->members.size();
+        if (found.size() >= 2 && (complete || finalAttempt)) {
+            CreateStackFromWindows(found, it->name, &it->rect, it->alignment, active);
+            it = g_pendingSavedStacks.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// Startup: load what was saved and try to rebuild it, retrying for a couple
+// of minutes in case the apps are still launching.
+void RestoreSavedStacks() {
+    g_pendingSavedStacks = polish::LoadStacks();
+    if (g_pendingSavedStacks.empty()) {
+        return;
+    }
+    polish::LogDebug(std::format(L"[Polish] Stacks: {} saved stack(s) to restore", g_pendingSavedStacks.size()));
+    TryRestoreStacks(false);
+    if (!g_pendingSavedStacks.empty()) {
+        SetTimer(g_messageWindow, kStackRestoreTimerId, kStackRestoreRetryMs, nullptr);
+    }
+    MarkStacksDirty();
+}
+
+void OnStackRestoreTimer() {
+    ++g_stackRestoreAttempts;
+    const bool last = g_stackRestoreAttempts >= kStackRestoreMaxAttempts;
+    TryRestoreStacks(last);
+    if (last || g_pendingSavedStacks.empty()) {
+        KillTimer(g_messageWindow, kStackRestoreTimerId);
+        g_pendingSavedStacks.clear();  // give up on whatever never showed up
+        MarkStacksDirty();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -8515,6 +8647,13 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                     AdoptMemberRect(g_pendingAdoptMember);
                 }
                 g_pendingAdoptMember = nullptr;
+            } else if (wParam == kStackSaveTimerId) {
+                KillTimer(hwnd, kStackSaveTimerId);
+                if (!g_sessionEnding) {
+                    SaveStacksNow();
+                }
+            } else if (wParam == kStackRestoreTimerId) {
+                OnStackRestoreTimer();
             } else if (wParam == kArrangeSyncTimerId) {
                 KillTimer(hwnd, kArrangeSyncTimerId);
                 for (HWND arranged : g_arrangeSyncPending) {
@@ -8718,11 +8857,25 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             }
             return 0;
 
+        case WM_QUERYENDSESSION:
+            // Apps are about to close; their stacks must survive that.
+            // Saved first, then no more saves until the session is known to
+            // be ending for real or cancelled.
+            if (!g_sessionEnding) {
+                KillTimer(hwnd, kStackSaveTimerId);
+                SaveStacksNow();
+                g_sessionEnding = true;
+            }
+            return TRUE;
+
         case WM_ENDSESSION:
             // Logging off or shutting down with windows parked: put them
             // back now, there may be no next start to replay the journal.
             if (wParam != 0) {
                 UnscaleAll();
+            } else {
+                g_sessionEnding = false;  // cancelled
+                MarkStacksDirty();
             }
             return 0;
 
@@ -8801,6 +8954,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             }
             g_stackStrips.erase(id);
             g_stackManager.RemoveStack(id);
+            MarkStacksDirty();
             return 0;
         }
 
@@ -9269,6 +9423,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
     g_moveModeHook->SetOnCommit(OnMoveModeCommit);
 
     OnForegroundChanged(GetForegroundWindow());
+    RestoreSavedStacks();
 
     MSG msg;
     BOOL getMessageResult;
