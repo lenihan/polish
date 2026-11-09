@@ -133,13 +133,15 @@ to aim at in either gesture, and only one button to use.
   two screens and it parks flush against it instead of spilling onto the
   next one. Keep pushing well past the edge and it crosses — no modifier
   for that either. On a single monitor it simply cannot leave the screen.
-- **Without the mouse: Win+Space.** That latches onto the window under
+- **Keyboard or mouse: Win+Space.** That latches onto the window under
   the pointer (or the active one) and keeps the session open after you
   let go of Win. Arrows move it, snapping as they go; **Shift+Arrow**
   resizes the active zone and **Tab** walks that zone around the eight
   edges and corners; **Ctrl+Arrow** jumps the window flush to the next
   snap target in that direction. **Enter** keeps it, **Escape** puts it
-  back exactly where it started, and a click anywhere keeps it and ends
+  back exactly where it started. The left button works too: drag the
+  window to move it, or near an edge to resize it, and the session ends
+  when you let go. A click anywhere else keeps it and ends
   the session.
 - **Without the keyboard: the tray menu.** Both gestures above start with
   the Win key, so there is also a **Move or resize a window** item in the

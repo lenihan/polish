@@ -371,6 +371,10 @@ bool MoveModeHook::HandleKeyEvent(WPARAM wParam, const KBDLLHOOKSTRUCT& data) {
         }
         keysPhysicallyDown_[kSpaceKey] = true;
         keyboardSession_ = true;
+        // Also takes the mouse: the first left-press on a movable window is a
+        // drag (move, or resize from the border band), same as a session
+        // started from the tray menu, so Win+Space is not keyboard-only.
+        menuSession_ = true;
         // GetCursorPos rather than lastMousePoint_: the mouse hook only
         // learns a position from a move, and a hold that started without
         // the pointer being touched has not seen one. A bounded, no-UI

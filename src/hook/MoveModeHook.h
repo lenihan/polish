@@ -291,13 +291,12 @@ private:
     // it and is ended only by Enter, Escape, a click, or the caller
     // noticing its target is gone.
     bool keyboardSession_ = false;
-    // The keyboard session was started from the tray menu rather than by
-    // Space during a hold. Such a session also accepts the mouse: the
-    // first left-press on a movable window becomes an ordinary drag
-    // (move, or resize from the border band) and the session ends when
-    // the button comes up. Without this the menu entry was keyboard-only,
-    // which defeats the point of it -- it exists for people not using
-    // the keyboard.
+    // The keyboard session also accepts the mouse: started from the tray menu
+    // or by Space during a Win hold, the first left-press on a movable window
+    // becomes an ordinary drag (move, or resize from the border band) and the
+    // session ends when the button comes up. The name is historical -- it was
+    // the menu entry that first needed this, being for people not using the
+    // keyboard.
     bool menuSession_ = false;
     // See SuppressStartMenuForThisHold. Reset on Win-up.
     bool startMenuSuppressedThisHold_ = false;
