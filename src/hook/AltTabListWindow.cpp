@@ -39,6 +39,8 @@ constexpr int kPanelWidth = 360;
 constexpr int kPanelPaddingX = 8;
 constexpr int kPanelPaddingY = 8;
 constexpr int kRowHeight = 40;
+// How far a stack's members are indented under its header.
+constexpr int kIndentWidth = 20;
 constexpr int kRowPaddingX = 10;
 constexpr int kIconSize = 24;
 constexpr int kIconTextGap = 10;
@@ -342,7 +344,8 @@ LRESULT AltTabListWindow::HandleMessage(HWND hwnd, UINT message, WPARAM wParam, 
                 if (!rowActionsEnabled_) {
                     break;  // rows stand for tabs, which have no such controls
                 }
-                if (!rowIndex.has_value() || *rowIndex >= rows_.size() || *rowIndex >= layout.rowRects.size()) {
+                if (!rowIndex.has_value() || *rowIndex >= rows_.size() || *rowIndex >= layout.rowRects.size() ||
+                    rows_[*rowIndex].stackHeader) {
                     continue;
                 }
                 const RECT& rowRect = layout.rowRects[*rowIndex];
@@ -635,8 +638,8 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
             DeleteObject(fillBrush);
         }
 
-        int textLeft = rowRect.left + rowPaddingX;
         const AltTabListRow& row = rows_[i];
+        int textLeft = rowRect.left + rowPaddingX + row.indent * Scale(kIndentWidth, dpi);
         if (row.icon != nullptr) {
             const int iconTop = rowRect.top + (rowRect.bottom - rowRect.top - iconSize) / 2;
             DrawIconEx(hdc, textLeft, iconTop, row.icon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
@@ -647,7 +650,7 @@ void AltTabListWindow::Paint(HDC hdc, const RECT& clientRect) const {
         SetTextColor(hdc, highlighted ? kHighlightTextColor : (row.minimized ? kMinimizedTextColor : kTextColor));
         DrawTextW(hdc, row.title.c_str(), -1, &textRect, DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
 
-        if (rowActionsEnabled_ && (highlighted || hovered)) {
+        if (rowActionsEnabled_ && !row.stackHeader && (highlighted || hovered)) {
             const RECT toggle = ComputeMinimizeToggleButtonRect(rowRect, dpi);
             const RECT close = ComputeCloseButtonRect(rowRect, dpi);
             const COLORREF rowFillColor = highlighted ? accentColor : kHoverBackgroundColor;
@@ -1025,7 +1028,8 @@ void AltTabListWindow::UpdateHoveredAction(POINT pt, UINT dpi, const std::vector
     // reason (see the class comment).
     if (rowActionsEnabled_) {
         for (std::optional<size_t> rowIndex : {highlightIndex_, hoveredIndex_}) {
-            if (!rowIndex.has_value() || *rowIndex >= rows_.size() || *rowIndex >= rowRects.size()) {
+            if (!rowIndex.has_value() || *rowIndex >= rows_.size() || *rowIndex >= rowRects.size() ||
+                rows_[*rowIndex].stackHeader) {
                 continue;
             }
             const RECT& rowRect = rowRects[*rowIndex];
@@ -1188,6 +1192,9 @@ void AltTabListWindow::SetRowActionsEnabled(bool enabled) { rowActionsEnabled_ =
 HWND AltTabListWindow::HoveredRowWindow() const {
     if (!hoveredIndex_.has_value() || *hoveredIndex_ >= rows_.size()) {
         return nullptr;
+    }
+    if (rows_[*hoveredIndex_].stackHeader) {
+        return nullptr;  // a header stands for several windows; none is the one to act on
     }
     return rows_[*hoveredIndex_].hwnd;
 }

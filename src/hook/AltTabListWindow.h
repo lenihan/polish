@@ -24,6 +24,13 @@ struct AltTabListRow {
     // of the vector passed to Show(); this class just draws a divider
     // before the first row where this differs from the previous one.
     bool minimized = false;
+    // Stack grouping, for the Alt+Tab list: a stack's row is a header (its
+    // hwnd is a member that stands in for it, so choosing the row activates
+    // the stack's active window) and the members listed under it are indented
+    // one level. A header offers no close/minimize/maximize buttons, since
+    // they would be ambiguous about which window they meant.
+    int indent = 0;
+    bool stackHeader = false;
 };
 
 // A translucent panel shown alongside every Alt+Tab session, listing

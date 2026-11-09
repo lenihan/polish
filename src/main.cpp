@@ -19,6 +19,7 @@
 #include <tuple>
 #include <vector>
 
+#include "resource.h"
 #include "hook/ActiveWindowHalo.h"
 #include "hook/AltTabDimOverlay.h"
 #include "hook/AltTabHighlightBorder.h"
@@ -1579,51 +1580,19 @@ std::vector<HMONITOR> GetMonitorsCurrentFirst() {
     return monitors;
 }
 
-// The stacks as the pure collapse function wants them: members, and the
-// active member standing in for each. A stack of one is not collapsed --
-// there is nothing to fold.
-std::vector<polish::StackEntry> CollectStackEntries() {
-    std::vector<polish::StackEntry> entries;
-    for (const polish::StackState& stack : g_stackManager.Stacks()) {
-        if (stack.MemberCount() < 2) {
-            continue;
-        }
-        polish::StackEntry entry;
-        for (const polish::StackMember& member : stack.Members()) {
-            entry.members.push_back(member.window);
-        }
-        entry.representative = stack.ActiveWindow().value_or(nullptr);
-        entries.push_back(std::move(entry));
-    }
-    return entries;
-}
-
-// Folds each stack down to one entry in an Alt+Tab list: this is the
-// Polish switcher only. The real taskbar and native Alt+Tab still show
-// every member, so they will disagree with this list; that is accepted,
-// because Polish does not control them.
-std::vector<HWND> CollapseForAltTab(const std::vector<HWND>& list) {
-    return polish::CollapseStackMembers(list, CollectStackEntries());
-}
-
-// A row's label. A stack's one entry is named for the stack, with its
-// member count -- showing the active member's own title would claim the
-// row *is* that window, while choosing it raises a whole set.
+// A stack's windows are ordinary entries in the Polish switcher: each member
+// gets its own row, in its own place in the recency order. A stack exists to
+// put windows in one place, not to hide them from Alt+Tab, and the point of
+// keeping two windows in a stack is to jump between them with Alt+Tab. (This
+// used to fold each stack to one row, named for the stack; the pure folding
+// function, windowtracking/StackCollapse.h, is still there and tested.)
 std::wstring AltTabRowTitle(HWND hwnd) {
-    const polish::StackState* stack = g_stackManager.FindStackContaining(hwnd);
-    if (stack != nullptr && stack->MemberCount() >= 2) {
-        return std::format(L"{} ({})", stack->Name(), stack->MemberCount());
-    }
     wchar_t title[256] = L"";
     GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
     return std::wstring(title) + ScaledTitleSuffix(hwnd);
 }
-
 BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
-    // Stack members are listed like any other window here; the stack is
-    // folded to one entry afterwards (CollapseForAltTab), once the order is
-    // known, because *which* member stands in and *where* it sits depend on
-    // the whole list.
+    // Stack members are listed like any other window.
     if (polish::IsCandidateWindow(hwnd) && !IsIconic(hwnd)) {
         reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
     }
@@ -1671,10 +1640,6 @@ void RebuildAltTabCandidates() {
         }
     }
 
-    // Each stack becomes one entry, at the position of its earliest member.
-    // Done before the monitor filter, on the full ordered list: which window
-    // stands in for the stack is the active one, wherever it happens to be.
-    globalOrdered = CollapseForAltTab(globalOrdered);
 
     // Sampled here rather than read live everywhere below: this is the
     // one place a session's list is built from scratch, so it is also
@@ -1774,7 +1739,7 @@ void RebuildAltTabMinimizedCandidates() {
     // section would quietly reintroduce the other monitors this session
     // is meant to leave alone.
     g_altTabMinimized.clear();
-    for (HWND hwnd : CollapseForAltTab(all)) {
+    for (HWND hwnd : all) {
         if (MonitorForMinimizedCandidate(hwnd) == g_altTabMonitor) {
             g_altTabMinimized.push_back(hwnd);
         }
@@ -1806,9 +1771,6 @@ void UpdateAltTabCandidatesPreservingOrder() {
     std::vector<HWND> allCandidates;
     EnumWindows(EnumCandidateWindowsProc, reinterpret_cast<LPARAM>(&allCandidates));
     g_altTabDimTargets = allCandidates;
-    // Folded the same way RebuildAltTabCandidates folds it, so a stack stays
-    // one entry mid-session as well.
-    allCandidates = CollapseForAltTab(allCandidates);
 
     std::vector<HWND> updated;
     for (HWND hwnd : g_altTabCandidates) {
@@ -2016,32 +1978,74 @@ polish::AltTabHook::Eligibility AltTabEligibility(polish::AltTabHook::SessionKin
     return Eligibility::Ready;
 }
 
+void AppendAltTabRows(MonitorRowsResult& result, const std::vector<HWND>& windows, HWND highlighted, bool minimized) {
+    // Each stack with a window in this list gets a header row, with its
+    // windows listed under it, indented -- so you can pick the stack (its
+    // active window) or any one member. The stack sits where its first window
+    // sits in the list. The order Tab cycles in is untouched: it is still
+    // most-recently-used, so a quick Alt+Tab still toggles between the last
+    // two windows wherever they live. Only the picture groups them.
+    std::vector<const polish::StackState*> shown;
+    const auto addRow = [&](HWND hwnd, int indent) {
+        if (hwnd == highlighted) {
+            result.highlightIndex = result.rows.size();
+        }
+        polish::AltTabListRow row{hwnd, AltTabRowTitle(hwnd), polish::GetWindowIconHandle(hwnd), minimized};
+        row.indent = indent;
+        result.rows.push_back(std::move(row));
+    };
+    for (HWND hwnd : windows) {
+        const polish::StackState* stack = g_stackManager.FindStackContaining(hwnd);
+        if (stack == nullptr || stack->MemberCount() < 2) {
+            addRow(hwnd, 0);
+            continue;
+        }
+        if (std::find(shown.begin(), shown.end(), stack) != shown.end()) {
+            continue;  // already listed under its header
+        }
+        shown.push_back(stack);
+        std::vector<HWND> members;  // in tab order
+        for (const polish::StackMember& member : stack->Members()) {
+            if (std::find(windows.begin(), windows.end(), member.window) != windows.end()) {
+                members.push_back(member.window);
+            }
+        }
+        const auto active = stack->ActiveWindow();
+        const bool activeListed = active.has_value() && std::find(members.begin(), members.end(), *active) != members.end();
+        static const HICON stackIcon = static_cast<HICON>(LoadImageW(
+            GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_POLISH_STACK), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR | LR_SHARED));
+        polish::AltTabListRow header{activeListed ? *active : members.front(),
+                                     std::format(L"{} ({})", stack->Name(), stack->MemberCount()), stackIcon,
+                                     minimized};
+        header.stackHeader = true;
+        result.rows.push_back(std::move(header));
+        for (HWND member : members) {
+            addRow(member, 1);
+        }
+    }
+}
+
 MonitorRowsResult BuildAltTabListRowsForMonitor(HMONITOR monitor) {
     MonitorRowsResult result;
     const HWND highlighted = CurrentAltTabHighlightedWindow();
+    std::vector<HWND> active;
     for (HWND hwnd : g_altTabCandidates) {
-        if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != monitor) {
-            continue;
+        if (MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) == monitor) {
+            active.push_back(hwnd);
         }
-        if (hwnd == highlighted) {
-            result.highlightIndex = result.rows.size();
-        }
-        const std::wstring title = AltTabRowTitle(hwnd);
-        result.rows.push_back(polish::AltTabListRow{hwnd, title, polish::GetWindowIconHandle(hwnd), /*minimized=*/false});
     }
+    AppendAltTabRows(result, active, highlighted, /*minimized=*/false);
     // Minimized section, appended after every active row so it always
     // renders below them (AltTabListWindow's divider logic assumes
     // minimized rows are contiguous at the end -- see its class comment).
+    std::vector<HWND> minimized;
     for (HWND hwnd : g_altTabMinimized) {
-        if (MonitorForMinimizedCandidate(hwnd) != monitor) {
-            continue;
+        if (MonitorForMinimizedCandidate(hwnd) == monitor) {
+            minimized.push_back(hwnd);
         }
-        if (hwnd == highlighted) {
-            result.highlightIndex = result.rows.size();
-        }
-        const std::wstring title = AltTabRowTitle(hwnd);
-        result.rows.push_back(polish::AltTabListRow{hwnd, title, polish::GetWindowIconHandle(hwnd), /*minimized=*/true});
     }
+    AppendAltTabRows(result, minimized, highlighted, /*minimized=*/true);
     return result;
 }
 
@@ -7573,12 +7577,17 @@ void OnStackTabHovered(polish::StackId id, std::optional<size_t> tab, const RECT
                                StackDpiForRect(stack->Rect()));
 }
 
+// How far the strip has been dragged since the press, in pixels.
+int g_stackStripDragDistance = 0;
+
 // The user dragged the strip's empty area: the whole stack moves with it.
 void OnStripDragged(polish::StackId id, int dx, int dy) {
     polish::StackState* stack = g_stackManager.FindStack(id);
     if (stack == nullptr) {
         return;
     }
+    // Added up so the press can be told from a drag; see OnStripDropped.
+    g_stackStripDragDistance += std::abs(dx) + std::abs(dy);
     stack->Offset(dx, dy);
     ReflowStackTo(id);
     UpdateStackDragLayout();
@@ -7587,6 +7596,25 @@ void OnStripDragged(polish::StackId id, int dx, int dy) {
 // The strip drag ended: if the pointer was in a snap zone, the stack takes
 // that layout's rect.
 void OnStripDropped(polish::StackId id) {
+    // A press on the title bar that did not move is a click, not a drag, and
+    // all a click does is bring the stack forward. Without this the release
+    // looked at where the pointer was, and a stack sitting at the top of the
+    // screen read as dropped on the top edge: it maximized.
+    const bool wasClick = g_stackStripDragDistance <= GetSystemMetrics(SM_CXDRAG);
+    g_stackStripDragDistance = 0;
+    if (wasClick) {
+        g_stackDragLayout = polish::SnapLayout::None;
+        if (g_moveModeLayoutPreview) {
+            g_moveModeLayoutPreview->Hide();
+        }
+        const polish::StackState* stack = g_stackManager.FindStack(id);
+        if (stack != nullptr) {
+            if (const auto active = stack->ActiveWindow(); active.has_value()) {
+                ActivateMemberWindow(*active);
+            }
+        }
+        return;
+    }
     UpdateStackDragLayout();
     const polish::SnapLayout layout = g_stackDragLayout;
     g_stackDragLayout = polish::SnapLayout::None;
