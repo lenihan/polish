@@ -7575,8 +7575,24 @@ void AdoptMemberRect(HWND hwnd) {
     if (stack == nullptr || !stack->HasRect() || g_reflowInProgress || GetTickCount64() < g_stackQuietUntilTick) {
         return;
     }
-    if (IsIconic(hwnd) || IsZoomed(hwnd)) {
+    if (IsIconic(hwnd)) {
         return;  // not a rect anyone chose
+    }
+    if (IsZoomed(hwnd)) {
+        // A member maximized on its own (Win+Up, its own button) would cover
+        // the strip. Maximizing a stack means the whole stack -- strip, tabs
+        // and content -- so take the member back to normal and maximize the
+        // stack instead.
+        const polish::StackId id = stack->Id();
+        g_reflowInProgress = true;
+        ShowWindow(hwnd, SW_SHOWNORMAL);
+        g_reflowInProgress = false;
+        if (!StackFillsWorkArea(*stack)) {
+            ToggleStackMaximize(id);  // restores nothing here: it is not maximized, so this maximizes
+        } else {
+            ReflowStackTo(id);
+        }
+        return;
     }
     RECT inset{};
     const RECT visible = polish::VisibleRectAndInset(hwnd, inset);
