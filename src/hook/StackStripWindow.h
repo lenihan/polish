@@ -73,6 +73,8 @@ public:
     // Polish's. The owner learns of the shell activating or closing it
     // through the callbacks below.
     HWND TaskbarHandle() const { return taskbarWindow_; }
+    // The AppUserModelID that gives this stack its own taskbar button.
+    const std::wstring& TaskbarAppId() const { return taskbarAppId_; }
     // Keeps the taskbar button in step with the stack: minimized exactly when
     // every member is. A button that looks "up" is one the shell has nothing
     // to restore, so clicking it did nothing.
@@ -171,6 +173,7 @@ private:
     HINSTANCE instance_;
     HWND window_ = nullptr;
     HWND taskbarWindow_ = nullptr;
+    std::wstring taskbarAppId_;
     std::wstring title_;
     bool minimizeHovered_ = false;
     bool minimizePressed_ = false;

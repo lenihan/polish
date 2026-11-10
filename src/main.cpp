@@ -3578,6 +3578,16 @@ void RebuildTaskbarTargets() {
         }
     }
 
+    // A stack's stand-in window is not a window the filters above would pick
+    // (no caption, no frame, one pixel, offscreen), but it is what the stack's
+    // button stands for. Added by hand, or the button has no windows and its
+    // hover list never opens.
+    for (const auto& [id, strip] : g_stackStrips) {
+        if (strip->TaskbarHandle() != nullptr && !strip->TaskbarAppId().empty()) {
+            resolved.emplace_back(strip->TaskbarHandle(), strip->TaskbarAppId());
+        }
+    }
+
     g_taskbarButtonWindows.assign(g_taskbarButtons.size(), {});
     std::vector<polish::TaskbarHook::Target> targets;
     targets.reserve(g_taskbarButtons.size());
@@ -7330,8 +7340,7 @@ void ToggleStackMaximize(polish::StackId id) {
     ReflowStackTo(id);
 }
 
-// Minimizes every member: the title bar's minimize button, and what
-// clicking the taskbar button of the stack you are in does.
+// Minimizes every member: the title bar's minimize button.
 // When members were last all minimized by us. Windows hands focus to the next
 // window that is up, and for a stack that is its own taskbar stand-in; that
 // activation is not a click on its button and must not bring the stack
@@ -7382,10 +7391,34 @@ void BringStackForward(polish::StackId id) {
     }
 }
 
+void ActivateStackTab(polish::StackId id, size_t index);
+
+// Moves to the stack's next tab that is not minimized, wrapping round --
+// what clicking the taskbar button of an app with several windows does. With
+// nothing else to go to, it leaves things as they are.
+void CycleStackTab(polish::StackId id) {
+    const polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr || stack->MemberCount() < 2) {
+        return;
+    }
+    const size_t count = stack->MemberCount();
+    const size_t from = stack->ActiveIndex().value_or(0);
+    for (size_t step = 1; step < count; ++step) {
+        const size_t index = (from + step) % count;
+        const HWND candidate = stack->Members()[index].window;
+        if (IsWindow(candidate) && !IsIconic(candidate)) {
+            polish::LogDebug(std::format(L"[Polish] Stack: taskbar click moved stack id={} to tab {}", id, index));
+            ActivateStackTab(id, index);
+            return;
+        }
+    }
+}
+
 // The shell sent a stack's stand-in a minimize/restore command: its button was
-// clicked while the stand-in was already in front, which is where it stays
-// once the stack has been minimized. Toggle on the stack's own state: if
-// everything is minimized, bring it back; otherwise minimize it.
+// clicked while the stand-in was already in front. If any member is up, that
+// is a click on the stack you are in, which moves to its next tab -- the same
+// as clicking the button of any app with several windows. If everything is
+// minimized, it brings the stack back.
 void ToggleStackFromTaskbar(polish::StackId id) {
     const polish::StackState* stack = g_stackManager.FindStack(id);
     if (stack == nullptr) {
@@ -7398,9 +7431,9 @@ void ToggleStackFromTaskbar(polish::StackId id) {
         }
     }
     polish::LogDebug(
-        std::format(L"[Polish] Stack: taskbar button {} stack id={}", anyUp ? L"minimized" : L"restored", id));
+        std::format(L"[Polish] Stack: taskbar button {} stack id={}", anyUp ? L"cycled" : L"restored", id));
     if (anyUp) {
-        MinimizeStackMembers(id);
+        CycleStackTab(id);
     } else {
         BringStackForward(id);
     }
@@ -7410,11 +7443,11 @@ void ToggleStackFromTaskbar(polish::StackId id) {
 // button (or reached it with the native Alt+Tab). `previous` is the window
 // that was in front a moment before.
 //
-// This follows how a taskbar button behaves for any window: clicking the
-// button of the one you are already in minimizes it; clicking one you are
-// not in brings it back. So if a member was in front, minimize the whole
-// stack; otherwise bring it forward. Either way the stand-in itself is
-// never useful in front -- it is one offscreen pixel.
+// This follows how the taskbar button of an app with several windows behaves:
+// clicking it while you are in that app moves to its next window; clicking it
+// from elsewhere brings the app back. So if a member was in front, move to the
+// stack's next tab; otherwise bring the stack forward. Either way the
+// stand-in itself is never useful in front -- it is one offscreen pixel.
 void OnStackTaskbarForeground(HWND foreground, HWND previous) {
     // Focus landing on the stand-in because we have just minimized the stack
     // is the system finding something to activate, not a click on its button.
@@ -7432,8 +7465,7 @@ void OnStackTaskbarForeground(HWND foreground, HWND previous) {
         const bool wasInThisStack =
             previous != nullptr && IsWindow(previous) && stack->Contains(previous) && !IsIconic(previous);
         if (wasInThisStack) {
-            polish::LogDebug(std::format(L"[Polish] Stack: taskbar button minimized stack id={}", id));
-            MinimizeStackMembers(id);
+            CycleStackTab(id);
         } else {
             polish::LogDebug(std::format(L"[Polish] Stack: taskbar button brought stack id={} forward", id));
             BringStackForward(id);

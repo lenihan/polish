@@ -112,7 +112,8 @@ StackStripWindow::StackStripWindow(HINSTANCE instance) : instance_(instance) {
         }
         // An AppUserModelID of its own, so the shell gives this stack its own
         // button rather than grouping every stack (and Polish) under one.
-        const std::wstring appId = std::format(L"Polish.Stack.{:X}", reinterpret_cast<uintptr_t>(this));
+        taskbarAppId_ = std::format(L"Polish.Stack.{:X}", reinterpret_cast<uintptr_t>(this));
+        const std::wstring& appId = taskbarAppId_;
         Microsoft::WRL::ComPtr<IPropertyStore> store;
         if (SUCCEEDED(SHGetPropertyStoreForWindow(taskbarWindow_, IID_PPV_ARGS(&store))) && store) {
             PROPVARIANT value;
