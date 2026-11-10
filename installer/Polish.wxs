@@ -47,8 +47,8 @@
          would be the worse outcome. The requirements are stated in the
          README and the release notes instead. -->
 
-    <Icon Id="PolishIcon" SourceFile="$(var.IconPath)" />
-    <Property Id="ARPPRODUCTICON" Value="PolishIcon" />
+    <Icon Id="PolishIcon.ico" SourceFile="$(var.IconPath)" />
+    <Property Id="ARPPRODUCTICON" Value="PolishIcon.ico" />
     <Property Id="ARPURLINFOABOUT" Value="https://github.com/lenihan/polish" />
     <Property Id="ARPNOMODIFY" Value="1" />
 
@@ -72,7 +72,7 @@
             Directory="ProgramMenuFolder"
             Name="Polish"
             Description="Fit and finish for Windows"
-            Icon="PolishIcon"
+            Icon="PolishIcon.ico"
             Advertise="yes" />
       </Component>
 
