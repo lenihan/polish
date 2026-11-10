@@ -7115,14 +7115,6 @@ constexpr UINT kStackAdoptDelayMs = 300;
 // once things go quiet.
 constexpr UINT_PTR kStackSaveTimerId = 18;
 constexpr UINT kStackSaveDelayMs = 1000;
-// Stacks that were saved but could not be rebuilt yet, because their apps are
-// not running (yet). Kept, and written back with the live ones, so a Polish
-// that starts before the apps does not forget them.
-constexpr UINT_PTR kStackRestoreTimerId = 19;
-constexpr UINT kStackRestoreRetryMs = 5000;
-constexpr int kStackRestoreMaxAttempts = 24;
-std::vector<polish::SavedStack> g_pendingSavedStacks;
-int g_stackRestoreAttempts = 0;
 // Set from the moment Windows starts closing everything: apps going away then
 // must not be recorded as the user dissolving their stacks.
 bool g_sessionEnding = false;
@@ -7158,6 +7150,75 @@ std::vector<polish::StripTab> CollectStripTabs(const polish::StackState& stack) 
     return tabs;
 }
 
+// A place in a stack's tab order. A stack outlives its windows: when an app
+// closes (VS Code restarting to update, say) its tab is not forgotten but left
+// as a vacant slot, and when a matching window appears again it takes that slot
+// back, in the same position. The live slots, in order, are exactly the stack's
+// members; vacant slots sit between them where their window used to be.
+struct StackSlot {
+    HWND hwnd = nullptr;       // null while the window is away
+    polish::SavedMember desc;  // what to look for when it comes back
+    ULONGLONG vacatedAt = 0;
+};
+std::map<polish::StackId, std::vector<StackSlot>> g_stackSlots;
+// A returning window matches a vacancy exactly (program, class and title) at
+// any time. Matching on program and class alone -- the title may well have
+// changed -- is only trusted for a while after the window left, so that an
+// unrelated window opened much later is not pulled into the stack.
+constexpr ULONGLONG kLooseMatchMs = 5ULL * 60 * 1000;
+constexpr UINT_PTR kStackVacancyTimerId = 22;
+constexpr UINT kStackVacancyScanMs = 1500;
+
+// Brings the slots in line with the stack's current members (which may have
+// been added, removed or reordered by anything), keeping each vacancy where it
+// was: after the nearest earlier member that is still in the stack.
+void ReconcileSlots(polish::StackId id) {
+    const polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr) {
+        g_stackSlots.erase(id);
+        return;
+    }
+    std::vector<StackSlot>& slots = g_stackSlots[id];
+    std::map<HWND, StackSlot> liveBefore;
+    std::map<HWND, std::vector<StackSlot>> vacantAfter;  // nullptr: ahead of every member
+    HWND anchor = nullptr;
+    for (const StackSlot& slot : slots) {
+        if (slot.hwnd != nullptr) {
+            liveBefore[slot.hwnd] = slot;
+            if (stack->Contains(slot.hwnd)) {
+                anchor = slot.hwnd;
+            }
+        } else {
+            vacantAfter[anchor].push_back(slot);
+        }
+    }
+    std::vector<StackSlot> result;
+    const auto addVacantAfter = [&](HWND key) {
+        if (const auto it = vacantAfter.find(key); it != vacantAfter.end()) {
+            result.insert(result.end(), it->second.begin(), it->second.end());
+        }
+    };
+    addVacantAfter(nullptr);
+    for (const polish::StackMember& member : stack->Members()) {
+        StackSlot slot;
+        if (const auto it = liveBefore.find(member.window); it != liveBefore.end()) {
+            slot = it->second;
+        } else {
+            slot.desc = polish::DescribeWindow(member.window);
+        }
+        slot.hwnd = member.window;
+        slot.desc.hwnd = static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(member.window));
+        if (IsWindow(member.window)) {
+            wchar_t title[256] = L"";
+            GetWindowTextW(member.window, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+            slot.desc.title = title;  // kept current, so it is known when the window goes
+        }
+        result.push_back(std::move(slot));
+        addVacantAfter(member.window);
+    }
+    slots = std::move(result);
+}
+
 // Pushes the stack's current members, order and active tab into its strip.
 void SyncStrip(polish::StackId id) {
     const polish::StackState* stack = g_stackManager.FindStack(id);
@@ -7165,6 +7226,7 @@ void SyncStrip(polish::StackId id) {
     if (stack == nullptr || stripIt == g_stackStrips.end()) {
         return;
     }
+    ReconcileSlots(id);
     MarkStacksDirty();
     stripIt->second->SetTitle(stack->Name());
     stripIt->second->SetAlignment(stack->Alignment());
@@ -7496,7 +7558,10 @@ void RemoveMemberFromStack(polish::StackId id, HWND hwnd) {
         return;
     }
     stack->Remove(hwnd);
-    if (stack->MemberCount() < 2) {
+    ReconcileSlots(id);
+    // Vacancies count: a stack waiting for its windows to come back is not
+    // yet one that has stopped meaning anything.
+    if (g_stackSlots[id].size() < 2) {
         DissolveStack(id);
         return;
     }
@@ -7924,6 +7989,14 @@ void OnMemberDestroyed(HWND hwnd) {
     }
     polish::LogDebug(std::format(L"[Polish] Stack: member hwnd={} closed, leaving stack id={}",
                                   reinterpret_cast<void*>(hwnd), stack->Id()));
+    // Its tab stays as a vacancy, to be filled when the window comes back.
+    for (StackSlot& slot : g_stackSlots[stack->Id()]) {
+        if (slot.hwnd == hwnd) {
+            slot.hwnd = nullptr;
+            slot.vacatedAt = GetTickCount64();
+            break;
+        }
+    }
     RemoveMemberFromStack(stack->Id(), hwnd);
 }
 
@@ -7970,7 +8043,9 @@ polish::StackId CreateStackFromWindows(const std::vector<HWND>& windows, const s
         }
         usable.push_back(hwnd);
     }
-    if (usable.size() < 2) {
+    // A restored stack may have fewer windows than it had -- even none: the
+    // rest are vacancies waiting for their apps to start.
+    if (usable.size() < 2 && savedRect == nullptr) {
         polish::LogDebug(L"[Polish] New Stack: fewer than two movable windows, nothing to stack");
         return 0;
     }
@@ -7979,22 +8054,39 @@ polish::StackId CreateStackFromWindows(const std::vector<HWND>& windows, const s
     polish::StackState* stack = g_stackManager.FindStack(id);
     stack->SetName(name);
 
-    RECT inset{};
-    RECT rect = polish::VisibleRectAndInset(usable.front(), inset);
-    MONITORINFO info{};
-    info.cbSize = sizeof(info);
-    if (GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &info)) {
-        IntersectRect(&rect, &rect, &info.rcWork);
-    }
-    // Never smaller than a usable window: a tiny first window should not
-    // make a tiny stack.
+    RECT rect{};
     constexpr LONG kMinStackWidth = 480;
     constexpr LONG kMinStackHeight = 320;
-    rect.right = std::max(rect.right, rect.left + kMinStackWidth);
-    rect.bottom = std::max(rect.bottom, rect.top + kMinStackHeight);
+    if (!usable.empty()) {
+        RECT inset{};
+        rect = polish::VisibleRectAndInset(usable.front(), inset);
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        if (GetMonitorInfoW(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), &info)) {
+            IntersectRect(&rect, &rect, &info.rcWork);
+        }
+        // Never smaller than a usable window: a tiny first window should not
+        // make a tiny stack.
+        rect.right = std::max(rect.right, rect.left + kMinStackWidth);
+        rect.bottom = std::max(rect.bottom, rect.top + kMinStackHeight);
+    }
     if (savedRect != nullptr && savedRect->right > savedRect->left && savedRect->bottom > savedRect->top &&
         MonitorFromRect(savedRect, MONITOR_DEFAULTTONULL) != nullptr) {
         rect = *savedRect;
+    }
+    if (rect.right <= rect.left || rect.bottom <= rect.top) {
+        // Nothing to take a rect from (an empty stack whose monitor is gone):
+        // the middle of the main monitor's work area.
+        MONITORINFO info{};
+        info.cbSize = sizeof(info);
+        const POINT origin{0, 0};
+        GetMonitorInfoW(MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY), &info);
+        const LONG w = (info.rcWork.right - info.rcWork.left) * 7 / 10;
+        const LONG h = (info.rcWork.bottom - info.rcWork.top) * 7 / 10;
+        rect = RECT{info.rcWork.left + ((info.rcWork.right - info.rcWork.left) - w) / 2,
+                    info.rcWork.top + ((info.rcWork.bottom - info.rcWork.top) - h) / 2, 0, 0};
+        rect.right = rect.left + w;
+        rect.bottom = rect.top + h;
     }
     stack->SetRect(rect);
     if (savedRect != nullptr) {
@@ -8043,67 +8135,150 @@ void SaveStacksNow() {
         if (const auto active = stack.ActiveWindow(); active.has_value()) {
             entry.activeHwnd = static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(*active));
         }
-        for (const polish::StackMember& member : stack.Members()) {
-            if (IsWindow(member.window)) {
-                entry.members.push_back(polish::DescribeWindow(member.window));
-            }
+        // Every slot, in tab order: the windows that are open and the
+        // vacancies of the ones that are not, so a stack whose apps are all
+        // closed is still remembered.
+        ReconcileSlots(stack.Id());
+        for (const StackSlot& slot : g_stackSlots[stack.Id()]) {
+            polish::SavedMember member = slot.desc;
+            member.hwnd = slot.hwnd != nullptr ? static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(slot.hwnd)) : 0;
+            entry.members.push_back(std::move(member));
         }
         if (entry.members.size() >= 2) {
             saved.push_back(std::move(entry));
         }
     }
-    for (const polish::SavedStack& pending : g_pendingSavedStacks) {
-        saved.push_back(pending);
-    }
     polish::SaveStacks(saved);
 }
 
-// Rebuilds saved stacks whose windows can be found. A stack comes back only
-// when all its windows are there, so one that is waiting on a slow-starting
-// app is not rebuilt without it; the final attempt takes what it can get.
-void TryRestoreStacks(bool finalAttempt) {
-    for (auto it = g_pendingSavedStacks.begin(); it != g_pendingSavedStacks.end();) {
+bool CanJoinStack(HWND hwnd);
+
+// Fills a vacant slot with `hwnd`: the window takes the tab position the slot
+// holds, among whatever members are there now.
+void FillVacancy(polish::StackId id, size_t slotIndex, HWND hwnd) {
+    polish::StackState* stack = g_stackManager.FindStack(id);
+    if (stack == nullptr || slotIndex >= g_stackSlots[id].size()) {
+        return;
+    }
+    std::vector<StackSlot>& slots = g_stackSlots[id];
+    size_t position = 0;  // live slots ahead of this one
+    for (size_t i = 0; i < slotIndex; ++i) {
+        position += slots[i].hwnd != nullptr ? 1 : 0;
+    }
+    UnscaleWindow(hwnd, /*activate=*/false);
+    slots[slotIndex].hwnd = hwnd;
+    stack->AddWindow(hwnd);
+    const size_t last = stack->MemberCount() - 1;
+    if (position < last) {
+        stack->Reorder(last, position);
+    }
+    polish::LogDebug(std::format(L"[Polish] Stack: hwnd={} returned to stack id={} at slot {}",
+                                  reinterpret_cast<void*>(hwnd), id, position));
+    ReconcileSlots(id);
+    ReflowStackTo(id);
+}
+
+BOOL CALLBACK VacancyCandidateProc(HWND hwnd, LPARAM lParam) {
+    if (IsWindowVisible(hwnd) && CanJoinStack(hwnd)) {
+        reinterpret_cast<std::vector<HWND>*>(lParam)->push_back(hwnd);
+    }
+    return TRUE;
+}
+
+// Looks for windows that have come back to a stack: any new window that
+// matches a vacant slot takes it. Cheap when nothing is vacant, which is the
+// usual case.
+void ScanStackVacancies() {
+    bool anyVacant = false;
+    for (const auto& [id, slots] : g_stackSlots) {
+        for (const StackSlot& slot : slots) {
+            anyVacant = anyVacant || slot.hwnd == nullptr;
+        }
+    }
+    if (!anyVacant) {
+        return;
+    }
+    std::vector<HWND> windows;
+    EnumWindows(VacancyCandidateProc, reinterpret_cast<LPARAM>(&windows));
+    std::vector<std::pair<HWND, polish::SavedMember>> candidates;
+    for (HWND window : windows) {
+        candidates.emplace_back(window, polish::DescribeWindow(window));
+    }
+    if (candidates.empty()) {
+        return;
+    }
+    const ULONGLONG now = GetTickCount64();
+    std::vector<polish::StackId> ids;
+    for (const auto& [id, slots] : g_stackSlots) {
+        ids.push_back(id);
+    }
+    for (const polish::StackId id : ids) {
+        // Re-found each time: filling a slot changes the list, and an exact
+        // match anywhere in the stack should beat a loose one for an earlier slot.
+        for (const bool exact : {true, false}) {
+            for (size_t i = 0; i < g_stackSlots[id].size() && !candidates.empty(); ++i) {
+                const StackSlot slot = g_stackSlots[id][i];
+                if (slot.hwnd != nullptr || (!exact && now - slot.vacatedAt > kLooseMatchMs)) {
+                    continue;
+                }
+                const auto match = std::find_if(candidates.begin(), candidates.end(), [&](const auto& candidate) {
+                    const polish::SavedMember& c = candidate.second;
+                    return _wcsicmp(c.exe.c_str(), slot.desc.exe.c_str()) == 0 &&
+                           _wcsicmp(c.windowClass.c_str(), slot.desc.windowClass.c_str()) == 0 &&
+                           (!exact || c.title == slot.desc.title);
+                });
+                if (match != candidates.end()) {
+                    const HWND window = match->first;
+                    candidates.erase(match);
+                    FillVacancy(id, i, window);
+                }
+            }
+        }
+    }
+}
+
+// Startup: rebuild every saved stack. Windows that are open are put back in
+// their tabs; the rest become vacancies and take their place whenever they
+// appear (ScanStackVacancies) -- which is also what a restart after Windows
+// update or a reboot needs, since the apps arrive over the following minutes.
+void RestoreSavedStacks() {
+    const std::vector<polish::SavedStack> saved = polish::LoadStacks();
+    if (saved.empty()) {
+        return;
+    }
+    polish::LogDebug(std::format(L"[Polish] Stacks: {} saved stack(s) to restore", saved.size()));
+    for (const polish::SavedStack& entry : saved) {
         std::vector<HWND> claimed;
         for (const polish::StackState& stack : g_stackManager.Stacks()) {
             for (const polish::StackMember& member : stack.Members()) {
                 claimed.push_back(member.window);
             }
         }
+        std::vector<StackSlot> slots;
         std::vector<HWND> found;
         HWND active = nullptr;
-        for (const polish::SavedMember& member : it->members) {
+        for (const polish::SavedMember& member : entry.members) {
             claimed.insert(claimed.end(), found.begin(), found.end());
             const HWND window = polish::ResolveSavedMember(member, claimed);
             claimed.resize(claimed.size() - found.size());
-            if (window == nullptr) {
-                continue;
+            StackSlot slot;
+            slot.desc = member;
+            if (window != nullptr && !polish::IsElevatedWindow(window)) {
+                found.push_back(window);
+                slot.hwnd = window;
+                if (entry.activeHwnd != 0 && member.hwnd == entry.activeHwnd) {
+                    active = window;
+                }
+            } else {
+                slot.vacatedAt = GetTickCount64();
             }
-            found.push_back(window);
-            if (member.hwnd == it->activeHwnd) {
-                active = window;
-            }
+            slots.push_back(std::move(slot));
         }
-        const bool complete = found.size() == it->members.size();
-        if (found.size() >= 2 && (complete || finalAttempt)) {
-            CreateStackFromWindows(found, it->name, &it->rect, it->alignment, active);
-            it = g_pendingSavedStacks.erase(it);
-        } else {
-            ++it;
+        const polish::StackId id = CreateStackFromWindows(found, entry.name, &entry.rect, entry.alignment, active);
+        if (id != 0) {
+            g_stackSlots[id] = std::move(slots);
+            SyncStrip(id);
         }
-    }
-}
-
-// Startup: load what was saved and try to rebuild it, retrying for a couple
-// of minutes in case the apps are still launching.
-void RestoreSavedStacks() {
-    g_pendingSavedStacks = polish::LoadStacks();
-    if (g_pendingSavedStacks.empty()) {
-        return;
-    }
-    polish::LogDebug(std::format(L"[Polish] Stacks: {} saved stack(s) to restore", g_pendingSavedStacks.size()));
-    TryRestoreStacks(false);
-    if (!g_pendingSavedStacks.empty()) {
-        SetTimer(g_messageWindow, kStackRestoreTimerId, kStackRestoreRetryMs, nullptr);
     }
     MarkStacksDirty();
 }
@@ -8197,16 +8372,6 @@ void OfferSessionRestore() {
     g_sessionSaveNotBeforeTick = GetTickCount64() + kSessionSettleMs;
 }
 
-void OnStackRestoreTimer() {
-    ++g_stackRestoreAttempts;
-    const bool last = g_stackRestoreAttempts >= kStackRestoreMaxAttempts;
-    TryRestoreStacks(last);
-    if (last || g_pendingSavedStacks.empty()) {
-        KillTimer(g_messageWindow, kStackRestoreTimerId);
-        g_pendingSavedStacks.clear();  // give up on whatever never showed up
-        MarkStacksDirty();
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Dragging a window onto a strip to join the stack.
@@ -8904,8 +9069,8 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 if (!g_sessionEnding) {
                     SaveStacksNow();
                 }
-            } else if (wParam == kStackRestoreTimerId) {
-                OnStackRestoreTimer();
+            } else if (wParam == kStackVacancyTimerId) {
+                ScanStackVacancies();
             } else if (wParam == kSessionSaveTimerId) {
                 SaveSessionNow();
             } else if (wParam == kSessionOfferTimerId) {
@@ -9220,6 +9385,7 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             }
             g_stackStrips.erase(id);
             g_stackManager.RemoveStack(id);
+            g_stackSlots.erase(id);
             MarkStacksDirty();
             return 0;
         }
@@ -9690,6 +9856,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
 
     OnForegroundChanged(GetForegroundWindow());
     RestoreSavedStacks();
+    SetTimer(g_messageWindow, kStackVacancyTimerId, kStackVacancyScanMs, nullptr);
     // The offer to reopen last time's apps comes a few seconds in; recording
     // starts after it. Switched off, recording never starts and the saved
     // list is left as it was.
