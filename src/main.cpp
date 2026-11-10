@@ -2054,9 +2054,8 @@ void AppendAltTabRows(MonitorRowsResult& result, const std::vector<HWND>& window
         }
         const auto active = stack->ActiveWindow();
         const bool activeListed = active.has_value() && std::find(members.begin(), members.end(), *active) != members.end();
-        static const HICON stackIcon = static_cast<HICON>(LoadImageW(
-            GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_POLISH_STACK), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
-            GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR | LR_SHARED));
+        // The list is drawn in the app theme, so the outline follows that.
+        const HICON stackIcon = polish::StackStripWindow::StackIcon(polish::IsDarkModeEnabled(), true);
         polish::AltTabListRow header{activeListed ? *active : members.front(),
                                      std::format(L"{} ({})", stack->Name(), stack->MemberCount()), stackIcon,
                                      minimized};
@@ -9165,6 +9164,15 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             // live.
             if (lParam != 0 && lstrcmpiW(reinterpret_cast<LPCWSTR>(lParam), L"ImmersiveColorSet") == 0) {
                 UpdateActiveWindowHalo(GetForegroundWindow());
+                // The stacks' taskbar icons are outlined for the taskbar's theme.
+                for (auto& [id, strip] : g_stackStrips) {
+                    strip->UpdateTaskbarIcon();
+                }
+                // So are Polish's own tray icon and taskbar button.
+                if (g_trayIcon) {
+                    g_trayIcon->RefreshIcon();
+                }
+                UpdatePolishButtonPlacement();
             }
             // Taskbar alignment (and position, size) changes announce
             // themselves as "TraySettings"; the button follows Start.

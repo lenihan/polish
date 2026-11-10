@@ -34,7 +34,7 @@ function New-RoundedPath([single]$x, [single]$y, [single]$w, [single]$h, [single
     return $path
 }
 
-function Draw-StackIcon([int]$S) {
+function Draw-StackIcon([int]$S, [System.Drawing.Color]$Outline) {
     $bmp = New-Object System.Drawing.Bitmap $S, $S, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
@@ -73,7 +73,15 @@ function Draw-StackIcon([int]$S) {
 
         # A hairline edge in the card's own bar colour keeps the layers apart
         # where they overlap -- affordable only once there are pixels for it.
-        if ($S -ge 32) {
+        if ($true) {
+            # The white outline the Polish icon has: 1 px at small sizes,
+            # growing with the icon, inset by half its width so the whole
+            # stroke lands inside the card. It also separates the overlapping
+            # cards.
+            $lw = [Math]::Max(1, [Math]::Round($S / 32.0))
+            $ring = New-RoundedPath ($x + $lw / 2) ($y + $lw / 2) ($cardW - $lw) ($cardH - $lw) ([Math]::Max(1.5, $r - $lw / 2))
+            $g.DrawPath((New-Object System.Drawing.Pen $Outline, $lw), $ring)
+        } else {
             $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(200,
                 ([System.Drawing.ColorTranslator]::FromHtml($layer.bar)).R,
                 ([System.Drawing.ColorTranslator]::FromHtml($layer.bar)).G,
@@ -110,21 +118,31 @@ function Write-Ico([byte[][]]$pngs, [int[]]$sizes, [string]$path) {
 }
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
-$pngs = @(); $images = @{}
-foreach ($s in $Sizes) {
-    $bmp = Draw-StackIcon $s
-    $images[$s] = $bmp
-    $pngs += , (Get-PngBytes $bmp)
+# Two icons: white outline for a dark taskbar (stack.ico), near-black for a
+# light one (stack-light.ico). The app picks one at run time.
+$White = [System.Drawing.Color]::White
+$Dark = [System.Drawing.ColorTranslator]::FromHtml('#202020')
+$sets = @{}
+foreach ($variant in @(@{ name = 'stack.ico'; c = $White }, @{ name = 'stack-light.ico'; c = $Dark })) {
+    $pngs = @(); $images = @{}
+    foreach ($s in $Sizes) {
+        $bmp = Draw-StackIcon $s $variant.c
+        $images[$s] = $bmp
+        $pngs += , (Get-PngBytes $bmp)
+    }
+    $icoPath = Join-Path $Repo ('resources\' + $variant.name)
+    Write-Ico $pngs $Sizes $icoPath
+    $sets[$variant.name] = $images
+    Write-Host "Wrote $icoPath"
 }
-$icoPath = Join-Path $Repo 'resources\stack.ico'
-Write-Ico $pngs $Sizes $icoPath
 
 # Preview: light and dark taskbar-coloured grounds, 16/24/32/48 and a 4x of 32.
 $sheet = New-Object System.Drawing.Bitmap 520, 160
 $sg = [System.Drawing.Graphics]::FromImage($sheet)
 $sg.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::NearestNeighbor
 $sg.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::Half
-foreach ($ground in @(@{ x = 0; c = '#F3F3F3' }, @{ x = 260; c = '#202020' })) {
+foreach ($ground in @(@{ x = 0; c = '#F3F3F3'; set = 'stack-light.ico' }, @{ x = 260; c = '#202020'; set = 'stack.ico' })) {
+    $images = $sets[$ground.set]
     $sg.FillRectangle((New-Object System.Drawing.SolidBrush ([System.Drawing.ColorTranslator]::FromHtml($ground.c))), $ground.x, 0, 260, 160)
     $px = $ground.x + 10
     foreach ($s in 16, 24, 32, 48) { $sg.DrawImage($images[$s], $px, 20, $s, $s); $px += $s + 8 }
@@ -133,4 +151,4 @@ foreach ($ground in @(@{ x = 0; c = '#F3F3F3' }, @{ x = 260; c = '#202020' })) {
 }
 $sg.Dispose()
 $sheet.Save((Join-Path $OutDir 'stack-preview.png'), [System.Drawing.Imaging.ImageFormat]::Png)
-Write-Host "Wrote $icoPath and stack-preview.png"
+Write-Host "Wrote stack-preview.png"

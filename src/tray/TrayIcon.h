@@ -46,6 +46,10 @@ public:
     // for RegisterWindowMessageW(L"TaskbarCreated") and call this then.
     void HandleTaskbarRecreated();
 
+    // Swaps in the icon outlined for the taskbar's current theme (white on
+    // dark, near-black on light). Call when the theme changes.
+    void RefreshIcon();
+
     // Shows a short notification from the tray icon (a toast on Windows
     // 11) -- for telling the user why something they asked for did not
     // happen, when the request came from a hotkey and there is no menu

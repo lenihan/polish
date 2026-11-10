@@ -13,3 +13,9 @@ IDI_POLISH_TRAY ICON "polish.ico"
 
 // A stack's taskbar button; drawn by tools/make-stack-icon.ps1.
 IDI_POLISH_STACK ICON "stack.ico"
+
+// The same, outlined dark for a light taskbar.
+IDI_POLISH_STACK_LIGHT ICON "stack-light.ico"
+
+// The same, outlined dark for a light taskbar.
+IDI_POLISH_TRAY_LIGHT ICON "polish-light.ico"

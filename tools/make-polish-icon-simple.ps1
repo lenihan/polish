@@ -56,7 +56,7 @@ function New-Sparkle([single]$cx, [single]$cy, [single]$r) {
     return , $pts
 }
 
-function Draw-Icon([int]$S, [string]$V) {
+function Draw-Icon([int]$S, [string]$V, [string]$Theme = 'dark') {
     $bmp = New-Object System.Drawing.Bitmap $S, $S, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
@@ -73,7 +73,7 @@ function Draw-Icon([int]$S, [string]$V) {
     # the bar, which carry it on light. Neither is a stripe at 16 px.
     $small = $S -le 32
     $barH = if ($small) { [Math]::Max(3, [Math]::Round($S * 0.25)) } else { [Math]::Max(3, [Math]::Round($S * 0.2)) }
-    $outline = '#FFFFFF'
+    $outline = if ($Theme -eq 'dark') { '#FFFFFF' } else { '#202020' }
 
     $path = New-RoundedPath $x $y $w $h $r
     $rect = New-Object System.Drawing.RectangleF $x, $y, $w, $h
@@ -82,7 +82,7 @@ function Draw-Icon([int]$S, [string]$V) {
     $fill = New-Object System.Drawing.Drawing2D.LinearGradientBrush $rect, (Html $top), (Html $bottom), 90.0
     $g.FillPath($fill, $path)
     $g.SetClip($path)
-    $barColor = if ($small) { '#FFFFFF' } else { '#074596' }
+    $barColor = if ($Theme -eq 'dark') { '#FFFFFF' } else { '#074596' }
     $g.FillRectangle((New-Object System.Drawing.SolidBrush (Html $barColor)), $x, $y, $w, $barH)
 
     if ($V -eq 'D' -and $S -ge 24) {
@@ -117,13 +117,13 @@ function Draw-Icon([int]$S, [string]$V) {
         $g.FillPolygon((New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(245, 255, 255, 255))), $star)
     }
 
-    if ($small) {
-        # The outline, drawn last and unclipped, inset half a pixel so the
-        # full pixel lands inside the card.
-        $g.ResetClip()
-        $ringPath = New-RoundedPath ($x + 0.5) ($y + 0.5) ($w - 1) ($h - 1) ([Math]::Max(1.5, $r - 0.5))
-        $g.DrawPath((New-Object System.Drawing.Pen (Html $outline), 1), $ringPath)
-    }
+    # The outline, every size: white with a white title bar for a dark taskbar,
+    # near-black with a dark bar for a light one. Drawn last and unclipped,
+    # inset half its width so the whole stroke lands inside the card.
+    $lw = [Math]::Max(1, [Math]::Round($S / 32.0))
+    $g.ResetClip()
+    $ringPath = New-RoundedPath ($x + $lw / 2) ($y + $lw / 2) ($w - $lw) ($h - $lw) ([Math]::Max(1.5, $r - $lw / 2))
+    $g.DrawPath((New-Object System.Drawing.Pen (Html $outline), $lw), $ringPath)
 
     $g.Dispose()
     return $bmp
@@ -156,19 +156,22 @@ function Write-Ico([byte[][]]$pngs, [int[]]$sizes, [string]$path) {
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 $images = @{}
 foreach ($v in $Variants) {
-    $pngs = @()
-    foreach ($s in $Sizes) {
-        $bmp = Draw-Icon $s $v
-        $images["$v$s"] = $bmp
-        $pngs += , (Get-PngBytes $bmp)
+    foreach ($theme in 'dark', 'light') {
+        $pngs = @()
+        foreach ($s in $Sizes) {
+            $bmp = Draw-Icon $s $v $theme
+            if ($theme -eq 'dark') { $images["$v$s"] = $bmp }
+            $pngs += , (Get-PngBytes $bmp)
+        }
+        $suffix = if ($theme -eq 'dark') { '' } else { '-light' }
+        Write-Ico $pngs $Sizes (Join-Path $OutDir "polish-simple-$v$suffix.ico")
     }
-    Write-Ico $pngs $Sizes (Join-Path $OutDir "polish-simple-$v.ico")
 }
 
 # Contact sheet: the current Polish icon and the stack icon for reference,
 # then each candidate, on light and dark taskbar grounds at 16/24/32/48, plus
 # a 4x of the 32 px image.
-function Get-IconBitmap([string]$path, [int]$s) { (New-Object System.Drawing.Icon $path, $s, $s).ToBitmap() }
+function Get-IconBitmap([string]$path, [int]$s) { try { (New-Object System.Drawing.Icon $path, $s, $s).ToBitmap() } catch { New-Object System.Drawing.Bitmap $s, $s } }
 $rows = @('Current', 'Stack') + $Variants
 $cell = 150
 $sheet = New-Object System.Drawing.Bitmap (2 * 520 + 20), ($rows.Count * $cell + 10)
@@ -213,5 +216,7 @@ Write-Host "Wrote candidates and $sheetPath"
 if ($Install) {
     $dest = Join-Path $Repo 'resources\polish.ico'
     Copy-Item (Join-Path $OutDir "polish-simple-$Install.ico") $dest -Force
-    Write-Host "Installed variant $Install as $dest"
+    $destLight = Join-Path $Repo 'resources\polish-light.ico'
+    Copy-Item (Join-Path $OutDir "polish-simple-$Install-light.ico") $destLight -Force
+    Write-Host "Installed variant $Install as $dest and $destLight"
 }

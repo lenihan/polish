@@ -6,6 +6,7 @@
 
 #include <shellapi.h>
 
+#include "hook/TaskbarVisuals.h"
 #include "resource.h"
 #include "util/DarkMode.h"
 
@@ -48,7 +49,7 @@ void TrayIcon::AddIcon() {
     // the *large* size, which the shell then shrinks to fit the tray, throwing
     // away the 16 px image the icon file carries for exactly this.
     const UINT dpi = GetDpiForSystem();
-    data.hIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(IDI_POLISH_TRAY), IMAGE_ICON,
+    data.hIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(TaskbarIsDark() ? IDI_POLISH_TRAY : IDI_POLISH_TRAY_LIGHT), IMAGE_ICON,
                                                GetSystemMetricsForDpi(SM_CXSMICON, dpi),
                                                GetSystemMetricsForDpi(SM_CYSMICON, dpi), LR_DEFAULTCOLOR));
     // szTip holds 128 wchar_t including the terminator, and the shell
@@ -69,6 +70,23 @@ void TrayIcon::AddIcon() {
         data.uVersion = NOTIFYICON_VERSION_4;
         Shell_NotifyIconW(NIM_SETVERSION, &data);
     }
+}
+
+void TrayIcon::RefreshIcon() {
+    if (!iconAdded_) {
+        return;
+    }
+    NOTIFYICONDATAW data{};
+    data.cbSize = sizeof(data);
+    data.hWnd = messageWindow_;
+    data.uID = kIconId;
+    data.uFlags = NIF_ICON;
+    const UINT dpi = GetDpiForSystem();
+    data.hIcon = static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr),
+                                               MAKEINTRESOURCEW(TaskbarIsDark() ? IDI_POLISH_TRAY : IDI_POLISH_TRAY_LIGHT),
+                                               IMAGE_ICON, GetSystemMetricsForDpi(SM_CXSMICON, dpi),
+                                               GetSystemMetricsForDpi(SM_CYSMICON, dpi), LR_DEFAULTCOLOR));
+    Shell_NotifyIconW(NIM_MODIFY, &data);
 }
 
 void TrayIcon::ShowNotification(const std::wstring& title, const std::wstring& text) {

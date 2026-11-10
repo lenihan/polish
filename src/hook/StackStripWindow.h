@@ -75,6 +75,12 @@ public:
     HWND TaskbarHandle() const { return taskbarWindow_; }
     // The AppUserModelID that gives this stack its own taskbar button.
     const std::wstring& TaskbarAppId() const { return taskbarAppId_; }
+
+    // The stack icon outlined to suit a dark or a light background: white or
+    // near-black. `smallIcon` picks the small-icon metric over the large one.
+    static HICON StackIcon(bool darkBackground, bool smallIcon);
+    // Re-picks the taskbar button's icon for the taskbar's current theme.
+    void UpdateTaskbarIcon();
     // Keeps the taskbar button in step with the stack: minimized exactly when
     // every member is. A button that looks "up" is one the shell has nothing
     // to restore, so clicking it did nothing.

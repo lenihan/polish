@@ -15,6 +15,7 @@
 #include "resource.h"
 #include "util/DarkMode.h"
 #include "util/Logging.h"
+#include "hook/TaskbarVisuals.h"
 #include "util/UiFont.h"
 
 namespace polish {
@@ -96,20 +97,7 @@ StackStripWindow::StackStripWindow(HINSTANCE instance) : instance_(instance) {
     taskbarWindow_ = CreateWindowExW(WS_EX_APPWINDOW, kTaskbarClassName, L"Stack", WS_POPUP, -32000, -32000, 1, 1,
                                       nullptr, nullptr, instance, this);
     if (taskbarWindow_ != nullptr) {
-        // The stack's own icon, not Polish's: it is what stands for the stack
-        // in the taskbar. Each size loaded at its own metric, so neither is a
-        // rescale of the other.
-        const auto loadStackIcon = [&](int metricX, int metricY) {
-            return static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(IDI_POLISH_STACK), IMAGE_ICON,
-                                                 GetSystemMetrics(metricX), GetSystemMetrics(metricY),
-                                                 LR_DEFAULTCOLOR | LR_SHARED));
-        };
-        if (HICON bigIcon = loadStackIcon(SM_CXICON, SM_CYICON)) {
-            SendMessageW(taskbarWindow_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(bigIcon));
-        }
-        if (HICON smallIcon = loadStackIcon(SM_CXSMICON, SM_CYSMICON)) {
-            SendMessageW(taskbarWindow_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon));
-        }
+        UpdateTaskbarIcon();
         // An AppUserModelID of its own, so the shell gives this stack its own
         // button rather than grouping every stack (and Polish) under one.
         taskbarAppId_ = std::format(L"Polish.Stack.{:X}", reinterpret_cast<uintptr_t>(this));
@@ -204,6 +192,31 @@ void StackStripWindow::SetFocused(bool focused) {
     focused_ = focused;
     if (window_ != nullptr) {
         InvalidateRect(window_, nullptr, FALSE);
+    }
+}
+
+HICON StackStripWindow::StackIcon(bool darkBackground, bool smallIcon) {
+    // Each size loaded at its own metric, so neither is a rescale of the
+    // other. LR_SHARED: the system caches and owns these.
+    const int id = darkBackground ? IDI_POLISH_STACK : IDI_POLISH_STACK_LIGHT;
+    return static_cast<HICON>(LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(id), IMAGE_ICON,
+                                         GetSystemMetrics(smallIcon ? SM_CXSMICON : SM_CXICON),
+                                         GetSystemMetrics(smallIcon ? SM_CYSMICON : SM_CYICON),
+                                         LR_DEFAULTCOLOR | LR_SHARED));
+}
+
+void StackStripWindow::UpdateTaskbarIcon() {
+    if (taskbarWindow_ == nullptr) {
+        return;
+    }
+    // The stack's own icon, not Polish's: it is what stands for the stack in
+    // the taskbar, outlined to suit the taskbar's theme.
+    const bool dark = TaskbarIsDark();
+    if (HICON bigIcon = StackIcon(dark, false)) {
+        SendMessageW(taskbarWindow_, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(bigIcon));
+    }
+    if (HICON smallIcon = StackIcon(dark, true)) {
+        SendMessageW(taskbarWindow_, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(smallIcon));
     }
 }
 

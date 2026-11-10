@@ -196,7 +196,7 @@ void PolishTaskbarButton::Render() {
         // and in a little, the way the native buttons do.
         const int iconSize = MulDiv(kIconDip, static_cast<int>(dpi), 96) - (state == 2 ? 2 : 0);
         HICON icon = nullptr;
-        if (SUCCEEDED(LoadIconWithScaleDown(instance_, MAKEINTRESOURCEW(IDI_POLISH_TRAY), iconSize, iconSize, &icon)) &&
+        if (SUCCEEDED(LoadIconWithScaleDown(instance_, MAKEINTRESOURCEW(dark ? IDI_POLISH_TRAY : IDI_POLISH_TRAY_LIGHT), iconSize, iconSize, &icon)) &&
             icon != nullptr) {
             Gdiplus::Bitmap glyph(icon);
             graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
