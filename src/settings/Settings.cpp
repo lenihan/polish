@@ -2,6 +2,8 @@
 
 #include <string>
 
+#include "settings/PackagedStartup.h"
+
 namespace polish {
 
 namespace {
@@ -129,6 +131,9 @@ void SaveSettings(const Settings& settings) {
 }
 
 bool IsStartAtLoginEnabled() {
+    if (IsPackaged()) {
+        return IsPackagedStartupEnabled();
+    }
     HKEY key;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, KEY_READ, &key) != ERROR_SUCCESS) {
         return false;
@@ -144,6 +149,10 @@ bool IsStartAtLoginEnabled() {
 }
 
 void SetStartAtLoginEnabled(bool enabled) {
+    if (IsPackaged()) {
+        SetPackagedStartupEnabled(enabled);
+        return;
+    }
     HKEY key;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKeyPath, 0, nullptr, 0, KEY_WRITE, nullptr, &key, nullptr) !=
         ERROR_SUCCESS) {

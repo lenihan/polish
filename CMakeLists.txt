@@ -73,6 +73,7 @@ add_library(polish_core STATIC
     src/hook/TaskbarShield.cpp
     src/hook/TaskbarHook.cpp
     src/settings/Settings.cpp
+    src/settings/PackagedStartup.cpp
     src/settings/StackStore.cpp
     src/settings/SessionStore.cpp
     src/hook/RestoreAppsDialog.cpp
@@ -116,6 +117,7 @@ target_link_libraries(polish_core PUBLIC
     oleacc    # MSAA, for the text caret the bullseye aims at
     uuid
     version
+    WindowsApp  # WinRT: the packaged build's startup task
 )
 
 if(MSVC)
