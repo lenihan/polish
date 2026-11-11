@@ -21,6 +21,8 @@ constexpr int kOkId = 3002;
 constexpr int kCancelId = 3003;
 constexpr int kSelectAllId = 3004;
 constexpr int kSelectNoneId = 3005;
+constexpr UINT_PTR kRefreshTimerId = 1;
+constexpr UINT kRefreshMs = 1000;
 
 // Logical (96 DPI) layout constants.
 constexpr int kWindowWidth = 580;
@@ -117,6 +119,13 @@ LRESULT RestoreAppsDialog::HandleMessage(HWND hwnd, UINT message, WPARAM wParam,
             }
             return 0;
 
+        case WM_TIMER:
+            if (wParam == kRefreshTimerId) {
+                DropOpenedApps();
+                return 0;
+            }
+            return DefWindowProcW(hwnd, message, wParam, lParam);
+
         case WM_CLOSE:
             result_.reset();
             done_ = true;
@@ -208,6 +217,32 @@ void RestoreAppsDialog::SetCheckedAll(bool checked) {
     }
 }
 
+// Takes off the list the apps that have been opened since it was filled: asking
+// to reopen something already open would just start a second copy. What the
+// user has ticked or unticked on the rest is left alone.
+void RestoreAppsDialog::DropOpenedApps() {
+    if (!stillMissing_ || apps_.empty()) {
+        return;
+    }
+    const std::vector<bool> missing = stillMissing_(apps_);
+    if (missing.size() != apps_.size()) {
+        return;
+    }
+    SendMessageW(list_, WM_SETREDRAW, FALSE, 0);
+    for (size_t i = apps_.size(); i-- > 0;) {
+        if (!missing[i]) {
+            ListView_DeleteItem(list_, static_cast<int>(i));
+            apps_.erase(apps_.begin() + static_cast<std::ptrdiff_t>(i));
+        }
+    }
+    SendMessageW(list_, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(list_, nullptr, TRUE);
+    if (apps_.empty()) {
+        result_.reset();  // nothing left to open
+        done_ = true;
+    }
+}
+
 void RestoreAppsDialog::LayoutControls() {
     if (list_ == nullptr || window_ == nullptr) {
         return;
@@ -254,8 +289,10 @@ void RestoreAppsDialog::Commit() {
     done_ = true;
 }
 
-std::optional<std::vector<SavedApp>> RestoreAppsDialog::ShowModal(const std::vector<SavedApp>& apps) {
+std::optional<std::vector<SavedApp>> RestoreAppsDialog::ShowModal(const std::vector<SavedApp>& apps,
+                                                                       MissingCheck stillMissing) {
     apps_ = apps;
+    stillMissing_ = std::move(stillMissing);
 
     const UINT dpi = GetDpiForSystem();
     const int width = Scale(kWindowWidth, dpi);
@@ -295,6 +332,7 @@ std::optional<std::vector<SavedApp>> RestoreAppsDialog::ShowModal(const std::vec
 
     done_ = false;
     result_.reset();
+    SetTimer(window_, kRefreshTimerId, kRefreshMs, nullptr);
     const HWND stops[] = {list_, selectAll_, selectNone_, okButton_, cancelButton_};
     MSG msg;
     while (!done_) {
@@ -323,6 +361,7 @@ std::optional<std::vector<SavedApp>> RestoreAppsDialog::ShowModal(const std::vec
         DispatchMessageW(&msg);
     }
 
+    KillTimer(window_, kRefreshTimerId);
     DestroyWindow(window_);
     window_ = nullptr;
     for (HFONT* font : {&font_, &headingFont_}) {

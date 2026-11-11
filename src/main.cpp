@@ -8343,24 +8343,38 @@ void SaveSessionNow() {
     }
 }
 
-void OfferSessionRestore() {
-    KillTimer(g_messageWindow, kSessionOfferTimerId);
-    const std::vector<polish::SavedApp> saved = polish::LoadSession();
+// For each saved window, whether it is not open now (true = still missing).
+std::vector<bool> MissingFlags(const std::vector<polish::SavedApp>& saved) {
     std::vector<polish::SavedApp> open = CaptureOpenApps();
-    std::vector<polish::SavedApp> missing;
+    std::vector<bool> missing;
+    missing.reserve(saved.size());
     for (const polish::SavedApp& app : saved) {
         const auto match = std::find_if(open.begin(), open.end(),
                                         [&](const polish::SavedApp& live) { return polish::SameApp(live, app); });
         if (match != open.end()) {
             open.erase(match);  // one live window answers for one saved one
+            missing.push_back(false);
         } else {
-            missing.push_back(app);
+            missing.push_back(true);
+        }
+    }
+    return missing;
+}
+
+void OfferSessionRestore() {
+    KillTimer(g_messageWindow, kSessionOfferTimerId);
+    const std::vector<polish::SavedApp> saved = polish::LoadSession();
+    const std::vector<bool> flags = MissingFlags(saved);
+    std::vector<polish::SavedApp> missing;
+    for (size_t i = 0; i < saved.size(); ++i) {
+        if (flags[i]) {
+            missing.push_back(saved[i]);
         }
     }
     polish::LogDebug(std::format(L"[Polish] Session: {} saved window(s), {} not open", saved.size(), missing.size()));
     if (!missing.empty()) {
         polish::RestoreAppsDialog dialog(GetModuleHandleW(nullptr));
-        if (const auto chosen = dialog.ShowModal(missing); chosen.has_value()) {
+        if (const auto chosen = dialog.ShowModal(missing, MissingFlags); chosen.has_value()) {
             for (const polish::SavedApp& app : *chosen) {
                 if (!polish::LaunchApp(app)) {
                     polish::LogDebug(std::format(L"[Polish] Session: could not start \"{}\"", app.exe));
