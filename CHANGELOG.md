@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.6.0 — Stacks outlive their windows, and an MSIX package
+
+**Download:** `Polish-0.6.0-x64.msi`, or the MSIX (see below)
+
+- **A stack keeps its place when its windows close.** Restart VS Code for an
+  update and the stack stays: each closed window leaves a vacant tab, and when
+  a matching window opens again it returns to the stack in the same position,
+  whatever order your apps reopen in. A stack can be empty. Vacancies are saved,
+  so this also works across a restart of Polish or Windows. A window matches
+  by program, window class and title; if the title has changed, program and
+  class alone still match for five minutes after it closed.
+- **Maximizing a window in a stack maximizes the whole stack** — title bar and
+  tabs included — instead of covering them.
+- **A stack's taskbar button** lists its windows on hover, and clicking it
+  while you are in the stack moves to the next tab instead of minimizing it.
+- **New icons.** White outline on a dark taskbar, dark outline on a light one,
+  at every size, for Polish and for stacks; they switch when the Windows theme
+  does. The Start menu shortcut now shows the Polish icon instead of the
+  generic one.
+- **MSIX package (test build).** `Polish-0.6.0.0-x64.msix` runs Polish as a
+  packaged desktop app. It is signed with a test certificate, so it needs
+  `Polish-test.cer` trusted first: from an elevated PowerShell,
+  `Import-Certificate Polish-test.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople`,
+  then open the .msix. "Start with Windows" uses the package's startup task
+  (Settings > Apps > Startup). This is groundwork for the Microsoft Store.
+
 ## 0.5.3 — Stacks in the taskbar and Alt+Tab, and a halo fix
 
 **Download:** `Polish-0.5.3-x64.msi`

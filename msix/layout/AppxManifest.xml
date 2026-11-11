@@ -11,7 +11,7 @@
   <!-- Name and Publisher are what the Store assigns (Partner Center > Product
        identity); the values here are for local testing and are replaced with
        those at submission. -->
-  <Identity Name="Polish.Dev" Publisher="CN=Polish Test" Version="0.5.3.0" ProcessorArchitecture="x64" />
+  <Identity Name="Polish.Dev" Publisher="CN=Polish Test" Version="0.6.0.0" ProcessorArchitecture="x64" />
 
   <Properties>
     <DisplayName>Polish</DisplayName>
