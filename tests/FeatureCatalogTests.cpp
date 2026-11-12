@@ -10,7 +10,7 @@ using namespace polish;
 TEST_CASE("FeatureCatalog: every Feature enumerator has exactly one entry") {
     // The last enumerator; adding one to the enum without a table row makes
     // the count below disagree.
-    constexpr int kFeatureCount = static_cast<int>(Feature::RestoreApps) + 1;
+    constexpr int kFeatureCount = static_cast<int>(Feature::MonitorSticky) + 1;
     CHECK(static_cast<int>(AllFeatures().size()) == kFeatureCount);
 
     std::set<int> seen;
@@ -57,6 +57,9 @@ TEST_CASE("FeatureCatalog: get and set go through the right member") {
         }
         SetFeatureEnabled(settings, info.id, true);
         CHECK(IsFeatureEnabled(settings, info.id));
+        // Back to its default, so the next round compares against defaults
+        // (a feature that is off by default must not be left on).
+        SetFeatureEnabled(settings, info.id, IsFeatureEnabled(Settings{}, info.id));
     }
 }
 

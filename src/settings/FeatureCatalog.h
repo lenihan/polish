@@ -28,6 +28,8 @@ enum class Feature {
     PolishButton,
     ScaledTopmost,
     RestoreApps,
+    AppSticky,
+    MonitorSticky,
 };
 
 struct FeatureInfo {
@@ -55,6 +57,7 @@ void SetFeatureEnabled(Settings& settings, Feature id, bool enabled);
 enum class Number {
     SnapDistance,
     ScalePercent,
+    EdgeResistance,
 };
 
 struct NumberInfo {

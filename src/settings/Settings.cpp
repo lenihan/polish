@@ -60,6 +60,12 @@ Settings LoadSettings() {
         settings.polishButtonEnabled =
             ReadDword(key, L"PolishButton", ReadDword(key, L"LayoutButtonEnabled", 0)) != 0;
         settings.restoreAppsEnabled = ReadDword(key, L"RestoreApps", 1) != 0;
+        settings.appStickyEnabled = ReadDword(key, L"AppSticky", 1) != 0;
+        settings.monitorStickyEnabled = ReadDword(key, L"MonitorSticky", 1) != 0;
+        settings.edgeResistanceDip = ReadDword(key, L"EdgeResistance", 120);
+        if (settings.edgeResistanceDip < 20 || settings.edgeResistanceDip > 600) {
+            settings.edgeResistanceDip = 120;
+        }
         settings.layoutHotkeyModifiers = ReadDword(key, L"LayoutHotkeyModifiers", MOD_CONTROL | MOD_ALT);
         settings.layoutHotkeyVirtualKey = ReadDword(key, L"LayoutHotkeyVirtualKey", 0x20);
         settings.scaleDownHotkeyModifiers = ReadDword(key, L"ScaleDownHotkeyModifiers", MOD_CONTROL | MOD_ALT);
@@ -117,6 +123,9 @@ void SaveSettings(const Settings& settings) {
     WriteDword(key, L"ScaledViewTopmost", settings.scaledViewTopmost ? 1 : 0);
     WriteDword(key, L"PolishButton", settings.polishButtonEnabled ? 1 : 0);
     WriteDword(key, L"RestoreApps", settings.restoreAppsEnabled ? 1 : 0);
+    WriteDword(key, L"AppSticky", settings.appStickyEnabled ? 1 : 0);
+    WriteDword(key, L"MonitorSticky", settings.monitorStickyEnabled ? 1 : 0);
+    WriteDword(key, L"EdgeResistance", settings.edgeResistanceDip);
     WriteDword(key, L"LayoutHotkeyModifiers", settings.layoutHotkeyModifiers);
     WriteDword(key, L"LayoutHotkeyVirtualKey", settings.layoutHotkeyVirtualKey);
     WriteDword(key, L"ScaleDownHotkeyModifiers", settings.scaleDownHotkeyModifiers);

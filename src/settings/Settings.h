@@ -92,6 +92,13 @@ struct Settings {
     // At start-up, offer to reopen the apps that were open last time (see
     // hook/RestoreAppsDialog.h). Registry value "RestoreApps".
     bool restoreAppsEnabled = true;
+    // Sticky edges (see hook/StickyEdgeHook.h): the active app's edges, and the
+    // edges between monitors and at the taskbar, hold the pointer until it is
+    // pushed on by edgeResistanceDip. Registry values "AppSticky",
+    // "MonitorSticky" and "EdgeResistance".
+    bool appStickyEnabled = true;
+    bool monitorStickyEnabled = true;
+    UINT edgeResistanceDip = 120;
     // Opens that same menu from the keyboard, over the window in front.
     // Ctrl+Alt+Space (0x20 is VK_SPACE), beside the other layout hotkeys.
     UINT layoutHotkeyModifiers = MOD_CONTROL | MOD_ALT;

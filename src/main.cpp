@@ -40,6 +40,7 @@
 #include "hook/MoveModeLayoutPreview.h"
 #include "hook/MoveModeZoneOverlay.h"
 #include "hook/TaskbarHook.h"
+#include "hook/StickyEdgeHook.h"
 #include "hook/TaskbarShield.h"
 #include "settings/FeatureCatalog.h"
 #include "settings/Settings.h"
@@ -566,6 +567,10 @@ constexpr UINT kStackMinimizeMessage = WM_APP + 21;
 // Defined with the rest of the taskbar code, far below, but needed by the
 // window-event handlers above it.
 void ForgetTaskbarWindow(HWND hwnd);
+// Sticky edges (see hook/StickyEdgeHook.h), defined with the hook's setup.
+// `recheck` re-decides whether the foreground window is one to hold the
+// pointer in at all; without it only its rect is refreshed.
+void UpdateStickyActiveApp(bool recheck);
 void MarkTaskbarDirty();
 bool IsTaskbarOwnedWindow(HWND hwnd);
 bool TaskbarPreviewInProgress();
@@ -1339,6 +1344,7 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
     switch (event) {
         case EVENT_SYSTEM_FOREGROUND:
             OnForegroundChanged(hwnd);
+            UpdateStickyActiveApp(/*recheck=*/true);
             break;
 
         case EVENT_SYSTEM_MOVESIZESTART:
@@ -1391,6 +1397,10 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
                 OnJoinDragMove(hwnd);
                 // A scaled window that resized itself: the view follows.
                 OnScaledWindowLocationChanged(hwnd);
+                // The app in front moved, resized, maximized or restored.
+                if (hwnd == GetForegroundWindow()) {
+                    UpdateStickyActiveApp(/*recheck=*/false);
+                }
             }
             if (idObject == OBJID_WINDOW && idChild == CHILDID_SELF && hwnd != g_stackMovingMember &&
                 g_stackManager.FindStackContaining(hwnd) != nullptr) {
@@ -1475,6 +1485,7 @@ void CALLBACK OnWinEvent(HWINEVENTHOOK /*hook*/, DWORD event, HWND hwnd, LONG id
             break;
 
         case EVENT_SYSTEM_MOVESIZEEND:
+            UpdateStickyActiveApp(/*recheck=*/false);
             if (hwnd == g_trackedWindow) {
                 g_inMoveSizeLoop = false;
                 KillTimer(g_messageWindow, kSettleTimerId);
@@ -3271,6 +3282,94 @@ void RefreshAltTabPanels() {
 std::unique_ptr<polish::AppResolver> g_appResolver;
 std::unique_ptr<polish::TaskbarShield> g_taskbarShield;
 std::unique_ptr<polish::TaskbarHook> g_taskbarHook;
+
+// ---------------------------------------------------------------------------
+// Sticky edges: the hook holds the pointer at the active app's edges and at
+// the work area / monitor edges (see hook/StickyEdgeHook.h). Everything it
+// needs is pushed to it from here, because its callback may not query.
+// ---------------------------------------------------------------------------
+
+std::unique_ptr<polish::StickyEdgeHook> g_stickyHook;
+// The foreground window as last judged worth holding the pointer in, or null.
+HWND g_stickyActiveWindow = nullptr;
+
+void ApplyStickySettings() {
+    if (g_stickyHook) {
+        g_stickyHook->SetEnabled(g_settings.appStickyEnabled, g_settings.monitorStickyEnabled);
+        g_stickyHook->SetResistanceDip(g_settings.edgeResistanceDip);
+    }
+}
+
+BOOL CALLBACK StickyMonitorProc(HMONITOR monitor, HDC, LPRECT, LPARAM lParam) {
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (GetMonitorInfoW(monitor, &info)) {
+        polish::StickyEdgeHook::Monitor entry;
+        entry.monitor = info.rcMonitor;
+        entry.work = info.rcWork;
+        UINT dpiX = USER_DEFAULT_SCREEN_DPI;
+        UINT dpiY = USER_DEFAULT_SCREEN_DPI;
+        if (SUCCEEDED(GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY))) {
+            entry.dpi = dpiX;
+        }
+        reinterpret_cast<std::vector<polish::StickyEdgeHook::Monitor>*>(lParam)->push_back(entry);
+    }
+    return TRUE;
+}
+
+// Monitors and their work areas: at start-up, on a display change, and when
+// the work area changes (the taskbar moved, resized or set to auto-hide).
+void RefreshStickyMonitors() {
+    if (!g_stickyHook) {
+        return;
+    }
+    std::vector<polish::StickyEdgeHook::Monitor> monitors;
+    EnumDisplayMonitors(nullptr, nullptr, StickyMonitorProc, reinterpret_cast<LPARAM>(&monitors));
+    polish::LogDebug(std::format(L"[Sticky] {} monitor(s)", monitors.size()));
+    g_stickyHook->SetMonitors(std::move(monitors));
+}
+
+void UpdateStickyActiveApp(bool recheck) {
+    if (!g_stickyHook) {
+        return;
+    }
+    const HWND foreground = GetForegroundWindow();
+    if (recheck || foreground != g_stickyActiveWindow) {
+        // Only an ordinary app window: not the desktop, the taskbar or Polish's
+        // own windows. Decided on a foreground change rather than per move,
+        // because IsCandidateWindow asks the window for its title.
+        g_stickyActiveWindow = foreground != nullptr && !IsOwnProcessWindow(foreground) &&
+                                       !IsTaskbarOwnedWindow(foreground) && polish::IsCandidateWindow(foreground)
+                                   ? foreground
+                                   : nullptr;
+    }
+    const HWND hwnd = g_stickyActiveWindow;
+    // Maximized or minimized: the monitor's own edges are the app's edges.
+    if (hwnd == nullptr || !IsWindow(hwnd) || IsZoomed(hwnd) || IsIconic(hwnd)) {
+        g_stickyHook->SetActiveApp(std::nullopt);
+        return;
+    }
+    RECT rect{};
+    GetWindowRect(hwnd, &rect);
+    // Full screen (a video, a game, F11): likewise.
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &info) &&
+        rect.left <= info.rcMonitor.left && rect.top <= info.rcMonitor.top && rect.right >= info.rcMonitor.right &&
+        rect.bottom >= info.rcMonitor.bottom) {
+        g_stickyHook->SetActiveApp(std::nullopt);
+        return;
+    }
+    // A stack member's title bar and tabs are part of the app as far as the
+    // pointer is concerned.
+    if (const polish::StackState* stack = g_stackManager.FindStackContaining(hwnd)) {
+        if (const auto strip = g_stackStrips.find(stack->Id()); strip != g_stackStrips.end() && strip->second->IsShown()) {
+            const RECT stripRect = strip->second->ScreenRect();
+            UnionRect(&rect, &rect, &stripRect);
+        }
+    }
+    g_stickyHook->SetActiveApp(rect);
+}
 
 // The buttons as of the last completed read, and the windows each one
 // stands for -- parallel to g_taskbarButtons, and in MRU order. Parallel
@@ -8800,6 +8899,10 @@ void ApplyFeatureToggle(polish::Feature feature, bool enabled) {
         case polish::Feature::KeepClipboard:
         case polish::Feature::RestoreApps:
             break;  // read live where used
+        case polish::Feature::AppSticky:
+        case polish::Feature::MonitorSticky:
+            ApplyStickySettings();
+            break;
     }
 }
 
@@ -8867,6 +8970,7 @@ void ShowSettingsWindow() {
         callbacks.setNumber = [](polish::Number number, UINT value) {
             polish::SetNumber(g_settings, number, value);
             polish::SaveSettings(g_settings);
+            ApplyStickySettings();
             polish::LogDebug(std::format(L"[Polish] {} set to {}", polish::NumberFor(number).name,
                                           polish::GetNumber(g_settings, number)));
         };
@@ -9257,6 +9361,9 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
                 // Repeating, so deliberately not killed here -- see
                 // kTaskbarRefreshTimerId for why the taskbar needs a
                 // poll on top of the events that do fire.
+                if (g_stickyHook && g_stickyHook->EnsureInstalled()) {
+                    polish::LogDebug(L"[Sticky] hook was dropped by Windows; reinstalled");
+                }
                 if (g_taskbarHook && !g_taskbarHook->EnsureInstalled() && !g_taskbarHook->IsInstalled()) {
                     polish::LogDebug(std::format(
                         L"[Polish] Taskbar: WARNING the mouse hook is not installed and could not be "
@@ -9312,6 +9419,16 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
         case polish::kTaskbarEmptyReadyMessage:
             OnTaskbarEmptyCheckReady(static_cast<uint64_t>(wParam));
             return 0;
+
+        case polish::StickyEdgeHook::kEventMessage: {
+            static constexpr const wchar_t* kKinds[] = {L"app", L"work area", L"monitor"};
+            const auto kind = static_cast<size_t>(lParam);
+            polish::LogDebug(std::format(
+                L"[Sticky] {} at the {} edge",
+                wParam == static_cast<WPARAM>(polish::StickyEdgeHook::Event::Held) ? L"held" : L"pushed through",
+                kind < std::size(kKinds) ? kKinds[kind] : L"?"));
+            return 0;
+        }
 
         case polish::TaskbarHook::kHoverMessage:
         case polish::TaskbarHook::kCycleClickMessage:
@@ -9403,9 +9520,15 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             // A monitor appearing or disappearing takes its secondary
             // taskbar with it, and re-lays out the primary one.
             RequestTaskbarRefresh();
+            RefreshStickyMonitors();
+            UpdateStickyActiveApp(/*recheck=*/false);
             return 0;
 
         case WM_SETTINGCHANGE:
+            // The taskbar moved, resized, or went to or from auto-hide.
+            if (wParam == SPI_SETWORKAREA) {
+                RefreshStickyMonitors();
+            }
             // ImmersiveColorSet -- the user flipped Settings > Personalization
             // > Colors' light/dark toggle. This message window is a real,
             // if invisible, WS_OVERLAPPEDWINDOW top-level window (see
@@ -9889,6 +10012,15 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR commandLine, int) {
         // hook hit-tests nothing and swallows nothing, and this way the
         // tray toggle never has to install a low-level hook at a moment
         // when failure would be silent.
+        // Installed for the app's lifetime, like the taskbar hook below; the
+        // two switches only change what it holds the pointer at.
+        g_stickyHook = std::make_unique<polish::StickyEdgeHook>(g_messageWindow);
+        if (!g_stickyHook->IsInstalled()) {
+            polish::LogDebug(std::format(L"[Sticky] WARNING mouse hook not installed, GetLastError={}", GetLastError()));
+        }
+        ApplyStickySettings();
+        RefreshStickyMonitors();
+        UpdateStickyActiveApp(/*recheck=*/true);
         g_taskbarHook = std::make_unique<polish::TaskbarHook>(
             g_messageWindow, OnTaskbarHover, OnTaskbarCycleClick, [](bool on) {
                 // Synchronous, from inside the hook callback -- see

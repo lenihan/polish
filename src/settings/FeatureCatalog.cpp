@@ -49,6 +49,14 @@ const std::vector<FeatureInfo>& AllFeatures() {
          L"When Polish starts, lists the windows that were open last time and are not open now, each with a "
          L"checkbox. OK opens the ticked ones, Cancel opens none.",
          &Settings::restoreAppsEnabled},
+        {Feature::AppSticky, L"Sticky app edges",
+         L"The edges of the app in front hold the pointer, the way the top of the screen does, so its "
+         L"scrollbars and bottom buttons are easy to hit. Keep pushing to go past. Off while a mouse button is held.",
+         &Settings::appStickyEnabled},
+        {Feature::MonitorSticky, L"Sticky monitor edges",
+         L"The edge between two monitors, and the edge of the taskbar, hold the pointer, so a window dragged to "
+         L"the side of a screen stops there to snap. Keep pushing to go past.",
+         &Settings::monitorStickyEnabled},
     };
     return kFeatures;
 }
@@ -78,6 +86,8 @@ const std::vector<NumberInfo>& AllNumbers() {
         {Number::SnapDistance, L"Snap distance", L"pixels", 0, 60, &Settings::moveModeSnapThresholdPx},
         // 10..90 is what LoadSettings accepts; anything else it resets to 50.
         {Number::ScalePercent, L"Scaled window size", L"percent", 10, 90, &Settings::scaleDefaultPercent},
+        // How far to keep pushing past a sticky edge to cross it.
+        {Number::EdgeResistance, L"Edge resistance", L"pixels", 20, 600, &Settings::edgeResistanceDip},
     };
     return kNumbers;
 }

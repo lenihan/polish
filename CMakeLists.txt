@@ -33,6 +33,8 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_library(polish_core STATIC
     src/windowtracking/RectUtils.cpp
     src/windowtracking/MoveSnap.cpp
+    src/windowtracking/StickyEdges.cpp
+    src/hook/StickyEdgeHook.cpp
     src/windowtracking/ArrangeSelection.cpp
     src/windowtracking/ScaleGeometry.cpp
     src/windowtracking/ScaledWindowSet.cpp

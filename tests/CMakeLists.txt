@@ -10,6 +10,7 @@ add_executable(polish_tests
     TestMain.cpp
     RectUtilsTests.cpp
     MoveSnapTests.cpp
+    StickyEdgesTests.cpp
     ArrangeSelectionTests.cpp
     WindowLayoutTests.cpp
     ScaleGeometryTests.cpp
