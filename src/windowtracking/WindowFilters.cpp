@@ -6,6 +6,7 @@
 #include <iterator>
 
 #include "util/AppIdentity.h"
+#include "util/SafeWindowQuery.h"
 
 namespace polish {
 
@@ -59,7 +60,10 @@ bool IsCandidateWindowShape(HWND hwnd) {
     // stayed hidden behind whatever was in front" from the user's point
     // of view. A real, user-facing window always has some title text;
     // nothing legitimate is excluded by requiring one.
-    if (GetWindowTextLengthW(hwnd) == 0) {
+    // A window that does not answer (hung, or just busy) is not excluded:
+    // "no title" is only believed when it was actually said.
+    DWORD_PTR titleLength = 1;
+    if (polish::SafeSend(hwnd, WM_GETTEXTLENGTH, 0, 0, &titleLength) && titleLength == 0) {
         return false;
     }
     // A suspended/cloaked UWP window keeps WS_VISIBLE, WS_CAPTION, no

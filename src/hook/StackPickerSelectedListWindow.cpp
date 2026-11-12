@@ -9,6 +9,7 @@
 #include "util/DarkMode.h"
 #include "util/UiFont.h"
 #include "util/WindowIcon.h"
+#include "util/SafeWindowQuery.h"
 
 namespace polish {
 
@@ -59,7 +60,7 @@ bool IsTitleTruncated(HWND window, const std::wstring& title, int availableWidth
 
 std::wstring GetWindowTitle(HWND hwnd) {
     wchar_t buffer[256];
-    const int length = GetWindowTextW(hwnd, buffer, static_cast<int>(std::size(buffer)));
+    const int length = polish::SafeGetWindowText(hwnd, buffer, static_cast<int>(std::size(buffer)));
     return std::wstring(buffer, static_cast<size_t>(std::max(0, length)));
 }
 

@@ -14,6 +14,7 @@
 #include "util/Logging.h"
 #include "util/UiFont.h"
 #include "windowtracking/WindowFilters.h"
+#include "util/SafeWindowQuery.h"
 
 namespace polish {
 
@@ -752,7 +753,7 @@ void StackPickerWindow::LogCandidates(const wchar_t* reason) const {
     std::wstring dump;
     for (HWND hwnd : allCandidates_) {
         wchar_t title[128] = L"";
-        GetWindowTextW(hwnd, title, static_cast<int>(std::size(title)));
+        polish::SafeGetWindowText(hwnd, title, static_cast<int>(std::size(title)));
         wchar_t className[128] = L"";
         GetClassNameW(hwnd, className, static_cast<int>(std::size(className)));
         if (!dump.empty()) {

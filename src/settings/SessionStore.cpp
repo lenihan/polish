@@ -7,6 +7,7 @@
 
 #include "settings/TextCodec.h"
 #include "util/AppIdentity.h"
+#include "util/SafeWindowQuery.h"
 
 namespace polish {
 
@@ -76,7 +77,7 @@ std::optional<SavedApp> DescribeApp(HWND hwnd) {
         app.exe = *image;  // only for its icon in the list
     }
     wchar_t title[256] = L"";
-    GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+    polish::SafeGetWindowText(hwnd, title, ARRAYSIZE(title));
     app.title = title;
     wchar_t windowClass[256] = L"";
     GetClassNameW(hwnd, windowClass, ARRAYSIZE(windowClass));

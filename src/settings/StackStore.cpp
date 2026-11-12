@@ -5,6 +5,7 @@
 #include <format>
 
 #include "settings/TextCodec.h"
+#include "util/SafeWindowQuery.h"
 
 namespace polish {
 
@@ -40,7 +41,7 @@ std::wstring ClassOf(HWND hwnd) {
 
 std::wstring TitleOf(HWND hwnd) {
     wchar_t title[256] = L"";
-    GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+    polish::SafeGetWindowText(hwnd, title, ARRAYSIZE(title));
     return title;
 }
 

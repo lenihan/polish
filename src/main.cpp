@@ -73,6 +73,7 @@
 #include "windowtracking/TaskbarReadPolicy.h"
 #include "windowtracking/WindowFilters.h"
 #include "windowtracking/WindowZOrder.h"
+#include "util/SafeWindowQuery.h"
 
 namespace {
 
@@ -1281,7 +1282,7 @@ void OnForegroundChanged(HWND newForeground) {
     // restore-sync candidate.
     const bool candidate = polish::IsCandidateWindow(newForeground);
     wchar_t title[256] = L"";
-    GetWindowTextW(newForeground, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+    polish::SafeGetWindowText(newForeground, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
     polish::LogDebug(std::format(L"[Polish] foreground changed: hwnd={} title=\"{}\" candidate={}",
                                   reinterpret_cast<void*>(newForeground), title, candidate));
 
@@ -1630,7 +1631,7 @@ std::vector<HMONITOR> GetMonitorsCurrentFirst() {
 // function, windowtracking/StackCollapse.h, is still there and tested.)
 std::wstring AltTabRowTitle(HWND hwnd) {
     wchar_t title[256] = L"";
-    GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+    polish::SafeGetWindowText(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
     return std::wstring(title) + ScaledTitleSuffix(hwnd);
 }
 BOOL CALLBACK EnumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
@@ -2207,7 +2208,7 @@ void ApplyAltTabDimming() {
             std::wstring rowDump;
             for (HWND hwnd : g_altTabCandidates) {
                 wchar_t title[128] = L"";
-                GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+                polish::SafeGetWindowText(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
                 if (!rowDump.empty()) {
                     rowDump += L" | ";
                 }
@@ -2605,7 +2606,7 @@ void OnAltTabCycle(bool backward, polish::AltTabHook::SessionKind kind) {
         std::wstring candidateDump;
         for (HWND hwnd : g_altTabCandidates) {
             wchar_t title[128] = L"";
-            GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+            polish::SafeGetWindowText(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
             wchar_t className[128] = L"";
             GetClassNameW(hwnd, className, static_cast<int>(sizeof(className) / sizeof(className[0])));
             if (!candidateDump.empty()) {
@@ -4120,7 +4121,7 @@ void OpenTaskbarPanel(int index) {
         polish::AltTabListRow row;
         row.hwnd = hwnd;
         wchar_t title[256] = L"";
-        GetWindowTextW(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+        polish::SafeGetWindowText(hwnd, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
         row.title = std::wstring(title) + ScaledTitleSuffix(hwnd);
         row.icon = TaskbarRowIcon(hwnd);
         // The panel draws minimized rows muted, below a divider -- the
@@ -6070,7 +6071,7 @@ void ApplyArrangedRect(HWND hwnd, const RECT& target) {
                           target.bottom + inset.bottom};
     {
         wchar_t title[80] = L"";
-        GetWindowTextW(hwnd, title, 80);
+        polish::SafeGetWindowText(hwnd, title, 80);
         RECT before{};
         GetWindowRect(hwnd, &before);
         polish::LogDebug(std::format(
@@ -6142,7 +6143,7 @@ const wchar_t* ArrangeKindName(polish::ArrangeKind kind) {
 // A window's title, shortened for use in a message.
 std::wstring ShortWindowTitle(HWND hwnd, size_t maxChars) {
     wchar_t title[256] = L"";
-    GetWindowTextW(hwnd, title, ARRAYSIZE(title));
+    polish::SafeGetWindowText(hwnd, title, ARRAYSIZE(title));
     std::wstring text = title;
     if (text.empty()) {
         return L"A window";
@@ -6728,7 +6729,7 @@ bool ScaleWindow(HWND hwnd, double scale, std::optional<POINT> topLeft = std::nu
     UpdateActiveWindowHalo(hwnd);
     UpdateScaleWatchdog();
     wchar_t title[128] = L"";
-    GetWindowTextW(hwnd, title, 128);
+    polish::SafeGetWindowText(hwnd, title, 128);
     polish::LogDebug(std::format(L"[Polish] Scale: \"{}\" -> {}%", title, static_cast<int>(scale * 100.0 + 0.5)));
     return true;
 }
@@ -7141,7 +7142,7 @@ std::vector<polish::StripTab> CollectStripTabs(const polish::StackState& stack) 
     for (const polish::StackMember& member : stack.Members()) {
         polish::StripTab tab;
         wchar_t title[256] = L"";
-        GetWindowTextW(member.window, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+        polish::SafeGetWindowText(member.window, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
         tab.title = title;
         tab.icon = polish::GetWindowIconHandle(member.window);
         tab.minimized = IsIconic(member.window) != FALSE;
@@ -7210,7 +7211,7 @@ void ReconcileSlots(polish::StackId id) {
         slot.desc.hwnd = static_cast<unsigned long long>(reinterpret_cast<UINT_PTR>(member.window));
         if (IsWindow(member.window)) {
             wchar_t title[256] = L"";
-            GetWindowTextW(member.window, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
+            polish::SafeGetWindowText(member.window, title, static_cast<int>(sizeof(title) / sizeof(title[0])));
             slot.desc.title = title;  // kept current, so it is known when the window goes
         }
         result.push_back(std::move(slot));
@@ -7440,7 +7441,7 @@ void BringStackForward(polish::StackId id) {
         if (IsWindow(member.window) && IsIconic(member.window)) {
             const BOOL ok = ShowWindow(member.window, SW_RESTORE);
             wchar_t title[80] = {};
-            GetWindowTextW(member.window, title, 80);
+            polish::SafeGetWindowText(member.window, title, 80);
             polish::LogDebug(std::format(L"[Polish] Stack: restore member 0x{:X} \"{}\" prevVisible={} iconicAfter={}",
                                          reinterpret_cast<uintptr_t>(member.window), title, ok != 0,
                                          IsIconic(member.window) != 0));
