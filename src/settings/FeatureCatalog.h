@@ -30,6 +30,7 @@ enum class Feature {
     RestoreApps,
     AppSticky,
     MonitorSticky,
+    ResizeSticky,
 };
 
 struct FeatureInfo {

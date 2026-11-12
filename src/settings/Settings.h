@@ -95,9 +95,11 @@ struct Settings {
     // Sticky edges (see hook/StickyEdgeHook.h): the active app's edges, and the
     // edges between monitors and at the taskbar, hold the pointer until it is
     // pushed on by edgeResistanceDip. Registry values "AppSticky",
-    // "MonitorSticky" and "EdgeResistance".
+    // "MonitorSticky" and "EdgeResistance". Resize handles (splitters, window
+    // borders) in the active app hold it briefly too: "ResizeSticky".
     bool appStickyEnabled = true;
     bool monitorStickyEnabled = true;
+    bool resizeStickyEnabled = true;
     UINT edgeResistanceDip = 120;
     // Opens that same menu from the keyboard, over the window in front.
     // Ctrl+Alt+Space (0x20 is VK_SPACE), beside the other layout hotkeys.

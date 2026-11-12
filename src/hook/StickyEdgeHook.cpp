@@ -18,6 +18,10 @@ constexpr ULONGLONG kPresumedDeadMs = 5000;
 constexpr ULONG_PTR kPenTouchSignatureMask = 0xFFFFFF00;
 constexpr ULONG_PTR kPenTouchSignature = 0xFF515700;
 
+// The resize border Windows gives a window, with room to spare (it is about
+// 8px at 96 DPI, invisible outside the visible frame).
+constexpr int kOwnBorderBandDip = 12;
+
 bool Inside(const RECT& r, POINT p) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; }
 
 bool AnyButtonDown() {
@@ -28,6 +32,10 @@ bool AnyButtonDown() {
 }  // namespace
 
 StickyEdgeHook::StickyEdgeHook(HWND messageWindow) : messageWindow_(messageWindow) {
+    sizeWe_ = LoadCursorW(nullptr, IDC_SIZEWE);
+    sizeNs_ = LoadCursorW(nullptr, IDC_SIZENS);
+    sizeNwse_ = LoadCursorW(nullptr, IDC_SIZENWSE);
+    sizeNesw_ = LoadCursorW(nullptr, IDC_SIZENESW);
     g_instance = this;
     Install();
 }
@@ -85,8 +93,62 @@ LRESULT CALLBACK StickyEdgeHook::LowLevelMouseProc(int code, WPARAM wParam, LPAR
     return CallNextHookEx(nullptr, code, wParam, lParam);
 }
 
+ResizeAxis StickyEdgeHook::CurrentResizeAxis() const {
+    CURSORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!GetCursorInfo(&info) || (info.flags & CURSOR_SHOWING) == 0 || info.hCursor == nullptr) {
+        return ResizeAxis::None;
+    }
+    if (info.hCursor == sizeWe_) {
+        return ResizeAxis::Horizontal;
+    }
+    if (info.hCursor == sizeNs_) {
+        return ResizeAxis::Vertical;
+    }
+    if (info.hCursor == sizeNwse_ || info.hCursor == sizeNesw_) {
+        return ResizeAxis::Both;
+    }
+    return ResizeAxis::None;
+}
+
+bool StickyEdgeHook::HandleResizeHold(POINT from, POINT to, int threshold, UINT dpi) {
+    bool inside = activeWindow_.has_value() && Inside(*activeWindow_, from);
+    // The app's own border: app sticky already holds the pointer on it, so
+    // holding here too would take two pushes to leave.
+    if (inside && appEnabled_ && activeApp_.has_value() && Inside(*activeApp_, from)) {
+        const int band = MulDiv(kOwnBorderBandDip, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
+        const RECT& r = *activeApp_;
+        if (from.x < r.left + band || from.x >= r.right - band || from.y < r.top + band ||
+            from.y >= r.bottom - band) {
+            inside = false;
+        }
+    }
+    const ResizeAxis axis = inside ? CurrentResizeAxis() : ResizeAxis::None;
+    if (axis != ResizeAxis::None && AnyButtonDown()) {
+        // Dragging the handle, or something across it: free, and no hold
+        // when the button comes up on the same handle.
+        resizeState_ = ResizeHoldState{false, true};
+        return false;
+    }
+    const bool wasActive = resizeState_.active;
+    const StickyResult result = StepResizeHold(axis, from, to, threshold, resizeState_, GetTickCount64());
+    if (result.hold) {
+        if (!wasActive) {
+            PostMessageW(messageWindow_, kEventMessage, static_cast<WPARAM>(Event::Held),
+                         static_cast<LPARAM>(EdgeKind::ResizeHandle));
+        }
+        SetCursorPos(result.clamped.x, result.clamped.y);
+        return true;
+    }
+    if (wasActive && resizeState_.spent) {
+        PostMessageW(messageWindow_, kEventMessage, static_cast<WPARAM>(Event::BrokeThrough),
+                     static_cast<LPARAM>(EdgeKind::ResizeHandle));
+    }
+    return false;
+}
+
 bool StickyEdgeHook::HandleMove(POINT to) {
-    if (!appEnabled_ && !monitorEnabled_) {
+    if (!appEnabled_ && !monitorEnabled_ && !resizeEnabled_) {
         return false;
     }
     // The cursor has not moved yet when the hook sees the move, so this is
@@ -101,6 +163,12 @@ bool StickyEdgeHook::HandleMove(POINT to) {
             monitor = &m;
             break;
         }
+    }
+    const UINT dpi = monitor != nullptr ? monitor->dpi : USER_DEFAULT_SCREEN_DPI;
+    const int threshold = MulDiv(static_cast<int>(resistanceDip_), static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
+
+    if (resizeEnabled_ && HandleResizeHold(from, to, threshold, dpi)) {
+        return true;
     }
 
     std::array<Barrier, 3> barriers{};
@@ -121,8 +189,6 @@ bool StickyEdgeHook::HandleMove(POINT to) {
         return false;
     }
 
-    const UINT dpi = monitor != nullptr ? monitor->dpi : USER_DEFAULT_SCREEN_DPI;
-    const int threshold = MulDiv(static_cast<int>(resistanceDip_), static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
     const int barrierBefore = state_.barrier;
     const bool wasPushing = state_.pushed > 0;
     const StickyResult result =

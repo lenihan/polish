@@ -66,4 +66,38 @@ StickyResult StepSticky(std::span<const Barrier> barriers, POINT from, POINT to,
     return StickyResult{false, to};
 }
 
+StickyResult StepResizeHold(ResizeAxis axis, POINT from, POINT to, int threshold, ResizeHoldState& state,
+                            ULONGLONG now) {
+    if (axis == ResizeAxis::None) {
+        state = ResizeHoldState{};  // off the handle: the next one may hold again
+        return StickyResult{false, to};
+    }
+    if (state.spent) {
+        return StickyResult{false, to};
+    }
+    if (!state.active) {
+        state = ResizeHoldState{true, false, from, now, 0};
+    }
+    if (now - state.since >= kResizeHoldMs) {
+        state = ResizeHoldState{false, true};
+        return StickyResult{false, to};
+    }
+    POINT held = to;
+    if (axis == ResizeAxis::Horizontal || axis == ResizeAxis::Both) {
+        held.x = state.anchor.x;
+    }
+    if (axis == ResizeAxis::Vertical || axis == ResizeAxis::Both) {
+        held.y = state.anchor.y;
+    }
+    if (held.x == to.x && held.y == to.y) {
+        return StickyResult{false, to};  // sliding along the handle
+    }
+    state.pushed += Overshoot(to, held);
+    if (state.pushed >= threshold) {
+        state = ResizeHoldState{false, true};
+        return StickyResult{false, to};
+    }
+    return StickyResult{true, held};
+}
+
 }  // namespace polish

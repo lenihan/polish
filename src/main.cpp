@@ -3295,7 +3295,8 @@ HWND g_stickyActiveWindow = nullptr;
 
 void ApplyStickySettings() {
     if (g_stickyHook) {
-        g_stickyHook->SetEnabled(g_settings.appStickyEnabled, g_settings.monitorStickyEnabled);
+        g_stickyHook->SetEnabled(g_settings.appStickyEnabled, g_settings.monitorStickyEnabled,
+                                 g_settings.resizeStickyEnabled);
         g_stickyHook->SetResistanceDip(g_settings.edgeResistanceDip);
     }
 }
@@ -3344,13 +3345,20 @@ void UpdateStickyActiveApp(bool recheck) {
                                    : nullptr;
     }
     const HWND hwnd = g_stickyActiveWindow;
-    // Maximized or minimized: the monitor's own edges are the app's edges.
-    if (hwnd == nullptr || !IsWindow(hwnd) || IsZoomed(hwnd) || IsIconic(hwnd)) {
+    if (hwnd == nullptr || !IsWindow(hwnd) || IsIconic(hwnd)) {
         g_stickyHook->SetActiveApp(std::nullopt);
+        g_stickyHook->SetActiveWindow(std::nullopt);
         return;
     }
     RECT rect{};
     GetWindowRect(hwnd, &rect);
+    // Resize handles hold inside the app whatever its size.
+    g_stickyHook->SetActiveWindow(rect);
+    // Maximized: the monitor's own edges are the app's edges.
+    if (IsZoomed(hwnd)) {
+        g_stickyHook->SetActiveApp(std::nullopt);
+        return;
+    }
     // Full screen (a video, a game, F11): likewise.
     MONITORINFO info{};
     info.cbSize = sizeof(info);
@@ -6554,6 +6562,9 @@ constexpr UINT kMenuIdScaleRestoreAll = 18;
 constexpr UINT kMenuIdLayoutButton = 19;
 constexpr UINT kMenuIdSettings = 20;
 constexpr UINT kMenuIdRestartAdmin = 21;
+constexpr UINT kMenuIdAppSticky = 22;
+constexpr UINT kMenuIdMonitorSticky = 23;
+constexpr UINT kMenuIdResizeSticky = 24;
 
 constexpr int kLayoutHotkeyId = 8;
 
@@ -8821,6 +8832,12 @@ void PopulateTrayMenu(HMENU menu) {
                 L"&Taskbar hover list and click-to-cycle");
     AppendMenuW(menu, MF_STRING | (g_settings.moveModeEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdMoveMode,
                 L"Hold &Win and left-drag to move/resize any window");
+    AppendMenuW(menu, MF_STRING | (g_settings.appStickyEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdAppSticky,
+                L"Sticky a&pp edges");
+    AppendMenuW(menu, MF_STRING | (g_settings.monitorStickyEnabled ? MF_CHECKED : MF_UNCHECKED),
+                kMenuIdMonitorSticky, L"Sticky &monitor edges");
+    AppendMenuW(menu, MF_STRING | (g_settings.resizeStickyEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdResizeSticky,
+                L"Sticky resi&ze handles");
     AppendMenuW(menu, MF_STRING | (g_settings.scaleEnabled ? MF_CHECKED : MF_UNCHECKED), kMenuIdScaleEnabled,
                 L"&Scaled windows (live thumbnail)");
     AppendMenuW(menu, MF_STRING | (g_settings.polishButtonEnabled ? MF_CHECKED : MF_UNCHECKED),
@@ -8901,6 +8918,7 @@ void ApplyFeatureToggle(polish::Feature feature, bool enabled) {
             break;  // read live where used
         case polish::Feature::AppSticky:
         case polish::Feature::MonitorSticky:
+        case polish::Feature::ResizeSticky:
             ApplyStickySettings();
             break;
     }
@@ -9021,6 +9039,15 @@ void HandleTrayCommand(UINT commandId) {
         }
         case kMenuIdTaskbar:
             ToggleFeature(polish::Feature::Taskbar);
+            break;
+        case kMenuIdAppSticky:
+            ToggleFeature(polish::Feature::AppSticky);
+            break;
+        case kMenuIdMonitorSticky:
+            ToggleFeature(polish::Feature::MonitorSticky);
+            break;
+        case kMenuIdResizeSticky:
+            ToggleFeature(polish::Feature::ResizeSticky);
             break;
         case kMenuIdStartAtLogin: {
             const bool newValue = !polish::IsStartAtLoginEnabled();
@@ -9421,10 +9448,11 @@ LRESULT CALLBACK MessageWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
             return 0;
 
         case polish::StickyEdgeHook::kEventMessage: {
-            static constexpr const wchar_t* kKinds[] = {L"app", L"work area", L"monitor"};
+            static constexpr const wchar_t* kKinds[] = {L"app edge", L"work area edge", L"monitor edge",
+                                                        L"resize handle"};
             const auto kind = static_cast<size_t>(lParam);
             polish::LogDebug(std::format(
-                L"[Sticky] {} at the {} edge",
+                L"[Sticky] {} at the {}",
                 wParam == static_cast<WPARAM>(polish::StickyEdgeHook::Event::Held) ? L"held" : L"pushed through",
                 kind < std::size(kKinds) ? kKinds[kind] : L"?"));
             return 0;

@@ -62,6 +62,7 @@ Settings LoadSettings() {
         settings.restoreAppsEnabled = ReadDword(key, L"RestoreApps", 1) != 0;
         settings.appStickyEnabled = ReadDword(key, L"AppSticky", 1) != 0;
         settings.monitorStickyEnabled = ReadDword(key, L"MonitorSticky", 1) != 0;
+        settings.resizeStickyEnabled = ReadDword(key, L"ResizeSticky", 1) != 0;
         settings.edgeResistanceDip = ReadDword(key, L"EdgeResistance", 120);
         if (settings.edgeResistanceDip < 20 || settings.edgeResistanceDip > 600) {
             settings.edgeResistanceDip = 120;
@@ -125,6 +126,7 @@ void SaveSettings(const Settings& settings) {
     WriteDword(key, L"RestoreApps", settings.restoreAppsEnabled ? 1 : 0);
     WriteDword(key, L"AppSticky", settings.appStickyEnabled ? 1 : 0);
     WriteDword(key, L"MonitorSticky", settings.monitorStickyEnabled ? 1 : 0);
+    WriteDword(key, L"ResizeSticky", settings.resizeStickyEnabled ? 1 : 0);
     WriteDword(key, L"EdgeResistance", settings.edgeResistanceDip);
     WriteDword(key, L"LayoutHotkeyModifiers", settings.layoutHotkeyModifiers);
     WriteDword(key, L"LayoutHotkeyVirtualKey", settings.layoutHotkeyVirtualKey);

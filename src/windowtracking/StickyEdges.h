@@ -49,4 +49,34 @@ inline constexpr int kStickySameEdgePx = 8;
 StickyResult StepSticky(std::span<const Barrier> barriers, POINT from, POINT to, int threshold, StickyState& state,
                         ULONGLONG now);
 
+// Sticky resize handles: when the pointer turns into a resize arrow (a
+// splitter such as VS Code's side panel, or a window's border), it is held
+// there for a moment so it is easy to grab. Which arrow says which way the
+// handle drags, and only that axis is held -- along a vertical splitter the
+// pointer still slides freely.
+enum class ResizeAxis {
+    None,
+    Horizontal,  // <-> : x is held
+    Vertical,    // up/down : y is held
+    Both,        // a diagonal corner arrow
+};
+
+struct ResizeHoldState {
+    bool active = false;  // holding at `anchor` now
+    bool spent = false;   // this handle already let go; not again until the arrow goes away
+    POINT anchor{};
+    ULONGLONG since = 0;
+    int pushed = 0;
+};
+
+// How long a resize handle holds the pointer, at most.
+inline constexpr ULONGLONG kResizeHoldMs = 1000;
+
+// One pointer move. `axis` is the arrow showing now (None for any other
+// cursor). Lets go after kResizeHoldMs or once pushed `threshold` pixels off
+// the handle, whichever comes first, and then stays let go until the arrow
+// changes back.
+StickyResult StepResizeHold(ResizeAxis axis, POINT from, POINT to, int threshold, ResizeHoldState& state,
+                            ULONGLONG now);
+
 }  // namespace polish

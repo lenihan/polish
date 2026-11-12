@@ -57,6 +57,11 @@ const std::vector<FeatureInfo>& AllFeatures() {
          L"The edge between two monitors, and the edge of the taskbar, hold the pointer, so a window dragged to "
          L"the side of a screen stops there to snap. Keep pushing to go past.",
          &Settings::monitorStickyEnabled},
+        {Feature::ResizeSticky, L"Sticky resize handles",
+         L"In the app in front, when the pointer turns into a resize arrow (a splitter such as a side panel's "
+         L"edge, or a window border), it holds there for a second so the handle is easy to grab. Keep pushing "
+         L"to go past.",
+         &Settings::resizeStickyEnabled},
     };
     return kFeatures;
 }

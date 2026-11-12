@@ -105,6 +105,52 @@ TEST_CASE("StickyEdges: edges that coincide take one push, not two") {
     CHECK_FALSE(StepSticky(barriers, {500, 1039}, {500, 1069}, kThreshold, state, 30).hold);  // 120
 }
 
+TEST_CASE("ResizeHold: a <-> arrow holds x and lets y slide") {
+    ResizeHoldState state;
+    const StickyResult r = StepResizeHold(ResizeAxis::Horizontal, {300, 400}, {310, 420}, kThreshold, state, 0);
+    CHECK(r.hold);
+    CHECK(r.clamped.x == 300);
+    CHECK(r.clamped.y == 420);
+    // Straight along the splitter is not held at all.
+    CHECK_FALSE(StepResizeHold(ResizeAxis::Horizontal, {300, 420}, {300, 450}, kThreshold, state, 10).hold);
+}
+
+TEST_CASE("ResizeHold: an up/down arrow holds y, a corner arrow holds both") {
+    ResizeHoldState vertical;
+    const StickyResult v = StepResizeHold(ResizeAxis::Vertical, {300, 400}, {310, 420}, kThreshold, vertical, 0);
+    CHECK(v.hold);
+    CHECK(v.clamped.x == 310);
+    CHECK(v.clamped.y == 400);
+    ResizeHoldState corner;
+    const StickyResult c = StepResizeHold(ResizeAxis::Both, {300, 400}, {310, 420}, kThreshold, corner, 0);
+    CHECK(c.hold);
+    CHECK(c.clamped.x == 300);
+    CHECK(c.clamped.y == 400);
+}
+
+TEST_CASE("ResizeHold: lets go after a second, and not again on the same handle") {
+    ResizeHoldState state;
+    CHECK(StepResizeHold(ResizeAxis::Horizontal, {300, 400}, {305, 400}, kThreshold, state, 0).hold);
+    CHECK(StepResizeHold(ResizeAxis::Horizontal, {300, 400}, {305, 400}, kThreshold, state, 900).hold);
+    CHECK_FALSE(StepResizeHold(ResizeAxis::Horizontal, {300, 400}, {305, 400}, kThreshold, state, 1000).hold);
+    CHECK_FALSE(StepResizeHold(ResizeAxis::Horizontal, {300, 400}, {305, 400}, kThreshold, state, 1010).hold);
+    // Off the handle (normal arrow), then onto one again: holds again.
+    CHECK_FALSE(StepResizeHold(ResizeAxis::None, {305, 400}, {340, 400}, kThreshold, state, 1100).hold);
+    CHECK(StepResizeHold(ResizeAxis::Horizontal, {500, 400}, {505, 400}, kThreshold, state, 1200).hold);
+}
+
+TEST_CASE("ResizeHold: pushing off lets go before the second is up") {
+    ResizeHoldState state;
+    int holds = 0;
+    for (ULONGLONG now = 0; now < 500; now += 10) {
+        if (!StepResizeHold(ResizeAxis::Horizontal, {300, 400}, {330, 400}, kThreshold, state, now).hold) {
+            break;
+        }
+        ++holds;
+    }
+    CHECK(holds == 3);  // 30, 60, 90 held; 120 >= 100 passes
+}
+
 TEST_CASE("StickyEdges: the seam between monitors holds, with different heights") {
     // Left monitor 1920x1080 (no taskbar here), right monitor 2560x1440 starting at x=1920.
     const std::vector<Barrier> barriers{{kMonitor}};
