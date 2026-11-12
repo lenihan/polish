@@ -14,6 +14,7 @@
 #include <map>
 #include <set>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -8312,6 +8313,7 @@ std::vector<polish::SavedApp> g_lastSavedSession;
 
 struct SessionEnumContext {
     std::vector<polish::SavedApp>* apps;
+    std::vector<HWND>* windows;  // parallel to apps
 };
 
 BOOL CALLBACK SessionEnumProc(HWND hwnd, LPARAM lParam) {
@@ -8320,16 +8322,86 @@ BOOL CALLBACK SessionEnumProc(HWND hwnd, LPARAM lParam) {
         return TRUE;
     }
     if (auto app = polish::DescribeApp(hwnd); app.has_value()) {
-        reinterpret_cast<SessionEnumContext*>(lParam)->apps->push_back(std::move(*app));
+        auto* context = reinterpret_cast<SessionEnumContext*>(lParam);
+        context->apps->push_back(std::move(*app));
+        context->windows->push_back(hwnd);
     }
     return TRUE;
 }
 
+// The open windows, in the order their taskbar buttons are in (left to right),
+// because that order is what relaunching them one after another recreates: a
+// new button is added at the end, so apps started in this order land in this
+// order. (Pinned apps keep their own slots whatever the order.) Windows of one
+// app keep their relative order, and windows with no button -- or all of them,
+// when the taskbar has not been read -- stay in the order they were found.
 std::vector<polish::SavedApp> CaptureOpenApps() {
     std::vector<polish::SavedApp> apps;
-    SessionEnumContext context{&apps};
+    std::vector<HWND> windows;
+    SessionEnumContext context{&apps, &windows};
     EnumWindows(SessionEnumProc, reinterpret_cast<LPARAM>(&context));
-    return apps;
+    if (g_appResolver == nullptr || !g_appResolver->IsAvailable() || g_taskbarButtons.empty()) {
+        return apps;
+    }
+    std::vector<size_t> rank(apps.size(), g_taskbarButtons.size());
+    for (size_t i = 0; i < windows.size(); ++i) {
+        const std::optional<std::wstring> appId = g_appResolver->AppIdForWindow(windows[i]);
+        if (!appId.has_value()) {
+            continue;
+        }
+        for (size_t b = 0; b < g_taskbarButtons.size(); ++b) {
+            if (g_taskbarButtons[b].appId == *appId) {
+                rank[i] = b;
+                break;
+            }
+        }
+    }
+    std::vector<size_t> order(apps.size());
+    std::iota(order.begin(), order.end(), size_t{0});
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return rank[a] < rank[b]; });
+    std::vector<polish::SavedApp> sorted;
+    sorted.reserve(apps.size());
+    for (size_t i : order) {
+        sorted.push_back(std::move(apps[i]));
+    }
+    return sorted;
+}
+
+// How many open windows are this app.
+size_t CountOpenWindowsOf(const polish::SavedApp& app) {
+    size_t count = 0;
+    for (const polish::SavedApp& live : CaptureOpenApps()) {
+        if (polish::SameApp(live, app)) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// Starts the app and waits (keeping Polish's own messages flowing) until one
+// more of its windows is open, or the time is up. One at a time, because the
+// taskbar adds a button as each window appears, and started all at once the
+// buttons would land in whatever order the apps happened to finish loading.
+constexpr ULONGLONG kRelaunchWaitMs = 6000;
+
+bool RelaunchAndWait(const polish::SavedApp& app) {
+    const size_t before = CountOpenWindowsOf(app);
+    if (!polish::LaunchApp(app)) {
+        return false;
+    }
+    const ULONGLONG deadline = GetTickCount64() + kRelaunchWaitMs;
+    while (GetTickCount64() < deadline) {
+        MsgWaitForMultipleObjects(0, nullptr, FALSE, 250, QS_ALLINPUT);
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (CountOpenWindowsOf(app) > before) {
+            break;
+        }
+    }
+    return true;
 }
 
 void SaveSessionNow() {
@@ -8377,7 +8449,7 @@ void OfferSessionRestore() {
         polish::RestoreAppsDialog dialog(GetModuleHandleW(nullptr));
         if (const auto chosen = dialog.ShowModal(missing, MissingFlags); chosen.has_value()) {
             for (const polish::SavedApp& app : *chosen) {
-                if (!polish::LaunchApp(app)) {
+                if (!RelaunchAndWait(app)) {
                     polish::LogDebug(std::format(L"[Polish] Session: could not start \"{}\"", app.exe));
                 }
             }
