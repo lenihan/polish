@@ -179,6 +179,7 @@ private:
     HINSTANCE instance_;
     HWND window_ = nullptr;
     HWND taskbarWindow_ = nullptr;
+    HMONITOR taskbarMonitor_ = nullptr;  // where the stand-in was last put
     std::wstring taskbarAppId_;
     std::wstring title_;
     bool minimizeHovered_ = false;

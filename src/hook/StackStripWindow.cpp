@@ -94,9 +94,15 @@ StackStripWindow::StackStripWindow(HINSTANCE instance) : instance_(instance) {
     // offscreen, and never painted. (Not WS_EX_NOACTIVATE: the shell
     // activates it when its button is clicked, and that activation is exactly
     // the signal the owner acts on.)
-    taskbarWindow_ = CreateWindowExW(WS_EX_APPWINDOW, kTaskbarClassName, L"Stack", WS_POPUP, -32000, -32000, 1, 1,
-                                      nullptr, nullptr, instance, this);
+    //
+    // Fully transparent and click-through rather than just far away, so that
+    // it can be moved onto the stack's own monitor (see PlaceAt) and still be
+    // invisible there. Offscreen it belongs to no monitor, and the taskbar
+    // puts its button on the primary one.
+    taskbarWindow_ = CreateWindowExW(WS_EX_APPWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT, kTaskbarClassName, L"Stack",
+                                      WS_POPUP, -32000, -32000, 1, 1, nullptr, nullptr, instance, this);
     if (taskbarWindow_ != nullptr) {
+        SetLayeredWindowAttributes(taskbarWindow_, 0, 0, LWA_ALPHA);
         UpdateTaskbarIcon();
         // An AppUserModelID of its own, so the shell gives this stack its own
         // button rather than grouping every stack (and Polish) under one.
@@ -307,6 +313,31 @@ void StackStripWindow::PlaceAt(const RECT& screenRect) {
     SetWindowPos(window_, topmost_ ? HWND_TOPMOST : nullptr, screenRect.left, screenRect.top,
                  screenRect.right - screenRect.left, screenRect.bottom - screenRect.top,
                  SWP_NOACTIVATE | (topmost_ ? 0 : SWP_NOZORDER));
+
+    // The stack's button belongs on the taskbar of the monitor the stack is
+    // on: with "show taskbar buttons on the taskbar where the window is open",
+    // the shell goes by where the stand-in sits.
+    if (taskbarWindow_ != nullptr) {
+        const HMONITOR monitor = MonitorFromRect(&screenRect, MONITOR_DEFAULTTONEAREST);
+        if (monitor != nullptr && monitor != taskbarMonitor_) {
+            MONITORINFO info{};
+            info.cbSize = sizeof(info);
+            if (GetMonitorInfoW(monitor, &info)) {
+                const bool wasPlaced = taskbarMonitor_ != nullptr;
+                SetWindowPos(taskbarWindow_, nullptr, info.rcMonitor.left + 1, info.rcMonitor.top + 1, 1, 1,
+                             SWP_NOACTIVATE | SWP_NOZORDER);
+                if (wasPlaced && IsWindowVisible(taskbarWindow_) && !IsIconic(taskbarWindow_)) {
+                    // The shell does not always carry an existing button to
+                    // another taskbar when the window moves (a display change
+                    // that makes a different monitor primary left them behind).
+                    // Hiding and showing it again makes the shell place it anew.
+                    ShowWindow(taskbarWindow_, SW_HIDE);
+                    ShowWindow(taskbarWindow_, SW_SHOWNOACTIVATE);
+                }
+                taskbarMonitor_ = monitor;
+            }
+        }
+    }
 
     // Round the top corners to match the windows below (Windows 11 rounds its
     // own by about 8 DIP); the bottom stays square, flush against the member.
